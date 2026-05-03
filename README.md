@@ -1,4 +1,4 @@
-# Legal Kernel
+# Canon - A Legal Kernel
 
 A formally grounded, implementation-oriented constitutional kernel built in
 Lean 4. The Legal Kernel is a **proof-carrying state transition system** in
