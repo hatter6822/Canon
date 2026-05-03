@@ -50,6 +50,13 @@ lean_exe Tests where
 lean_exe canon where
   root := `Main
 
+/-- Shared utilities for the Phase 1 audit executables: the kernel-TCB
+    file list, the TCB allowlist path, and a safe file reader.  Kept
+    in its own `lean_lib` so both `tcb_audit` and `count_sorries` can
+    depend on it without re-declaring constants in lockstep. -/
+lean_lib ToolsCommon where
+  roots := #[`Tools.Common]
+
 /-- WU 1.11 (Phase 1) TCB-audit executable.  Enumerates the *direct
     imports* of the trusted-core source files (`Kernel.lean`,
     `RBMapLemmas.lean`) and compares each to the allowlist at

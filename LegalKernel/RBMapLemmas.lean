@@ -102,26 +102,6 @@ expression, manipulating the list, then folding back.  The helpers
 below are the only places where we touch `Std.TreeMap.foldl_eq_foldl_toList`
 and `Std.TreeMap.toList_insert_perm`. -/
 
-/-- Pulling the accumulator out of a `Nat`-summing `foldl`.  This is the
-    only commutativity-of-addition fact the §8.3 fold lemmas need. -/
-private theorem foldl_add_acc (l : List Nat) (acc : Nat) :
-    l.foldl (· + ·) acc = acc + l.foldl (· + ·) 0 := by
-  induction l generalizing acc with
-  | nil           => simp
-  | cons hd tl ih =>
-      simp only [List.foldl, Nat.zero_add]
-      rw [ih (acc + hd), ih hd]
-      omega
-
-/-- `List.foldl (· + ·) 0` on a `Nat`-list equals `List.sum`. -/
-private theorem foldl_add_zero_eq_sum (l : List Nat) :
-    l.foldl (· + ·) 0 = l.sum := by
-  induction l with
-  | nil           => rfl
-  | cons hd tl ih =>
-      simp only [List.foldl, List.sum_cons, Nat.zero_add]
-      rw [foldl_add_acc tl hd, ih]
-
 /-- `sumValues` factors through `toList`.  This is `foldl_eq_foldl_toList`
     specialised to the `Nat`-sum aggregator, with the unused key projection
     discarded. -/
@@ -129,11 +109,10 @@ theorem sumValues_eq_toList_sum (m : TreeMap κ Nat cmp) :
     sumValues m = (m.toList.map (·.snd)).foldl (· + ·) 0 := by
   unfold sumValues
   rw [TreeMap.foldl_eq_foldl_toList]
-  -- Now both sides fold over the same list, with the LHS folding the
-  -- `(k,v)` pair via `(fun a b => a + b.2)` and the RHS via `· + ·` on
-  -- the projected value list.  These compute equal by induction.
+  -- Both sides fold the same list; the LHS reads the value via `b.snd`,
+  -- the RHS via the projected value list.  Generalising the accumulator
+  -- makes the IH apply at every step.
   generalize m.toList = l
-  -- Generalise the accumulator so the IH applies at each step.
   suffices h : ∀ (acc : Nat),
       l.foldl (fun a b => a + b.snd) acc =
       (l.map (·.snd)).foldl (· + ·) acc by
@@ -149,10 +128,14 @@ theorem sumValues_eq_toList_sum (m : TreeMap κ Nat cmp) :
     the value column.  This is the canonical "sum-over-values" form
     that downstream conservation arguments rely on; because
     `m.toList` is uniquely determined by `m` (under `[TransCmp cmp]`),
-    the right-hand side is order-independent. -/
+    the right-hand side is order-independent.
+
+    Reduces to `Std.List.sum_eq_foldl_nat` (Lean core's
+    `Init.Data.List.Nat.Sum`) once the kernel-level fold has been
+    bridged to `List.foldl` via `foldl_eq_foldl_toList`. -/
 theorem sumValues_eq_values_sum (m : TreeMap κ Nat cmp) :
     sumValues m = (m.toList.map (·.snd)).sum := by
-  rw [sumValues_eq_toList_sum, foldl_add_zero_eq_sum]
+  rw [sumValues_eq_toList_sum, ← List.sum_eq_foldl_nat]
 
 /-! ## Fold-after-insert lemmas (§8.3 / WU 1.2 – 1.3)
 
@@ -180,29 +163,23 @@ theorem sumValues_insert_absent
     (m : TreeMap κ Nat cmp) (k : κ) (v : Nat) (h : ¬ k ∈ m) :
     sumValues (m.insert k v) = sumValues m + v := by
   rw [sumValues_eq_values_sum, sumValues_eq_values_sum]
-  -- Step 1: post-insert toList is a permutation of (k, v) :: filtered.
   have hperm :
       (m.insert k v).toList.Perm
         (⟨k, v⟩ :: m.toList.filter (fun x => decide ¬(k == x.fst) = true)) :=
     TreeMap.toList_insert_perm
-  -- Step 2: when k ∉ m, the filter is identity on m.toList because no entry
-  -- has key equal to k.
   have hfilter :
       m.toList.filter (fun x => decide ¬(k == x.fst) = true) = m.toList := by
     apply List.filter_eq_self.mpr
     intro p hp
-    -- Goal: decide ¬(k == p.fst) = true
     simp only [decide_eq_true_eq]
     intro hbeq
     apply h
     rcases p with ⟨pk, pv⟩
     have hk : k = pk := LawfulBEq.eq_of_beq hbeq
-    -- Need: k ∈ m, knowing (pk, pv) ∈ m.toList.
     rw [hk, TreeMap.mem_iff_isSome_getElem?,
         TreeMap.mem_toList_iff_getElem?_eq_some.mp hp]
     rfl
   rw [hfilter] at hperm
-  -- Step 3: lift to value-sum equality via Perm.map and Perm.sum_nat.
   have hperm_vals :
       ((m.insert k v).toList.map (·.snd)).Perm (v :: m.toList.map (·.snd)) := by
     have := hperm.map (·.snd)

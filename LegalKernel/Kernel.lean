@@ -302,7 +302,7 @@ reachable from itself with no transitions) and transitivity
     in content to `Reachable.base`; provided here under a more
     suggestive name for use in chains and for symmetry with the
     transitivity statement below. -/
-@[simp] theorem Reachable.refl (s : State) : Reachable s s :=
+theorem Reachable.refl (s : State) : Reachable s s :=
   Reachable.base
 
 /-- §4.9 / WU 1.7: reachability composes.  If `s'` is reachable from

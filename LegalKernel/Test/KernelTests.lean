@@ -159,12 +159,6 @@ def tests : List TestCase :=
     }
 
   -- Phase 1 / WU 1.7: multi-step reachability properties.
-  , { name := "Reachable.refl yields a depth-0 reachability witness"
-    , body := do
-        -- Term construction is the assertion.
-        let _proof : Reachable emptyState emptyState := Reachable.refl _
-        pure ()
-    }
   , { name := "Reachable.trans composes two reachability witnesses"
     , body := do
         let t := alwaysLegalCredit 3 4
@@ -176,6 +170,19 @@ def tests : List TestCase :=
         let h₁₂ : Reachable s₁ s₂ :=
           Reachable.step s₁ t Reachable.base trivial
         let _proof : Reachable emptyState s₂ := Reachable.trans h₀₁ h₁₂
+        pure ()
+    }
+  , { name := "Reachable.refl is a left identity for Reachable.trans"
+    , body := do
+        -- This exercises the WU 1.7 named theorem `Reachable.refl`
+        -- directly (rather than its definitional equality with
+        -- `Reachable.base`, which `Reachable.base holds for the
+        -- initial state` already covers).
+        let t := alwaysLegalCredit 5 6
+        let h₀₁ : Reachable emptyState (step_impl emptyState t) :=
+          Reachable.step emptyState t Reachable.base trivial
+        let _proof : Reachable emptyState (step_impl emptyState t) :=
+          Reachable.trans (Reachable.refl emptyState) h₀₁
         pure ()
     }
 

@@ -22,26 +22,17 @@ Implementation notes:
 * The allowlist file format is one import per line, with `#`-prefixed
   comments and blank lines ignored.
 
-* The tool also inspects `LegalKernel.lean` (the umbrella) but treats
-  internal cross-imports (e.g. `LegalKernel.Kernel`) as
-  always-allowlisted: they are part of the TCB by definition.
-
 * The audit is intentionally pessimistic: any `import` line that
   appears in a TCB source file but does not appear on the allowlist
   fails the audit, even if Lean would have accepted the import.
+
+* The kernel-TCB file list and the safe file reader live in
+  `Tools.Common` so they're shared with `Tools.CountSorries`.
 -/
 
-/-- Files that constitute the trusted computing base.  Each is parsed
-    for `import` lines; every imported module must be on the
-    `tcb_allowlist.txt` allowlist or be an internal `LegalKernel.*`
-    module. -/
-def tcbModules : List String :=
-  [ "LegalKernel/Kernel.lean"
-  , "LegalKernel/RBMapLemmas.lean"
-  ]
+import Tools.Common
 
-/-- The allowlist file (one import per line, `#` for comments). -/
-def allowlistPath : String := "tcb_allowlist.txt"
+open LegalKernel.Tools (tcbCoreFiles tcbAllowlistPath readFileSafe)
 
 /-- Convert a list of characters back into a `String`.  Uses
     `String.ofList`, the modern non-deprecated entry point.  All of
@@ -79,17 +70,10 @@ def parseImport (line : String) : Option String :=
   let importKeyword := "import ".toList
   if cs.take importKeyword.length = importKeyword then
     let rest := trimChars (cs.drop importKeyword.length)
-    -- Stop at any character that isn't part of a Lean module name.
-    let mod := rest.takeWhile (fun c => c.isAlphanum || c = '.' || c = '_')
-    if mod.isEmpty then none else some (listToString mod)
+    let modChars := rest.takeWhile (fun c => c.isAlphanum || c = '.' || c = '_')
+    if modChars.isEmpty then none else some (listToString modChars)
   else
     none
-
-/-- Read a file; return `none` if it doesn't exist or can't be read. -/
-def readFileSafe (path : String) : IO (Option String) := do
-  match (← (IO.FS.readFile path).toBaseIO) with
-  | .error _ => pure none
-  | .ok s    => pure (some s)
 
 /-- Extract every `import X` line from a file's content.  Comments and
     blank lines are skipped. -/
@@ -102,15 +86,13 @@ def importsOf (content : String) : List String :=
 /-- Read the allowlist file into a `List String`.  Each non-blank,
     non-comment line is an allowed import. -/
 def readAllowlist : IO (List String) := do
-  match (← readFileSafe allowlistPath) with
+  match (← readFileSafe tcbAllowlistPath) with
   | none =>
-      throw <| IO.userError s!"tcb_audit: cannot read allowlist '{allowlistPath}'"
+      throw <| IO.userError s!"tcb_audit: cannot read allowlist '{tcbAllowlistPath}'"
   | some s =>
-      let lines := s.splitOn "\n"
-        |>.filterMap (fun line =>
-            let cleaned := cleanLine line
-            if cleaned.isEmpty then none else some cleaned)
-      pure lines
+      pure <| s.splitOn "\n" |>.filterMap (fun line =>
+        let cleaned := cleanLine line
+        if cleaned.isEmpty then none else some cleaned)
 
 /-- An import is *allowed* if it appears in the allowlist or is an
     internal `LegalKernel.*` module (cross-imports within the TCB are
@@ -126,26 +108,25 @@ def auditModule (allowlist : List String) (path : String) :
   | none =>
       throw <| IO.userError s!"tcb_audit: cannot read TCB module '{path}'"
   | some content =>
-      let imps := importsOf content
-      pure (imps.filter (fun imp => !isAllowed allowlist imp))
+      pure ((importsOf content).filter (fun imp => !isAllowed allowlist imp))
 
-/-- Entry point.  Loads the allowlist, audits every TCB module,
+/-- Entry point.  Loads the allowlist, audits every core TCB module,
     and exits non-zero on any violation. -/
 def main : IO UInt32 := do
   let allowlist ← readAllowlist
-  IO.println s!"tcb_audit: {tcbModules.length} TCB module(s); allowlist has {allowlist.length} entrie(s)."
+  IO.println s!"tcb_audit: {tcbCoreFiles.length} TCB module(s); allowlist has {allowlist.length} entrie(s)."
   let mut violations : List (String × String) := []
-  for path in tcbModules do
+  for path in tcbCoreFiles do
     let badImps ← auditModule allowlist path
     for imp in badImps do
-      violations := violations ++ [(path, imp)]
+      violations := (path, imp) :: violations
   if violations.isEmpty then
     IO.println "tcb_audit: PASS — every TCB import is allowlisted."
     pure 0
   else
     IO.eprintln "tcb_audit: FAIL — un-allowlisted imports:"
-    for (path, imp) in violations do
+    for (path, imp) in violations.reverse do
       IO.eprintln s!"  {path}: imports '{imp}' (not on allowlist)"
     IO.eprintln ""
-    IO.eprintln s!"To fix: add the import to '{allowlistPath}' (and have it reviewed per §13.6)."
+    IO.eprintln s!"To fix: add the import to '{tcbAllowlistPath}' (and have it reviewed per §13.6)."
     pure 1

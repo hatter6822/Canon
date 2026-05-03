@@ -8,9 +8,8 @@ comment.
 
 Exit semantics:
 
-  * Exit 0 if every kernel-TCB module (`LegalKernel/Kernel.lean`,
-    `LegalKernel/RBMapLemmas.lean`, `LegalKernel/Laws/Transfer.lean`)
-    has *zero* `sorry` occurrences.
+  * Exit 0 if every kernel-TCB module (the `kernelTcbFiles` list in
+    `Tools.Common`) has *zero* `sorry` occurrences.
   * Exit 1 otherwise.
 
 The tool is intentionally regex-flavoured, mirroring the manual check in
@@ -27,6 +26,10 @@ usage; the present tool catches the common-case violations and is
 fast enough to run on every CI build.
 -/
 
+import Tools.Common
+
+open LegalKernel.Tools (kernelTcbFiles readFileSafe)
+
 /-- Files-and-directories search root.  Restricted to the
     `LegalKernel` source tree to avoid scanning the lake build cache
     and to avoid false-positive matches in the audit tool's own
@@ -34,15 +37,6 @@ fast enough to run on every CI build.
     auxiliary tooling is out of scope. -/
 def searchRoots : List String :=
   [ "LegalKernel"
-  ]
-
-/-- Files that MUST have zero sorries (the kernel TCB plus the
-    Phase-0 transfer law that is part of the deployed law set).
-    A non-zero count in any of these is a CI-blocking failure. -/
-def kernelTcbFiles : List String :=
-  [ "LegalKernel/Kernel.lean"
-  , "LegalKernel/RBMapLemmas.lean"
-  , "LegalKernel/Laws/Transfer.lean"
   ]
 
 /-- Recursively enumerate every `.lean` file under `root`. -/
@@ -57,8 +51,8 @@ partial def listLeanFiles (root : String) : IO (List String) := do
       let mut acc : List String := []
       for e in entries do
         let sub ← listLeanFiles e.path.toString
-        acc := acc ++ sub
-      pure acc
+        acc := sub.foldl (fun a f => f :: a) acc
+      pure acc.reverse
     else if root.endsWith ".lean" then
       pure [root]
     else
@@ -100,19 +94,18 @@ def dropTrailingWs (cs : List Char) : List Char :=
   (cs.reverse.dropWhile Char.isWhitespace).reverse
 
 /-- Detect a `sorry` in proof position on this line.  The patterns
-    match the four CLAUDE.md categories (proof body via `:=`, tactic
-    body via `by`, terminal `exact sorry`, or sole-content line).
+    match the four CLAUDE.md categories: proof body via `:=`, tactic
+    body via `by`, terminal `exact sorry`, or a line whose only
+    non-whitespace content is the term `sorry`.
 
     Lines whose only `sorry` mention is *after* a `--` are ignored,
     because they're commented out. -/
 def isSorryProofPosition (line : String) : Bool :=
   let codeChars  := stripCommentChars line.toList
   let trimmed    := dropTrailingWs (dropLeadingWs codeChars)
-  -- Pattern 1-3: substring scans on the *code* portion of the line.
   let pAssign    := listContains codeChars ":= sorry".toList
   let pBy        := listContains codeChars "by sorry".toList
   let pExact     := listContains codeChars "exact sorry".toList
-  -- Pattern 4: the entire line (modulo whitespace) is the term `sorry`.
   let pBare      := trimmed = "sorry".toList
   pAssign || pBy || pExact || pBare
 
@@ -124,63 +117,51 @@ def matchesInContent (content : String) : List (Nat × String) := Id.run do
   for h : i in [0:lines.length] do
     let line := lines[i]'h.upper
     if isSorryProofPosition line then
-      acc := acc ++ [(i + 1, line)]
-  acc
+      acc := (i + 1, line) :: acc
+  pure acc.reverse
 
-/-- Per-file count of sorries in proof position.  A read failure
-    (file gone, permission error) is reported as `0` so the tool is
-    forgiving on directory partial-read races. -/
-def countOne (path : String) : IO Nat := do
-  match (← (IO.FS.readFile path).toBaseIO) with
-  | .error _ => pure 0
-  | .ok content => pure (matchesInContent content).length
+/-- Read the file at `path`, returning its `matchesInContent` result.
+    A read failure becomes the empty list, so the tool is forgiving on
+    directory partial-read races. -/
+def fileMatches (path : String) : IO (List (Nat × String)) := do
+  match (← readFileSafe path) with
+  | none         => pure []
+  | some content => pure (matchesInContent content)
 
-/-- Read a file's content; return `""` on any read error so callers
-    don't need to wrap every read site. -/
-def readFileSafe (path : String) : IO String := do
-  match (← (IO.FS.readFile path).toBaseIO) with
-  | .error _ => pure ""
-  | .ok content => pure content
-
-/-- Aggregate sorries across the entire project under the search roots. -/
+/-- Aggregate sorry counts across every `.lean` file under
+    `searchRoots`.  The result is keyed by file path and only
+    files with at least one match appear. -/
 def aggregate : IO (List (String × Nat)) := do
   let mut allFiles : List String := []
   for r in searchRoots do
     let xs ← listLeanFiles r
-    allFiles := allFiles ++ xs
-  -- Deduplicate while preserving order.
-  let allFilesUnique := (allFiles.foldl
-    (fun acc f => if f ∈ acc then acc else acc ++ [f])
-    ([] : List String))
+    allFiles := xs.foldl (fun a f => f :: a) allFiles
+  let allFilesUnique := (allFiles.reverse.foldl
+    (fun acc f => if f ∈ acc then acc else f :: acc)
+    ([] : List String)).reverse
   let mut result : List (String × Nat) := []
   for f in allFilesUnique do
-    let n ← countOne f
-    if n > 0 then
-      result := result ++ [(f, n)]
-  pure result
-
-/-- Pretty-print the matched lines in a file (used for kernel-TCB
-    failure diagnostics). -/
-def showMatches (path : String) : IO Unit := do
-  let content ← readFileSafe path
-  for (n, line) in matchesInContent content do
-    IO.eprintln s!"{path}:{n}: {line}"
+    let ms ← fileMatches f
+    if ms.length > 0 then
+      result := (f, ms.length) :: result
+  pure result.reverse
 
 /-- Entry point.  Reports per-file sorry counts; fails (exit 1) if
-    any kernel-TCB file has a non-zero count. -/
+    any kernel-TCB file has a non-zero count, in which case the
+    matching lines are echoed to stderr for the failing reviewer. -/
 def main : IO UInt32 := do
   let counts ← aggregate
   let total := counts.foldl (fun acc p => acc + p.snd) 0
   IO.println s!"count_sorries: {total} sorry/sorries across {counts.length} file(s)."
   for (path, n) in counts do
     IO.println s!"  {path}: {n}"
-  -- Hard requirement: zero sorries in the kernel TCB.
   let mut tcbFail := false
   for tcbPath in kernelTcbFiles do
-    let n ← countOne tcbPath
-    if n > 0 then
-      IO.eprintln s!"count_sorries: FAIL — kernel-TCB file '{tcbPath}' has {n} sorry/sorries:"
-      showMatches tcbPath
+    let ms ← fileMatches tcbPath
+    if ms.length > 0 then
+      IO.eprintln s!"count_sorries: FAIL — kernel-TCB file '{tcbPath}' has {ms.length} sorry/sorries:"
+      for (n, line) in ms do
+        IO.eprintln s!"{tcbPath}:{n}: {line}"
       tcbFail := true
   if tcbFail then
     pure 1
