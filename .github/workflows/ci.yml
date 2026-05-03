@@ -1,0 +1,60 @@
+# Phase 0 WU 0.4 — continuous integration.
+#
+# Pull requests block on:
+#   1. `lake build`         (Section 13.3): every kernel and law
+#                            module must elaborate.
+#   2. `lake test`           (Section 13.3): the run-time test driver
+#                            (`Tests.lean`) must report zero failures.
+#
+# The workflow is intentionally minimal: Phase 1 will append
+# `lake exe count_sorries` (WU 1.12) and `lake exe tcb_audit` (WU 1.11)
+# once those tools land.  Adding them prematurely would gate the build
+# on artefacts that do not yet exist.
+#
+# The toolchain is read from `lean-toolchain` by `leanprover/lean-action`,
+# so version bumps need only edit that file (Section 13.4 reproducibility).
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Cancel in-progress runs of the same workflow on the same ref.  Saves
+# CI minutes when a contributor force-pushes during review.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: lake build + lake test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Lean toolchain
+        # `lean-action` reads `lean-toolchain` automatically and
+        # caches the resulting Lean install across runs.
+        uses: leanprover/lean-action@v1
+        with:
+          # We do NOT request `lake test` here; we run it as an
+          # explicit step below so its output is its own collapsible
+          # section in the workflow log.
+          test: false
+          lint: false
+
+      - name: lake build (full project)
+        run: lake build
+
+      - name: lake test (run Tests.lean driver)
+        run: lake test

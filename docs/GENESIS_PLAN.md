@@ -386,22 +386,32 @@ State is organised as a two-level finite map: from resource to actor to
 amount. Empty entries denote zero balance.
 
 ```lean
-abbrev BalanceMap := RBMap ActorId Amount compare
+abbrev BalanceMap := TreeMap ActorId Amount compare
 
 structure State where
-  balances : RBMap ResourceId BalanceMap compare
+  balances : TreeMap ResourceId BalanceMap compare
   deriving Repr
 ```
 
-Two design choices warrant comment.
+Three design choices warrant comment.
 
-- **Two-level rather than flat.** A flat `RBMap (ResourceId × ActorId)
+- **Two-level rather than flat.** A flat `TreeMap (ResourceId × ActorId)
   Amount` would merge the indices. The two-level form makes per-resource
   reasoning (conservation, total supply, freeze policies) cheaper to
   state and prove because we can quantify over a single `BalanceMap`.
-- **`RBMap` rather than `HashMap`.** `RBMap` provides total ordering and
-  a deterministic fold order, both of which we need for serialisable,
-  reproducible state hashing.
+- **`TreeMap` rather than `HashMap`.** `TreeMap` provides total
+  ordering and a deterministic fold order, both of which we need for
+  serialisable, reproducible state hashing.
+- **`Std.Data.TreeMap` rather than `Std.Data.RBMap`.** Earlier drafts
+  of this plan referenced `Std.Data.RBMap`, which lived in the
+  community `std4` / `batteries` library. As of Lean ≥ 4.10 the
+  canonical ordered finite map is `Std.Data.TreeMap` in **Lean core**
+  (a red-black tree internally; same total-ordering and
+  deterministic-fold properties). Since the kernel must depend only on
+  Lean core (Section 13.1), we use `TreeMap`. References in this plan
+  to "`RBMap` lemmas" or "the RBMap proof library" remain valid as
+  conceptual names — the data structure is still a red-black tree —
+  but the concrete imports and types in code are `TreeMap`.
 
 ### 4.3 Balance Operations
 
@@ -409,12 +419,12 @@ Two primitives suffice: read and write a single balance.
 
 ```lean
 def getBalance (s : State) (r : ResourceId) (a : ActorId) : Amount :=
-  match s.balances.find? r with
+  match s.balances[r]? with
   | none    => 0
-  | some bm => (bm.find? a).getD 0
+  | some bm => bm[a]?.getD 0
 
 def setBalance (s : State) (r : ResourceId) (a : ActorId) (v : Amount) : State :=
-  let bm  := (s.balances.find? r).getD RBMap.empty
+  let bm  := s.balances[r]?.getD ∅
   let bm' := bm.insert a v
   { balances := s.balances.insert r bm' }
 ```
@@ -431,20 +441,21 @@ gateway to all higher-level invariants.
 theorem getBalance_setBalance_same
   (s : State) (r : ResourceId) (a : ActorId) (v : Amount) :
   getBalance (setBalance s r a v) r a = v := by
-  -- Follows from RBMap.find?_insert (same key) at both levels.
+  -- Follows from `TreeMap.getElem?_insert` (same key) at both levels.
   sorry
 
 theorem getBalance_setBalance_other
   (s : State) (r r' : ResourceId) (a a' : ActorId) (v : Amount)
   (h : r ≠ r' ∨ a ≠ a') :
   getBalance (setBalance s r a v) r' a' = getBalance s r' a' := by
-  -- Follows from RBMap.find?_insert (different key) at the appropriate level.
+  -- Follows from `TreeMap.getElem?_insert` (different key) at the appropriate level.
   sorry
 ```
 
 These are listed as `sorry` for now because they depend on a small library
-of `RBMap` lemmas that is itself a work item (see Section 8.3). The
-roadmap discharges them in Phase 1.
+of `TreeMap` lemmas (named "RBMap proof library" in §8.3 for historical
+continuity; the underlying structure is still a red-black tree) that is
+itself a work item (see Section 8.3). The roadmap discharges them in Phase 1.
 
 ### 4.4 Transitions
 
@@ -700,7 +711,7 @@ theorem transfer_conserves
   --     balance is unchanged, hence the fold is unchanged.
   --   * Distinct actors: the sum decreases by `amount` at sender and
   --     increases by `amount` at receiver; the net change is zero.
-  -- Both cases are mechanised by `RBMap.foldl_insert` (Section 8.3).
+  -- Both cases are mechanised by the `foldl_insert*` family of §8.3.
   sorry
 ```
 
@@ -729,7 +740,7 @@ theorem transfer_does_not_touch_other_resources
 Pulling it all together, the kernel module reads:
 
 ```lean
-import Std.Data.RBMap
+import Std.Data.TreeMap
 
 open Std
 
@@ -743,22 +754,22 @@ abbrev Amount     := Nat
 
 /-! ## State -/
 
-abbrev BalanceMap := RBMap ActorId Amount compare
+abbrev BalanceMap := TreeMap ActorId Amount compare
 
 structure State where
-  balances : RBMap ResourceId BalanceMap compare
+  balances : TreeMap ResourceId BalanceMap compare
   deriving Repr
 
 /-! ## Balance operations -/
 
 def getBalance (s : State) (r : ResourceId) (a : ActorId) : Amount :=
-  match s.balances.find? r with
+  match s.balances[r]? with
   | none    => 0
-  | some bm => (bm.find? a).getD 0
+  | some bm => bm[a]?.getD 0
 
 def setBalance (s : State) (r : ResourceId) (a : ActorId) (v : Amount) :
     State :=
-  let bm  := (s.balances.find? r).getD RBMap.empty
+  let bm  := s.balances[r]?.getD ∅
   let bm' := bm.insert a v
   { balances := s.balances.insert r bm' }
 
@@ -1578,7 +1589,14 @@ their own combinator.
 
 ### 8.3 RBMap Proof Library
 
-**Gap.** Several kernel and law-level theorems depend on `RBMap`
+> **Naming note.** The section title is preserved for historical
+> continuity ("RBMap" was the original name in `std4`). The actual
+> implementation in this repository is `Std.Data.TreeMap` from Lean
+> core (Section 4.2), which is a red-black tree.  The lemma names
+> below should be read as `TreeMap.*` in code; the proof obligations
+> are unchanged.
+
+**Gap.** Several kernel and law-level theorems depend on ordered-map
 properties not yet formalised.
 
 **Required lemmas.**
@@ -2580,8 +2598,36 @@ and this document.
     →  (0.5 in parallel; no code dependencies)
 ```
 
-**Phase 0 status.** WU 0.5 complete (this document). WUs 0.1–0.4
-pending implementation.
+**Phase 0 status.** All five WUs complete.
+
+- WU 0.1: `lean-toolchain` pinned to `leanprover/lean4:v4.22.0`;
+  `lakefile.lean`, `Main.lean`, and `.gitignore` in place; clean
+  `lake build` on a fresh checkout.
+- WU 0.2: `LegalKernel/Kernel.lean` ships the §4.12 listing,
+  zero `sorry`, two-reviewer rule documented in this section.
+  Note that `Std.Data.TreeMap` from Lean core replaces the original
+  draft's `Std.Data.RBMap`; see §4.2 for the rationale and §8.3 for
+  the migrated lemma library.
+- WU 0.3: `LegalKernel/Laws/Transfer.lean` ships the §4.11 transfer
+  law with the self-transfer fix and `decPre := fun _ => inferInstance`.
+  An `example : Decidable ((transfer …).pre s) := inferInstance`
+  smoke-tests decidability at compile time.  The conservation theorem
+  `transfer_conserves` is intentionally deferred to Phase 2 (it depends
+  on the §8.3 fold lemmas that arrive in Phase 1) so that Phase-0
+  modules are `sorry`-free.
+- WU 0.4: `.github/workflows/ci.yml` runs `lake build` and `lake test`
+  on every pull request to `main` and on direct pushes to `main`.
+  Future WUs append `lake exe count_sorries` (WU 1.12) and
+  `lake exe tcb_audit` (WU 1.11).
+- WU 0.5: this document.
+
+**Phase 0 testing.** A run-time test driver lives in `Tests.lean` and
+in `LegalKernel/Test/`. It exercises `getBalance` / `setBalance`
+round-trips, `step_impl` / `apply_certified` behaviour, and the full
+positive / negative semantics of the transfer law (including the
+self-transfer regression test for the §4.11 sequencing fix).
+`lake test` is wired to this driver via `@[test_driver]` in
+`lakefile.lean`, so a green CI implies a green test suite.
 
 ### Phase 1: Kernel Completion
 
