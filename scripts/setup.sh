@@ -97,23 +97,24 @@ ELAN_INSTALLER_URL="https://raw.githubusercontent.com/leanprover/elan/87f5ec2f56
 ELAN_INSTALLER_SHA256="4bacca9502cb89736fe63d2685abc2947cfbf34dc87673504f1bb4c43eda9264"
 
 # elan binary release.  v4.2.1 is the latest stable elan as of the
-# v4.22.0 toolchain bump.
+# v4.29.1 toolchain bump.
 ELAN_BINARY_VERSION="v4.2.1"
 ELAN_BINARY_SHA256_X86="4e717523217af592fa2d7b9c479410a31816c065d66ccbf0c2149337cfec0f5c"
 ELAN_BINARY_SHA256_ARM="bb78726ace6a912c7122a389018bcd69d9122ce04659800101392f7db380d3b3"
 
 # Lean toolchain archives.  To regenerate after a version bump:
-#   v="$(cut -d: -f2 lean-toolchain)"  # e.g. v4.22.0
+#   v="$(cut -d: -f2 lean-toolchain)"  # e.g. v4.29.1
 #   for arch in linux linux_aarch64; do
 #     for ext in tar.zst zip; do
 #       curl -fsSL "https://github.com/leanprover/lean4/releases/download/${v}/lean-${v#v}-${arch}.${ext}" \
 #         | sha256sum
 #     done
 #   done
-LEAN_TOOLCHAIN_SHA256_ZST_X86="85097a4d659fe388193a5efb0c413b880e101f1290cc41d00eb60847b18f064e"
-LEAN_TOOLCHAIN_SHA256_ZST_ARM="227e743ef12efecdfc3936a03e21aa2b94e336025041125e003814db64001d94"
-LEAN_TOOLCHAIN_SHA256_ZIP_X86="5de9e08d2fc465ab6de7473bec216df942f6fd919eb7e6f37d67a6efa93b653e"
-LEAN_TOOLCHAIN_SHA256_ZIP_ARM="ed533ad654c31f7030290ff491be18418922a1b28555db832e371e0c51070cfc"
+# Pinned to the v4.29.1 release (latest stable as of 2026-04-16).
+LEAN_TOOLCHAIN_SHA256_ZST_X86="bf062d29556d655685fb287563c249ad6a8fde34352c18b5e32568a595c1aec1"
+LEAN_TOOLCHAIN_SHA256_ZST_ARM="1ccdfb7f924901f4b73a4b4eb169e5b3dc74f6836521b47e733ea25f2abfc0dc"
+LEAN_TOOLCHAIN_SHA256_ZIP_X86="357acb30fca2212986fdc8b83dbe88e8f5610efc060f6e3515079c56a92d276f"
+LEAN_TOOLCHAIN_SHA256_ZIP_ARM="171cd3426c3f43ca49b5affad15633e4d9f1e983df536a208883097680872816"
 
 # -------- Parse toolchain spec --------
 if [ ! -f "${LEAN_TOOLCHAIN_FILE}" ]; then
@@ -129,7 +130,7 @@ fi
 # value flows directly into curl URLs and elan toolchain identifiers.
 if ! echo "${TOOLCHAIN}" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$'; then
   echo "error: lean-toolchain has malformed value '${TOOLCHAIN}'" >&2
-  echo "       expected 'org/repo:tag' (e.g. leanprover/lean4:v4.22.0)" >&2
+  echo "       expected 'org/repo:tag' (e.g. leanprover/lean4:v4.29.1)" >&2
   exit 1
 fi
 TOOLCHAIN_ORG="$(echo "${TOOLCHAIN}" | cut -d/ -f1)"

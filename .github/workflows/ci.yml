@@ -1,18 +1,27 @@
 # Phase 0 WU 0.4 — continuous integration.
 #
 # Pull requests block on:
-#   1. `lake build`         (Section 13.3): every kernel and law
-#                            module must elaborate.
-#   2. `lake test`           (Section 13.3): the run-time test driver
-#                            (`Tests.lean`) must report zero failures.
+#   1. `lake build`     (Section 13.3): every kernel and law module
+#                        must elaborate cleanly.
+#   2. `lake test`       (Section 13.3): the runtime test driver
+#                        (`Tests.lean`) must report zero failures.
 #
 # The workflow is intentionally minimal: Phase 1 will append
 # `lake exe count_sorries` (WU 1.12) and `lake exe tcb_audit` (WU 1.11)
 # once those tools land.  Adding them prematurely would gate the build
 # on artefacts that do not yet exist.
 #
-# The toolchain is read from `lean-toolchain` by `leanprover/lean-action`,
-# so version bumps need only edit that file (Section 13.4 reproducibility).
+# The Lean toolchain is read from `lean-toolchain` by
+# `leanprover/lean-action`, so version bumps need only edit that file
+# (Section 13.4 reproducibility).
+#
+# All third-party actions are pinned to a full-length commit SHA per
+# GitHub's supply-chain guidance (Security hardening for GitHub
+# Actions: "Pinning an action to a full length commit SHA is currently
+# the only way to use an action as an immutable release").  The
+# version comment alongside each `uses:` line records the human-
+# readable tag that the SHA corresponds to at the time of pinning;
+# bump the SHA and the comment together.
 
 name: CI
 
@@ -30,6 +39,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Default to read-only token; no workflow step writes to the repo.
 permissions:
   contents: read
 
@@ -40,16 +50,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4.3.1 (latest stable v4 as of pin date).
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Install Lean toolchain
+        # leanprover/lean-action v1.5.0 (== v1 tag at pin date).
         # `lean-action` reads `lean-toolchain` automatically and
         # caches the resulting Lean install across runs.
-        uses: leanprover/lean-action@v1
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9
         with:
-          # We do NOT request `lake test` here; we run it as an
-          # explicit step below so its output is its own collapsible
-          # section in the workflow log.
+          # We do NOT delegate `lake test` to the action here; we run
+          # it as an explicit step below so its output gets its own
+          # collapsible section in the workflow log and a non-zero
+          # exit cleanly fails the job.
           test: false
           lint: false
 

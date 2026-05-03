@@ -8,17 +8,22 @@ changes here MUST come with a Genesis-Plan amendment and the
 two-reviewer gate described in §13.6 / §14.4.
 
 Imports: `Std.Data.TreeMap` is the canonical ordered finite-map in
-Lean 4 ≥ 4.10 core.  The Genesis Plan was written when std4 still
+Lean core (≥ 4.10).  The Genesis Plan was written when std4 still
 exposed `Std.Data.RBMap`; the modern equivalent in Lean core is the
 `TreeMap` family in the same `Std` namespace, with a red-black tree
 backing and the same API surface used by §4.3 and §4.11 (insert,
-find?, foldl, getD).  The plan's "kernel uses `Std` only" rule is
+get?, foldl, getD).  The plan's "kernel uses `Std` only" rule is
 preserved verbatim; only the dependency name has changed.
 
 No `sorry` may appear in this file.  The two balance lemmas of §4.3
 (`getBalance_setBalance_same`, `getBalance_setBalance_other`) live in
 `LegalKernel.RBMapLemmas` (Phase 1 WU 1.5); they intentionally do not
 appear here, so that the Phase-0 kernel builds with zero `sorry`.
+
+The kernel is the *only* part of Canon whose imports are restricted
+to Lean core.  Non-TCB definitions (build identification strings,
+runtime helpers) live in adjacent modules — see `LegalKernel.lean`
+for the umbrella that re-exports the trusted core.
 -/
 
 import Std.Data.TreeMap
@@ -50,6 +55,9 @@ abbrev BalanceMap : Type := TreeMap ActorId Amount compare
     amount.  See §4.2 for the rationale (per-resource reasoning,
     deterministic fold for hashing). -/
 structure State where
+  /-- Outer map: resource → per-resource balance map.  Missing
+      resources have empty balance maps; missing actors within an
+      existing resource have zero balance. -/
   balances : TreeMap ResourceId BalanceMap compare
   deriving Repr
 
@@ -85,16 +93,25 @@ def setBalance (s : State) (r : ResourceId) (a : ActorId) (v : Amount) :
     * `apply_impl` is total.  Pre-image filtering is the
       precondition's job, not the transformer's. -/
 structure Transition where
+  /-- The precondition under which the transition is admissible.
+      Lives in `Prop` so that quantifiers and propositional connectives
+      compose naturally. -/
   pre        : State → Prop
+  /-- A per-state decision procedure for the precondition.  Without
+      this field the executable path of the kernel cannot reduce; with
+      it, `step_impl` is definable without ambient classical logic. -/
   decPre     : (s : State) → Decidable (pre s)
+  /-- The state transformer.  Total by construction; partiality is
+      reified in `pre`. -/
   apply_impl : State → State
 
-/-- Re-export `decPre` as a typeclass instance so that ordinary
-    `if t.pre s then ... else ...` notation elaborates.  This is a
-    *definition*, not a trusted axiom; deleting it would only make
-    `if`-elaboration fail at the call site. -/
-instance instDecidableTransitionPre (t : Transition) (s : State) :
-    Decidable (t.pre s) := t.decPre s
+/-- Re-export the per-state decidability witness as a typeclass
+    instance so that ordinary `if t.pre s then ... else ...` notation
+    elaborates without explicit annotations.  This is a *definition*,
+    not a trusted axiom; deleting it would only make `if`-elaboration
+    fail at the call site. -/
+instance (t : Transition) (s : State) : Decidable (t.pre s) :=
+  t.decPre s
 
 /-! ## Specification and implementation (§4.5) -/
 
@@ -105,8 +122,8 @@ def step_spec (s s' : State) (t : Transition) : Prop :=
   t.pre s ∧ s' = t.apply_impl s
 
 /-- Executable implementation.  Decidability of `t.pre s` flows from
-    the `instDecidableTransitionPre` instance above, so the `if`
-    reduces with no recourse to ambient classical logic. -/
+    the typeclass instance registered above, so the `if` reduces with
+    no recourse to ambient classical logic. -/
 def step_impl (s : State) (t : Transition) : State :=
   if t.pre s then t.apply_impl s else s
 
@@ -134,13 +151,17 @@ theorem impl_noop_if_not_pre
     proof-irrelevance, any two `Legal s t` values are definitionally
     equal once `t.pre s` holds. -/
 structure Legal (s : State) (t : Transition) where
+  /-- The proof witness that `t.pre s` holds in this state.  Erased
+      at extraction; carrying it costs zero runtime bytes. -/
   proof : t.pre s
 
 /-- A transition together with a proof of legality in a fixed state.
     The dependent index `s` prevents the obvious mistake of carrying
     a certificate across an unrelated state change. -/
 structure CertifiedTransition (s : State) where
+  /-- The transition being certified. -/
   t    : Transition
+  /-- The legality witness for `t` at the indexed state `s`. -/
   cert : Legal s t
 
 /-! ## Certified execution (§4.8) -/
@@ -167,7 +188,10 @@ theorem apply_certified_eq_step_impl
     so even hypothetical illegal applications cannot extend the
     reachable set. -/
 inductive Reachable (s0 : State) : State → Prop
+  /-- The initial state is reachable from itself. -/
   | base : Reachable s0 s0
+  /-- If `s` is reachable from `s0` and `t.pre s` holds, then the
+      executable step `step_impl s t` is also reachable from `s0`. -/
   | step (s : State) (t : Transition)
       (hreach : Reachable s0 s)
       (hpre   : t.pre s) :
@@ -201,15 +225,7 @@ theorem invariants_compose
     ∀ s, Reachable s0 s → (I₁ s ∧ I₂ s) := by
   apply invariant_preservation (fun s => I₁ s ∧ I₂ s) s0
   · exact ⟨hi₁, hi₂⟩
-  · intro s t hI hpre
-    exact ⟨hs₁ s t hI.1 hpre, hs₂ s t hI.2 hpre⟩
-
-/-! ## Build identification.
-
-A trivial constant whose presence lets non-kernel code (Main, tests)
-confirm at link time that the kernel module compiled without having to
-exercise any actual transition.  Bumped by hand whenever §4.12
-changes; mirror in §13.8 release-cutting runbook. -/
-def kernelBuildTag : String := "canon-phase-0-foundations"
+  · intro s t ⟨h₁, h₂⟩ hpre
+    exact ⟨hs₁ s t h₁ hpre, hs₂ s t h₂ hpre⟩
 
 end LegalKernel

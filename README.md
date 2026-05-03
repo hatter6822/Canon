@@ -26,9 +26,9 @@ philosophy, formal model, and implementation strategy. Start there.
 Phase 0 ships the trusted-core kernel module (`LegalKernel/Kernel.lean`,
 the literal §4.12 listing), the canonical `transfer` law
 (`LegalKernel/Laws/Transfer.lean`, §4.11 with the self-transfer
-sequencing fix), a Lake build, a `lake test` driver covering 21 unit
-tests across both modules, and a GitHub Actions CI workflow that blocks
-on build or test failure.
+sequencing fix), a Lake build, a `lake test` driver covering 24 unit
+tests across three suites, and a GitHub Actions CI workflow (with
+SHA-pinned third-party actions) that blocks on build or test failure.
 
 ## Quickstart
 
@@ -73,8 +73,10 @@ canon/
 │   ├── Laws/
 │   │   └── Transfer.lean     -- §4.11; canonical transfer law.
 │   └── Test/
-│       ├── Framework.lean    -- minimal IO-based test harness.
-│       ├── KernelTests.lean  -- value-level kernel tests (10).
+│       ├── Framework.lean    -- minimal IO-based test harness +
+│       │                        shared `emptyState` helper.
+│       ├── KernelTests.lean  -- value-level kernel tests (12).
+│       ├── Umbrella.lean     -- umbrella-module smoke tests (1).
 │       └── Laws/
 │           └── Transfer.lean -- transfer-law tests (11), incl. the
 │                                §4.11 self-transfer regression.

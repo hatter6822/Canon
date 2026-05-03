@@ -2600,14 +2600,22 @@ and this document.
 
 **Phase 0 status.** All five WUs complete.
 
-- WU 0.1: `lean-toolchain` pinned to `leanprover/lean4:v4.22.0`;
-  `lakefile.lean`, `Main.lean`, and `.gitignore` in place; clean
-  `lake build` on a fresh checkout.
-- WU 0.2: `LegalKernel/Kernel.lean` ships the §4.12 listing,
-  zero `sorry`, two-reviewer rule documented in this section.
-  Note that `Std.Data.TreeMap` from Lean core replaces the original
-  draft's `Std.Data.RBMap`; see §4.2 for the rationale and §8.3 for
-  the migrated lemma library.
+- WU 0.1: `lean-toolchain` pinned to `leanprover/lean4:v4.29.1`
+  (the latest stable Lean release as of 2026-04-16); `lakefile.lean`,
+  `Main.lean`, and `.gitignore` in place; `scripts/setup.sh`
+  installs the toolchain with SHA-256 verification of every artefact
+  and is `shellcheck`-clean; clean `lake build` on a fresh checkout.
+- WU 0.2: `LegalKernel/Kernel.lean` ships the §4.12 listing
+  byte-for-byte (anonymous `Decidable` instance and the same
+  destructuring style in `invariants_compose`); zero `sorry`; the
+  two-reviewer rule is documented in this section.  Each kernel
+  theorem `#print axioms` to exactly `[propext, Classical.choice,
+  Quot.sound]` — i.e. zero custom axioms.  `Std.Data.TreeMap` from
+  Lean core replaces the original draft's `Std.Data.RBMap`; see §4.2
+  for the rationale and §8.3 for the migrated lemma library.  The
+  non-TCB `kernelBuildTag` constant lives in the umbrella
+  `LegalKernel.lean`, *not* in `Kernel.lean`, so the WU 1.11 TCB
+  audit tool can enumerate the trusted core in isolation.
 - WU 0.3: `LegalKernel/Laws/Transfer.lean` ships the §4.11 transfer
   law with the self-transfer fix and `decPre := fun _ => inferInstance`.
   An `example : Decidable ((transfer …).pre s) := inferInstance`
@@ -2617,17 +2625,32 @@ and this document.
   modules are `sorry`-free.
 - WU 0.4: `.github/workflows/ci.yml` runs `lake build` and `lake test`
   on every pull request to `main` and on direct pushes to `main`.
-  Future WUs append `lake exe count_sorries` (WU 1.12) and
-  `lake exe tcb_audit` (WU 1.11).
+  Third-party actions (`actions/checkout`, `leanprover/lean-action`)
+  are pinned to **commit SHAs** with version comments, per GitHub's
+  supply-chain guidance.  The job has `permissions: contents: read`
+  (no workflow step writes to the repo).  Future WUs append
+  `lake exe count_sorries` (WU 1.12) and `lake exe tcb_audit`
+  (WU 1.11).
 - WU 0.5: this document.
 
-**Phase 0 testing.** A run-time test driver lives in `Tests.lean` and
-in `LegalKernel/Test/`. It exercises `getBalance` / `setBalance`
-round-trips, `step_impl` / `apply_certified` behaviour, and the full
-positive / negative semantics of the transfer law (including the
-self-transfer regression test for the §4.11 sequencing fix).
+**Phase 0 testing.** A run-time test driver lives in `Tests.lean`
+and `LegalKernel/Test/`, broken into three suites: kernel (12
+cases), umbrella (1 case — the build-tag smoke test), and transfer
+(11 cases, including the §4.11 self-transfer regression).  The
+suite exercises `getBalance` / `setBalance` round-trips and
+cross-resource isolation, both `step_impl` branches, the
+`apply_certified` value-form path, both `Reachable` constructors,
+and the full positive / negative semantics of the transfer law.
 `lake test` is wired to this driver via `@[test_driver]` in
 `lakefile.lean`, so a green CI implies a green test suite.
+
+**Phase 0 build hygiene.** The lakefile sets
+`autoImplicit := false`, `relaxedAutoImplicit := false`,
+`linter.unusedVariables := true`, and `linter.missingDocs := true`
+project-wide.  Every public field, constructor, and definition
+carries a `/-- … -/` docstring; the missing-docs linter promotes
+the documentation rule from a review-time observation to a
+mechanical check.
 
 ### Phase 1: Kernel Completion
 

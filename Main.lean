@@ -11,6 +11,10 @@ kernel is exercised only through the test driver and through Lean's
 elaborator (which checks every theorem at build time).
 -/
 
+/-- Placeholder `canon` runtime entry point.  Prints the kernel build
+    tag and a pointer to where the real runtime will live (Phase 5,
+    Genesis Plan §12).  Replaced wholesale by `Runtime/Loop.lean` once
+    Phase 5 lands. -/
 def main : IO Unit := do
   IO.println "canon: legal-kernel placeholder runtime."
   IO.println s!"  kernel build tag: {LegalKernel.kernelBuildTag}"

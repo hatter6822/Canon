@@ -12,13 +12,23 @@ Lean packages — so that the trusted computing base equals exactly the
 Lean core distribution plus this repository.
 -/
 package canon where
-  -- Treat all warnings as errors; the kernel must compile cleanly.
-  -- Per-module overrides may relax this for tests if absolutely needed.
+  -- Per-package Lean options.  Phase 0's hygiene gate:
+  --
+  -- * `autoImplicit := false` — every universe / type variable must
+  --   be declared explicitly; Lean must not auto-introduce them
+  --   (Genesis Plan §13.6, "Decidability discipline" in CLAUDE.md).
+  -- * `relaxedAutoImplicit := false` — same rule, even for "section
+  --   variables", which are otherwise auto-bound under the relaxed
+  --   form.
+  -- * `linter.unusedVariables := true` — surfaces dead bindings.
+  -- * `linter.missingDocs := true` — every public surface must have
+  --   a `/-- … -/` docstring.  CLAUDE.md mandates this; promoting it
+  --   to a build-time check prevents drift.
   leanOptions := #[
     ⟨`autoImplicit, false⟩,
     ⟨`relaxedAutoImplicit, false⟩,
     ⟨`linter.unusedVariables, true⟩,
-    ⟨`linter.missingDocs, false⟩
+    ⟨`linter.missingDocs, true⟩
   ]
 
 /-- The trusted core: kernel module, plus the law set that the deployment

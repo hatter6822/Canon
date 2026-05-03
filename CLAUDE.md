@@ -52,11 +52,14 @@ lake build LegalKernel.Laws.Transfer
 lake test                           # run Tests.lean driver (21 tests)
 ```
 
-**Toolchain:** Lean 4 v4.22.0 (pinned in `lean-toolchain`).  The
+**Toolchain:** Lean 4 v4.29.1 (pinned in `lean-toolchain`; the
+latest stable Lean release as of the last toolchain bump).  The
 `scripts/setup.sh` script handles toolchain install with SHA-256
 integrity verification of every artefact (elan installer, elan
 binary, Lean toolchain archive) — see the script header for the
-audit log.
+audit log.  Bumping the toolchain version requires recomputing the
+four `LEAN_TOOLCHAIN_SHA256_*` constants and updating this section
+in the same PR.
 
 ## Module build verification (mandatory)
 
@@ -95,8 +98,9 @@ canon/
 │   ├── Laws/
 │   │   └── Transfer.lean       -- §4.11 transfer law (with self-transfer fix).
 │   └── Test/
-│       ├── Framework.lean      -- minimal IO-based test harness.
-│       ├── KernelTests.lean    -- value-level kernel tests (10 cases).
+│       ├── Framework.lean      -- minimal IO-based test harness + emptyState.
+│       ├── KernelTests.lean    -- value-level kernel tests (12 cases).
+│       ├── Umbrella.lean       -- umbrella-module smoke tests (1 case).
 │       └── Laws/
 │           └── Transfer.lean   -- transfer-law tests (11 cases).
 ├── scripts/
@@ -232,10 +236,18 @@ foreground progress.  **Prevent this proactively:**
   modules may import other things if absolutely necessary, but the
   default is "Std core only" until a specific need is justified.
 
-- **`autoImplicit := false`.**  The lakefile enforces this
-  project-wide.  All universe and type variables must be declared
-  explicitly.  This catches subtle bugs from Lean auto-introducing
-  variables that the proof author didn't intend.
+- **`autoImplicit := false` and `linter.missingDocs := true`.**  The
+  lakefile enforces both project-wide:
+  - `autoImplicit := false` (and its `relaxedAutoImplicit` sibling)
+    forbids Lean from silently introducing universe / type variables
+    that the proof author didn't declare.
+  - `linter.missingDocs := true` makes the *absence* of a `/-- … -/`
+    docstring on a public surface (def, theorem, structure field,
+    inductive constructor) a build warning, surfacing the
+    documentation rule below as a mechanical check rather than a
+    review-time observation.
+
+  `linter.unusedVariables := true` is also set, surfacing dead bindings.
 
 - **Decidability discipline (Genesis Plan §13.6 step 2).**  Every
   `Transition.decPre` field should be definable as
@@ -453,21 +465,34 @@ every match before submission.
 **Current Phase:** Phase 0 (Foundations) Complete.
 
 WU 0.1 (Lean toolchain pin & Lake project skeleton) — complete:
-- `lean-toolchain` pinned to `leanprover/lean4:v4.22.0`.
+- `lean-toolchain` pinned to `leanprover/lean4:v4.29.1` (the latest
+  stable Lean release).
 - `lakefile.lean` with `LegalKernel` library, `canon` placeholder
-  exe, and `Tests` test driver (wired via `@[test_driver]`).
+  exe, and `Tests` test driver (wired via `@[test_driver]`).  Strict
+  hygiene: `autoImplicit := false`, `relaxedAutoImplicit := false`,
+  `linter.unusedVariables := true`, `linter.missingDocs := true`.
 - `Main.lean` placeholder runtime.
 - `.gitignore` covering `.lake/`, `build/`, OS / editor noise.
-- `scripts/setup.sh` SHA-256-verified setup script.
+- `scripts/setup.sh` SHA-256-verified setup script (`shellcheck`
+  clean, fast-path skip, defense-in-depth binary integrity snapshot).
 - `lake build` succeeds on a clean checkout.
 
 WU 0.2 (Kernel module skeleton) — complete:
 - `LegalKernel/Kernel.lean` ships the literal §4.12 listing.
-- Zero `sorry`, zero custom axioms.
-- `lake build LegalKernel.Kernel` succeeds.
+- Zero `sorry`, zero custom axioms.  Each of the five kernel
+  theorems (`impl_refines_spec`, `impl_noop_if_not_pre`,
+  `apply_certified_eq_step_impl`, `invariant_preservation`,
+  `invariants_compose`) `#print axioms` to exactly
+  `[propext, Classical.choice, Quot.sound]` — the Lean built-in
+  set CLAUDE.md explicitly allows.
+- `lake build LegalKernel.Kernel` succeeds with strict linters on.
 - Note: the original draft's `Std.Data.RBMap` is replaced by
-  `Std.Data.TreeMap` (Lean ≥ 4.10 core; same red-black-tree
+  `Std.Data.TreeMap` (Lean core ≥ 4.10; same red-black-tree
   semantics; `Std`-only rule preserved).
+- The non-TCB `kernelBuildTag` constant lives in the umbrella
+  `LegalKernel.lean` module, *not* in `Kernel.lean`, so the WU 1.11
+  TCB audit tool can enumerate the trusted core without seeing
+  convenience constants.
 
 WU 0.3 (`transfer` law) — complete:
 - `LegalKernel/Laws/Transfer.lean` ships the §4.11 transfer law.
@@ -483,16 +508,24 @@ WU 0.3 (`transfer` law) — complete:
 WU 0.4 (CI) — complete:
 - `.github/workflows/ci.yml` runs `lake build` and `lake test` on
   every PR to `main` and on direct pushes to `main`.
+- Third-party actions (`actions/checkout`, `leanprover/lean-action`)
+  pinned to **commit SHAs** with version comments — the only
+  immutable-release form per GitHub's supply-chain guidance.
 - Concurrency group cancels in-flight runs on force-push.
+- `permissions: contents: read` (no workflow step writes to the repo).
 - Phase 1 will add `lake exe count_sorries` (WU 1.12) and
   `lake exe tcb_audit` (WU 1.11) once those tools land.
 
 WU 0.5 (Genesis Plan) — complete (predates this branch).
 
-**Test coverage (Phase 0).**  21 passing tests across two suites:
-- `KernelTests` (10) — `getBalance` / `setBalance` round-trips,
-  `step_impl` precondition / no-op behaviour, `apply_certified`
-  agreement, `Reachable.base` constructor, build-tag presence.
+**Test coverage (Phase 0).**  24 passing tests across three suites:
+- `KernelTests` (12) — `getBalance` / `setBalance` round-trips
+  (including cross-resource preservation), `step_impl` precondition /
+  no-op behaviour, `apply_certified` agreement (both via the §4.8
+  theorem and via a value-level probe), and both `Reachable`
+  constructors (`base` and `step`).
+- `Umbrella` (1) — non-TCB build-tag smoke test, exercising the
+  `LegalKernel.kernelBuildTag` re-export from the umbrella module.
 - `Transfer` (11) — precondition decidability (positive / insufficient
   / zero-amount cases), legal transfer effect, **§4.11 self-transfer
   regression** (the Phase-0 acceptance bug-fix witness),
