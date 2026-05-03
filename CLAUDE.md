@@ -90,15 +90,24 @@ later phases when the law set grows; check the `lean_lib LegalKernel`
 
 After any source change, also run:
 
-* `lake test` — runs the test driver (40 tests across four suites
+* `lake test` — runs the test driver (43 tests across four suites
   as of Phase 1; was 24 in Phase 0).  Catches semantic regressions
   that elaboration-only checks miss (e.g. the §4.11 self-transfer
-  fix would silently survive a build but break a test).
+  fix would silently survive a build but break a test).  Each new
+  Phase-1 theorem additionally has a term-level API-stability test
+  whose elaboration fails if the theorem signature changes.
 * `lake exe count_sorries` — fails if any kernel-TCB module
   (`Kernel.lean`, `RBMapLemmas.lean`, `Laws/Transfer.lean`) has a
-  `sorry` in proof position.
-* `lake exe tcb_audit` — fails if a TCB module imports anything not
-  on `tcb_allowlist.txt`.
+  `sorry` in proof position.  The detector pre-masks `--` line
+  comments, `/- … -/` block comments / docstrings, and `"…"`
+  string literals before pattern-matching, so a `sorry` mention
+  inside a comment or string is correctly *not* flagged.
+* `lake exe tcb_audit` — fails if a TCB core module imports anything
+  not on `tcb_allowlist.txt` *or* in `Tools.Common.tcbInternalImports`
+  (the explicit list of project-internal modules a TCB core file is
+  allowed to import).  The internal-imports list is enumerated, not
+  pattern-based, so a TCB core file cannot silently depend on a
+  non-TCB sibling like `LegalKernel.Laws.Transfer`.
 
 ## Source layout
 
@@ -118,12 +127,13 @@ canon/
 │   │   └── Transfer.lean          -- §4.11 transfer law (with self-transfer fix).
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness + emptyState.
-│       ├── KernelTests.lean       -- value-level kernel tests (20 cases).
-│       ├── RBMapLemmasTests.lean  -- §8.3 fold-lemma tests (7 cases).
+│       ├── KernelTests.lean       -- value-level kernel tests (22 cases).
+│       ├── RBMapLemmasTests.lean  -- §8.3 fold-lemma tests (8 cases).
 │       ├── Umbrella.lean          -- umbrella-module smoke tests (2 cases).
 │       └── Laws/
 │           └── Transfer.lean      -- transfer-law tests (11 cases).
 ├── Tools/
+│   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 TCB allowlist enforcer.
 │   └── CountSorries.lean          -- WU 1.12 sorry-counting CI gate.
 ├── scripts/
@@ -634,27 +644,47 @@ WU 1.13 (Std-dependency audit) — complete:
   the TCB invokes, with stability notes and a per-toolchain-bump
   review checklist.
 
-**Test coverage (after Phase 1).**  40 passing tests across four
+**Test coverage (after Phase 1).**  43 passing tests across four
 suites:
-- `KernelTests` (20) — Phase-0 base (12) plus 8 new cases for the
+- `KernelTests` (22) — Phase-0 base (12) plus 10 new cases for the
   §4.3 balance lemmas (3), the §4.9 multi-step reachability
-  (`Reachable.refl`, `Reachable.trans`), and the §4.9 / §4.10
-  per-law-set extensions (`ReachableViaLaws.base`,
-  `ReachableViaLaws.step`, `reachable_of_reachable_via_laws`).
-- `RBMapLemmasTests` (7) — value-level spot-checks for
-  `find?_insert_self`, `find?_insert_other`, and the three
-  `sumValues_*` lemmas.
+  (`Reachable.refl`, `Reachable.trans`), the §4.9 / §4.10 per-law-set
+  extensions (`ReachableViaLaws.base`, `ReachableViaLaws.step`,
+  `reachable_of_reachable_via_laws`), and the §4.10 / WU 1.9
+  `invariant_preservation_via_laws` (one term-level API check at
+  the trivial invariant; one driving the inductive step at runtime).
+- `RBMapLemmasTests` (8) — value-level spot-checks for
+  `find?_insert_self`, `find?_insert_other`, the three
+  `sumValues_*` lemmas, and a term-level API check that
+  `sumValues_eq_values_sum` still has its expected signature.
 - `Umbrella` (2) — non-TCB build-tag smoke test, plus the Phase-1
   bump check (`kernelBuildTag = "canon-phase-1-kernel-completion"`).
 - `Transfer` (11) — unchanged from Phase 0, including the
   **§4.11 self-transfer regression** witness.
 
+Tests use two complementary patterns:
+1. **Value-level**: assert `==` between expected and actual results
+   (catches definitional drift / Std-API renames at runtime).
+2. **Term-level API stability**: ascribe a `let _proof : T :=
+   theorem ...` binding whose type uses the theorem's exact
+   signature (catches signature changes at elaboration time, before
+   the `IO Unit` body runs).
+
 `lake test` runs the suite via the `Tests.lean` driver and exits
 non-zero on any failure; CI runs the same driver.
 
 **Axiom audit (Phase 1).**  `#print axioms` on every kernel and
-RBMap theorem returns exactly `[propext, Classical.choice,
-Quot.sound]`.  No custom axioms have been introduced.
+RBMap theorem (kernel: 11 theorems; RBMap: 7 theorems) returns
+exactly `[propext, Classical.choice, Quot.sound]`.  No custom
+axioms have been introduced.
+
+**TCB-audit hardening.**  `Tools.Common.tcbInternalImports` lists
+the project-internal modules each TCB core file may import — only
+`LegalKernel.Kernel` and `LegalKernel.RBMapLemmas`.  This is a
+*specific allowlist*, not a `LegalKernel.*` namespace pattern: a
+TCB core file that tries to import e.g. `LegalKernel.Laws.Transfer`
+fails the audit, blocking the merge and forcing a §13.6
+amendment.
 
 ## Vulnerability reporting
 

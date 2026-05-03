@@ -90,6 +90,20 @@ def tests : List TestCase :=
                  (actual   := sumValues m₁)
                  "set-to-zero insert"
     }
+  , { name := "sumValues_eq_values_sum: theorem statement holds value-level"
+    , body := do
+        -- Drive the WU 1.4 theorem directly: compute both sides on a
+        -- representative fixture and assert they agree.  This is a
+        -- value-level regression check on top of the elaboration-time
+        -- proof.  If the theorem signature changes, the term
+        -- ascription below fails to elaborate.
+        let m := fundedMap
+        let _eq : sumValues m = (m.toList.map (·.snd)).sum :=
+          sumValues_eq_values_sum m
+        assertEq (expected := (m.toList.map (·.snd)).sum)
+                 (actual   := sumValues m)
+                 "sumValues = sum-of-values"
+    }
   ]
 
 end LegalKernel.Test.RBMapLemmasTests

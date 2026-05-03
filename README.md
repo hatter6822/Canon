@@ -50,8 +50,13 @@ Phase 1 adds:
   enforces zero `sorry` in the kernel TCB.
 - **WU 1.13 Std-dependency audit** in `docs/std_dependencies.md`,
   enumerating every `Std` lemma the TCB invokes.
-- **40 unit tests** across four suites (kernel, rbmap, umbrella,
-  transfer) — up from 24 in Phase 0.
+- **43 unit tests** across four suites (kernel: 22, rbmap: 8,
+  umbrella: 2, transfer: 11) — up from 24 in Phase 0.  Coverage
+  includes term-level API-stability checks for every Phase-1
+  theorem (`Reachable.refl`, `Reachable.trans`, `ReachableViaLaws`,
+  `reachable_of_reachable_via_laws`, `invariant_preservation_via_laws`,
+  `sumValues_eq_values_sum`, `sumValues_insert_absent`,
+  `sumValues_insert_present`).
 - **Extended CI** that runs `lake exe count_sorries` and
   `lake exe tcb_audit` on every PR after `lake build` / `lake test`.
 
@@ -102,12 +107,13 @@ canon/
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness +
 │       │                             shared `emptyState` helper.
-│       ├── KernelTests.lean       -- value-level kernel tests (20).
-│       ├── RBMapLemmasTests.lean  -- §8.3 fold-lemma value tests (7).
+│       ├── KernelTests.lean       -- value-level kernel tests (22).
+│       ├── RBMapLemmasTests.lean  -- §8.3 fold-lemma value tests (8).
 │       ├── Umbrella.lean          -- umbrella-module smoke tests (2).
 │       └── Laws/
 │           └── Transfer.lean      -- transfer-law tests (11).
 ├── Tools/
+│   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 — enforces tcb_allowlist.txt.
 │   └── CountSorries.lean          -- WU 1.12 — kernel sorry gate.
 ├── scripts/

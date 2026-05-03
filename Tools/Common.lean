@@ -41,6 +41,17 @@ def tcbCoreFiles : List String :=
   , "LegalKernel/RBMapLemmas.lean"
   ]
 
+/-- Project-internal modules that any TCB core file may import freely
+    (i.e. without an entry in `tcb_allowlist.txt`).  Listed explicitly
+    rather than allowing the entire `LegalKernel.*` namespace — the
+    looser policy would let a kernel core file silently depend on a
+    non-TCB module like `LegalKernel.Laws.Transfer`, expanding the
+    trusted base without the §13.6 amendment process. -/
+def tcbInternalImports : List String :=
+  [ "LegalKernel.Kernel"
+  , "LegalKernel.RBMapLemmas"
+  ]
+
 /-- Path to the TCB import allowlist consumed by `tcb_audit`. -/
 def tcbAllowlistPath : String := "tcb_allowlist.txt"
 

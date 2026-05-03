@@ -32,7 +32,7 @@ Implementation notes:
 
 import Tools.Common
 
-open LegalKernel.Tools (tcbCoreFiles tcbAllowlistPath readFileSafe)
+open LegalKernel.Tools (tcbCoreFiles tcbInternalImports tcbAllowlistPath readFileSafe)
 
 /-- Convert a list of characters back into a `String`.  Uses
     `String.ofList`, the modern non-deprecated entry point.  All of
@@ -94,11 +94,16 @@ def readAllowlist : IO (List String) := do
         let cleaned := cleanLine line
         if cleaned.isEmpty then none else some cleaned)
 
-/-- An import is *allowed* if it appears in the allowlist or is an
-    internal `LegalKernel.*` module (cross-imports within the TCB are
-    always permissible). -/
+/-- An import is *allowed* if it appears in the allowlist or is one of
+    the explicitly-enumerated TCB-internal modules
+    (`LegalKernel.Kernel`, `LegalKernel.RBMapLemmas`).
+
+    Important: we do **not** whitelist the entire `LegalKernel.*`
+    namespace; that would let a TCB core file silently depend on a
+    non-TCB module (e.g. `LegalKernel.Laws.Transfer`), expanding the
+    trusted base without the §13.6 amendment process. -/
 def isAllowed (allowlist : List String) (imp : String) : Bool :=
-  imp ∈ allowlist || imp.startsWith "LegalKernel."
+  imp ∈ allowlist || imp ∈ tcbInternalImports
 
 /-- Audit one TCB module.  Returns the list of un-allowlisted imports
     (empty on success, non-empty on failure). -/

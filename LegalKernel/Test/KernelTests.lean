@@ -219,6 +219,39 @@ def tests : List TestCase :=
           reachable_of_reachable_via_laws hL
         pure ()
     }
+
+  -- Phase 1 / WU 1.9: invariant_preservation_via_laws.
+  , { name := "invariant_preservation_via_laws preserves the trivial invariant"
+    , body := do
+        -- Term construction is the assertion: if `invariant_preservation_via_laws`
+        -- ever changes signature, this elaboration fails.  We instantiate the
+        -- theorem with the trivially-true invariant (`fun _ => True`); the
+        -- proof obligation reduces to `trivial`.
+        let t  := alwaysLegalCredit 1 2
+        let L  : List Transition := [t]
+        let _holds : ∀ s, ReachableViaLaws L emptyState s → (fun _ : State => True) s :=
+          invariant_preservation_via_laws (fun _ => True) L emptyState
+            trivial
+            (fun _ _ _ _ _ => trivial)
+        pure ()
+    }
+  , { name := "invariant_preservation_via_laws derives I s from a witness"
+    , body := do
+        -- Construct a depth-1 ReachableViaLaws witness, feed it through
+        -- `invariant_preservation_via_laws`, and check the resulting
+        -- `I s` is the trivially-true `True`.  This drives the
+        -- inductive *step* case at runtime, not just the base case.
+        let t  := alwaysLegalCredit 1 2
+        let L  : List Transition := [t]
+        let s₁ := step_impl emptyState t
+        let hL : ReachableViaLaws L emptyState s₁ :=
+          ReachableViaLaws.step emptyState t (List.mem_singleton.mpr rfl)
+            ReachableViaLaws.base trivial
+        let _trueAt : (fun _ : State => True) s₁ :=
+          invariant_preservation_via_laws (fun _ => True) L emptyState
+            trivial (fun _ _ _ _ _ => trivial) s₁ hL
+        pure ()
+    }
   ]
 
 end LegalKernel.Test.KernelTests

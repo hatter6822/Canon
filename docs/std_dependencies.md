@@ -57,7 +57,8 @@ lemma lives.
 | `Std.TreeMap.getElem?_insert_self` | `Std.Data.TreeMap.Lemmas` | `find?_insert_self` (WU 1.1) | `@[simp]`, post-rename name; was `Std.RBMap.find?_insert_self` in std4. |
 | `Std.TreeMap.getElem?_insert` | `Std.Data.TreeMap.Lemmas` | `find?_insert_other` (WU 1.1) | `@[grind =]`; used together with `LawfulEqCmp.compare_eq_iff_eq` to discharge the "different key" branch. |
 | `Std.LawfulEqCmp.eq_of_compare` | `Init.Data.Order.Ord` | `find?_insert_other` (WU 1.1) | core, very stable |
-| `Std.TreeMap.foldl_eq_foldl_toList` | `Std.Data.TreeMap.Lemmas` | `sumValues_eq_toList_sum` (WU 1.4) | first-stable form; equivalent in spirit to "fold respects toList order". |
+| `Std.TreeMap.foldl_eq_foldl_toList` | `Std.Data.TreeMap.Lemmas` | `sumValues_eq_toList_sum` (WU 1.4 bridge) | first-stable form; equivalent in spirit to "fold respects toList order". |
+| `List.sum_eq_foldl_nat` | `Init.Data.List.Nat.Sum` | `sumValues_eq_values_sum` (WU 1.4) | core; `xs.sum = xs.foldl 0 (· + ·)` for `Nat`-lists.  Bridges between the kernel's `foldl`-based `sumValues` and Lean core's standard `List.sum` for `Nat`-permutation theorems. |
 | `Std.TreeMap.toList_insert_perm` | `Std.Data.TreeMap.Lemmas` | `sumValues_insert_absent` (WU 1.2) | core property; permutation form chosen to match `List.Perm.sum_nat`. |
 | `Std.TreeMap.mem_iff_isSome_getElem?` | `Std.Data.TreeMap.Lemmas` | `sumValues_insert_absent`, `not_mem_erase_self` | API-stable |
 | `Std.TreeMap.mem_toList_iff_getElem?_eq_some` | `Std.Data.TreeMap.Lemmas` | `sumValues_insert_absent` | requires `[LawfulEqCmp cmp]`. |

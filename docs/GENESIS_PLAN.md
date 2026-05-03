@@ -2828,24 +2828,40 @@ published.
 - WU 1.11 (TCB-audit tool): `Tools/TcbAudit.lean` ships as
   `lake exe tcb_audit`; it parses the direct imports of
   `Kernel.lean` and `RBMapLemmas.lean` and rejects any not on
-  `tcb_allowlist.txt`.  CI runs the audit on every PR.
+  `tcb_allowlist.txt` *or* in the explicit `tcbInternalImports`
+  list (currently `LegalKernel.Kernel`, `LegalKernel.RBMapLemmas`).
+  The internal-imports list is enumerated rather than pattern-based,
+  so a TCB core file cannot silently depend on a non-TCB
+  `LegalKernel.*` sibling like `LegalKernel.Laws.Transfer`.  CI
+  runs the audit on every PR.
 - WU 1.12 (`count_sorries`): `Tools/CountSorries.lean` ships as
   `lake exe count_sorries`; it walks `LegalKernel/` and fails the
   build on any `sorry` in proof position in
-  `Kernel.lean` / `RBMapLemmas.lean` / `Laws/Transfer.lean`.  CI
-  runs the gate on every PR.
+  `Kernel.lean` / `RBMapLemmas.lean` / `Laws/Transfer.lean`.  The
+  detector pre-masks `--` line comments, `/- … -/` block comments
+  / docstrings, and `"…"` string literals using a state-machine
+  pre-pass before pattern-matching, so a `sorry` *mention* inside
+  a comment or string literal is correctly *not* flagged as a
+  proof-position violation.  The "warns when total sorries
+  increase" half of the WU 1.12 acceptance criterion is currently
+  moot because the project total is zero; it can be reactivated as
+  a baseline-comparison soft gate when a downstream module first
+  ships an allowed sorry.  CI runs the gate on every PR.
 - WU 1.13 (`Std`-dependency audit): `docs/std_dependencies.md`
   enumerates every `Std` lemma the TCB invokes, with stability
   notes and a per-toolchain-bump review checklist.
 
-**Phase 1 testing.** The test driver was extended to 40 tests
-across four suites (kernel: 20; rbmap: 7; umbrella: 2; transfer:
+**Phase 1 testing.** The test driver was extended to 43 tests
+across four suites (kernel: 22; rbmap: 8; umbrella: 2; transfer:
 11).  The new kernel cases exercise the §4.3 balance lemmas
 value-level, the §4.9 multi-step / law-set reachability
-constructors, and the embedding theorem.  The new `RBMapLemmasTests`
-suite spot-checks `find?_insert_self`, `find?_insert_other`, and
-the three `sumValues_*` lemmas on representative `BalanceMap`
-fixtures.
+constructors, the embedding theorem `reachable_of_reachable_via_laws`,
+and the §4.10 `invariant_preservation_via_laws` (both at term
+level via type ascription and at runtime by driving the inductive
+step on a depth-1 witness).  The new `RBMapLemmasTests` suite
+spot-checks `find?_insert_self`, `find?_insert_other`, the three
+`sumValues_*` lemmas, and adds a term-level API-stability check
+for `sumValues_eq_values_sum`.
 
 **Phase 1 axiom audit.**  Every kernel and `RBMapLemmas` theorem
 `#print axioms` to exactly `[propext, Classical.choice, Quot.sound]`
