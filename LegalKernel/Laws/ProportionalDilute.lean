@@ -221,27 +221,16 @@ theorem totalSupply_after_proportionalDilute
   simp only [proportionalDilute]
   exact foldl_setBalance_proportional_totalSupply _ s r totalReward _
 
-/-! ## Supply non-decrease bound (WU R.14)
-
-Direct corollary of the supply equation: post-dilution supply is at
-least pre-dilution supply, since each summand in the sum is a
-non-negative `Nat`.
-
-The stronger "dust" bound (post-dilution supply ≤ pre-dilution supply
-+ totalReward, capturing that floor-division dust is discarded rather
-than minted) is a stated deployment-level claim from the
-positive-incentives plan; its formal proof requires a TreeMap-level
-filter-sum identity (`(bm.toList.filter (·.1 != k)).map (·.2).sum =
-sumOthers s r k`) that goes through `Std.TreeMap.distinct_keys_toList`
-and a partition-of-filter-sums argument.  That proof is non-trivial
-(~80 lines) and is deferred to a follow-up WU under the existing
-`docs/economic_invariants.md` "future work" track; the value-level
-dust-bound spot-check in `Test/Laws/ProportionalDilute.lean` (R.16)
-exercises the property numerically on concrete fixtures. -/
+/-! ## Supply non-decrease bound (WU R.14: weak form) -/
 
 /-- Supply at the diluted resource is non-decreasing.  Direct
     consequence of `totalSupply_after_proportionalDilute` plus the
-    fact that the summed quantity is a sum of `Nat`s, hence ≥ 0. -/
+    fact that the summed quantity is a sum of `Nat`s, hence ≥ 0.
+
+    Subsumed by the stronger dust bound below
+    (`_distributed_le_totalReward`), but kept as a stable identifier
+    for `proportionalDilute_isMonotonic` consumers and for code that
+    only needs the non-decrease direction. -/
 theorem proportionalDilute_supply_nondecreasing
     (r : ResourceId) (excluded : ActorId) (totalReward : Amount) (s : State)
     (hpre : (proportionalDilute r excluded totalReward).pre s) :
@@ -249,6 +238,71 @@ theorem proportionalDilute_supply_nondecreasing
     TotalSupply (step_impl s (proportionalDilute r excluded totalReward)) r := by
   rw [totalSupply_after_proportionalDilute r excluded totalReward s hpre]
   exact Nat.le_add_right _ _
+
+/-! ## Dust bound (WU R.14: full form) -/
+
+/-- The per-element floor bound chained over a list: the sum of
+    floor-divided quantities multiplied by the divisor is bounded
+    above by the sum of the dividends.
+
+    Per-element: `(totalReward * kv.2 / S) * S ≤ totalReward * kv.2`
+    by `Nat.div_mul_le_self`.  Summing over the list (with `(a + b) *
+    S = a * S + b * S` distributivity) and `(a + b) = totalReward * a'
+    + totalReward * b'` distributivity gives the chain bound. -/
+private theorem list_div_sum_mul_le
+    (xs : List (ActorId × Nat)) (totalReward S : Nat) :
+    ((xs.map (fun kv => totalReward * kv.2 / S)).sum) * S ≤
+    totalReward * (xs.map (·.2)).sum := by
+  induction xs with
+  | nil => simp
+  | cons hd tl ih =>
+      simp only [List.map_cons, List.sum_cons]
+      -- LHS: (totalReward * hd.2 / S + sum_tl) * S
+      --     = totalReward * hd.2 / S * S + sum_tl * S
+      -- RHS: totalReward * (hd.2 + tl_sum)
+      --     = totalReward * hd.2 + totalReward * tl_sum
+      have h_div : totalReward * hd.2 / S * S ≤ totalReward * hd.2 :=
+        Nat.div_mul_le_self _ _
+      rw [Nat.add_mul, Nat.mul_add]
+      -- Goal: totalReward * hd.2 / S * S + sum_tl * S
+      --     ≤ totalReward * hd.2 + totalReward * sum_tl
+      -- by h_div and ih.
+      omega
+
+/-- The dust bound: `proportionalDilute`'s supply increase is bounded
+    above by `totalReward`.  Together with
+    `_supply_nondecreasing` this pins the increment to `[0,
+    totalReward]`; the discarded dust accounts for the gap between the
+    actual increment and `totalReward`.
+
+    Proof structure:
+    1. By `totalSupply_after_proportionalDilute` (R.13), reduce to
+       `dist_sum ≤ totalReward`, where `dist_sum := sum_{kv ∈ filter}
+       (totalReward * kv.2 / S)` and `S := sumOthers`.
+    2. By `list_div_sum_mul_le`: `dist_sum * S ≤ totalReward *
+       filter_sum_balances`.
+    3. By `state_filter_sum_eq_sumOthers` (in `Conservation.lean`):
+       `filter_sum_balances = S`.
+    4. Substitute: `dist_sum * S ≤ totalReward * S`.
+    5. Divide by `S > 0` (precondition): `dist_sum ≤ totalReward`. -/
+theorem proportionalDilute_distributed_le_totalReward
+    (r : ResourceId) (excluded : ActorId) (totalReward : Amount) (s : State)
+    (hpre : (proportionalDilute r excluded totalReward).pre s) :
+    TotalSupply (step_impl s (proportionalDilute r excluded totalReward)) r ≤
+    TotalSupply s r + totalReward := by
+  rw [totalSupply_after_proportionalDilute r excluded totalReward s hpre]
+  apply Nat.add_le_add_left
+  -- Goal: sum_{kv ∈ filter} (totalReward * kv.2 / sumOthers) ≤ totalReward
+  have hS : sumOthers s r excluded > 0 := hpre.2
+  have h_filter_sum := state_filter_sum_eq_sumOthers s r excluded
+  have h_chain_bound :=
+    list_div_sum_mul_le
+      ((s.balances[r]?.getD ∅).toList.filter (fun kv => kv.1 != excluded))
+      totalReward (sumOthers s r excluded)
+  -- h_chain_bound : dist_sum * S ≤ totalReward * filter_sum_balances
+  rw [h_filter_sum] at h_chain_bound
+  -- h_chain_bound : dist_sum * S ≤ totalReward * S
+  exact Nat.le_of_mul_le_mul_right h_chain_bound hS
 
 /-! ## Monotonicity classification (WU R.15) -/
 

@@ -141,6 +141,16 @@ def tests : List TestCase :=
           proportionalDilute_supply_nondecreasing 1 2 10 s hpre
         pure ()
     }
+  , { name := "proportionalDilute_distributed_le_totalReward API stability (dust bound)"
+    , body := do
+        let s := fixtureF1
+        let t := proportionalDilute 1 2 10
+        have hpre : t.pre s := by decide
+        let _proof :
+            TotalSupply (step_impl s t) 1 ≤ TotalSupply s 1 + 10 :=
+          proportionalDilute_distributed_le_totalReward 1 2 10 s hpre
+        pure ()
+    }
   , { name := "proportionalDilute_isMonotonic instance resolves"
     , body := do
         let _inst : IsMonotonic (proportionalDilute 1 2 10) := inferInstance
