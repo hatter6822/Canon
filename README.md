@@ -72,14 +72,7 @@ enforces that comparable systems leave to convention or audit:
   ; impl := …` macro fills in `decPre := fun _ => inferInstance`;
   if the precondition is not instance-decidable, elaboration fails
   with a clear error rather than silently admitting a partial law.
-- **Std-core only, no Mathlib.** The kernel imports
-  `Std.Data.TreeMap` and nothing else. `lake exe tcb_audit` enforces
-  this against `tcb_allowlist.txt`; adding any third-party Lean
-  package is a TCB expansion that triggers the §13.6 amendment
-  process.
-- **Reproducible builds.** `scripts/setup.sh` SHA-256-pins the elan
-  installer, the elan binary, and the Lean toolchain archive. CI
-  pins every third-party action to a full-length commit SHA.
+
 
 ## Engineering posture
 
