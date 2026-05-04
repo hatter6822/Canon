@@ -1,0 +1,181 @@
+/-
+  Canon  - A Societal Kernel
+  Copyright (C) 2026  Adam Hall
+  This program comes with ABSOLUTELY NO WARRANTY.
+  This is free software, and you are welcome to redistribute it
+  under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+-/
+
+/-
+LegalKernel.Test.Events.Extract — Phase-5 WU 5.6 tests for the
+`extractEvents` function.
+
+We exercise the per-action event-emission contract by constructing
+hand-built `(pre, post)` `ExtendedState` pairs and verifying the
+expected event list.  The pre/post pairs are *constructed*, not
+*applied via the kernel* — this isolates `extractEvents`'s logic
+from the kernel's apply path.
+-/
+
+import LegalKernel.Test.Framework
+import LegalKernel.Events.Extract
+
+namespace LegalKernel.Test.Events
+namespace ExtractTests
+
+open LegalKernel
+open LegalKernel.Authority
+open LegalKernel.Events
+
+/-- The dummy signature used in test fixtures. -/
+def dummySig : Signature := ⟨#[0x99]⟩
+
+/-- A pre-state with actor 1 holding 100 of resource 1.  Used by
+    most balance-change tests. -/
+def preStateOneHundred : ExtendedState :=
+  { base    := setBalance ({ balances := ∅ }) 1 1 100
+  , nonces  := { next := ∅ }
+  , registry := KeyRegistry.empty }
+
+/-- Post-state for a successful "transfer 30 from 1 to 2" action. -/
+def postTransfer : ExtendedState :=
+  let s' := setBalance preStateOneHundred.base 1 1 70
+  let s'' := setBalance s' 1 2 30
+  { base := s'', nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 },
+    registry := KeyRegistry.empty }
+
+/-- A transfer of 30 from actor 1 to actor 2 should emit two
+    balanceChanged events plus a nonceAdvanced. -/
+def transferEmitsThreeEvents : TestCase := {
+  name := "transfer emits sender + receiver + nonce events"
+  body := do
+    let st : SignedAction := ⟨.transfer 1 1 2 30, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred postTransfer st
+    assertEq (3 : Nat) evs.length "event count"
+}
+
+/-- `freezeResource` should emit only the nonce event. -/
+def freezeOneEvent : TestCase := {
+  name := "freezeResource emits only nonce event"
+  body := do
+    let post : ExtendedState :=
+      { preStateOneHundred with
+        nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 } }
+    let st : SignedAction := ⟨.freezeResource 1, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    assertEq (1 : Nat) evs.length "event count"
+    let expected : Event := .nonceAdvanced 1 0 1
+    if evs == [expected] then pure ()
+    else throw <| IO.userError s!"unexpected events: {repr evs}"
+}
+
+/-- `replaceKey` should emit identityRegistered + nonceAdvanced. -/
+def replaceKeyTwoEvents : TestCase := {
+  name := "replaceKey emits registration + nonce events"
+  body := do
+    let pk : PublicKey := ⟨#[0x42]⟩
+    let post : ExtendedState :=
+      { preStateOneHundred with
+        nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 }
+        registry := KeyRegistry.empty.register 5 pk }
+    let st : SignedAction := ⟨.replaceKey 5 pk, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    assertEq (2 : Nat) evs.length "event count"
+}
+
+/-- `mint` of 50 to actor 1 emits balanceChanged + nonceAdvanced. -/
+def mintTwoEvents : TestCase := {
+  name := "mint emits balance + nonce events"
+  body := do
+    let post : ExtendedState :=
+      { base := setBalance preStateOneHundred.base 1 1 150
+      , nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 }
+      , registry := KeyRegistry.empty }
+    let st : SignedAction := ⟨.mint 1 1 50, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    assertEq (2 : Nat) evs.length "event count"
+}
+
+/-- `burn` of 30 from actor 1 emits balanceChanged + nonceAdvanced. -/
+def burnTwoEvents : TestCase := {
+  name := "burn emits balance + nonce events"
+  body := do
+    let post : ExtendedState :=
+      { base := setBalance preStateOneHundred.base 1 1 70
+      , nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 }
+      , registry := KeyRegistry.empty }
+    let st : SignedAction := ⟨.burn 1 1 30, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    assertEq (2 : Nat) evs.length "event count"
+}
+
+/-- `reward` of 10 to actor 1 emits balanceChanged + nonceAdvanced. -/
+def rewardTwoEvents : TestCase := {
+  name := "reward emits balance + nonce events"
+  body := do
+    let post : ExtendedState :=
+      { base := setBalance preStateOneHundred.base 1 1 110
+      , nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 }
+      , registry := KeyRegistry.empty }
+    let st : SignedAction := ⟨.reward 1 1 10, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    assertEq (2 : Nat) evs.length "event count"
+}
+
+/-- Self-transfer (sender = receiver, amount > 0) emits no balance
+    events (zero delta) but still emits the nonce event. -/
+def selfTransferOneEvent : TestCase := {
+  name := "self-transfer emits only nonce event"
+  body := do
+    -- Self-transfer leaves the balance unchanged; only the nonce advances.
+    let post : ExtendedState :=
+      { preStateOneHundred with
+        nonces := { next := (∅ : Std.TreeMap _ _ _).insert 1 1 } }
+    let st : SignedAction := ⟨.transfer 1 1 1 30, 1, 0, dummySig⟩
+    let evs := extractEvents preStateOneHundred post st
+    -- Self-transfer at the same actor: oldV = newV, so no balanceChanged.
+    -- Only the nonceAdvanced event remains.
+    assertEq (1 : Nat) evs.length "event count"
+}
+
+/-- Determinism: equal inputs produce equal event lists. -/
+def determinism : TestCase := {
+  name := "extractEvents is deterministic"
+  body := do
+    let st : SignedAction := ⟨.transfer 1 1 2 30, 1, 0, dummySig⟩
+    let evs1 := extractEvents preStateOneHundred postTransfer st
+    let evs2 := extractEvents preStateOneHundred postTransfer st
+    if evs1 == evs2 then pure ()
+    else throw <| IO.userError "non-deterministic extractEvents"
+}
+
+/-- Term-level API: `extractEvents_deterministic`. -/
+def determinismAPI : TestCase := {
+  name := "extractEvents_deterministic API stability"
+  body := do
+    let _proof : ∀ (pre₁ post₁ : ExtendedState) (st₁ : SignedAction)
+                   (pre₂ post₂ : ExtendedState) (st₂ : SignedAction),
+                   pre₁ = pre₂ → post₁ = post₂ → st₁ = st₂ →
+                   extractEvents pre₁ post₁ st₁ = extractEvents pre₂ post₂ st₂ :=
+      extractEvents_deterministic
+    pure ()
+}
+
+/-- Term-level API: `extractEvents_nonempty`. -/
+def nonemptyAPI : TestCase := {
+  name := "extractEvents_nonempty API stability"
+  body := do
+    let _proof : ∀ (pre post : ExtendedState) (st : SignedAction),
+                   extractEvents pre post st ≠ [] :=
+      extractEvents_nonempty
+    pure ()
+}
+
+/-- All tests. -/
+def tests : List TestCase :=
+  [transferEmitsThreeEvents, freezeOneEvent, replaceKeyTwoEvents,
+   mintTwoEvents, burnTwoEvents, rewardTwoEvents, selfTransferOneEvent,
+   determinism, determinismAPI, nonemptyAPI]
+
+end ExtractTests
+end LegalKernel.Test.Events

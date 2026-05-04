@@ -53,10 +53,21 @@ lean_exe Tests where
   root := `Tests
   supportInterpreter := true
 
-/-- Placeholder driver executable.  Phase 5 of the Genesis Plan
-    (`Runtime/Loop.lean`) will replace this with the real runtime. -/
+/-- The Phase-5 `canon` runtime executable (WU 5.1).  Multiplexes
+    five subcommands (`info`, `process`, `replay`, `bootstrap`,
+    `snapshot`) against an append-only log file at the path supplied
+    on the command line.  See `Main.lean` for the dispatcher and
+    `docs/abi.md` for the on-disk byte layouts. -/
 lean_exe canon where
   root := `Main
+
+/-- The Phase-5 `canon-replay` executable (WU 5.5).  A focused,
+    audit-oriented binary that reads a log file and prints the
+    final state hash without writing to the log.  An auditor running
+    this on a separate machine reproduces the runtime's `StateHash`
+    byte-for-byte (Genesis Plan §13.2 acceptance). -/
+lean_exe «canon-replay» where
+  root := `Replay
 
 /-- Shared utilities for the Phase 1 audit executables: the kernel-TCB
     file list, the TCB allowlist path, and a safe file reader.  Kept

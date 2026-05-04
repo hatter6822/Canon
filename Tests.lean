@@ -60,6 +60,13 @@ import LegalKernel.Test.Encoding.SignedAction
 import LegalKernel.Test.Encoding.State
 import LegalKernel.Test.Encoding.SignInput
 import LegalKernel.Test.DSL.Law
+import LegalKernel.Test.Events.Types
+import LegalKernel.Test.Events.Extract
+import LegalKernel.Test.Runtime.Hash
+import LegalKernel.Test.Runtime.LogFile
+import LegalKernel.Test.Runtime.Replay
+import LegalKernel.Test.Runtime.Snapshot
+import LegalKernel.Test.Runtime.Loop
 
 open LegalKernel.Test
 
@@ -89,6 +96,13 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "encoding-state"     Encoding.StateTests.tests)
   failed := failed + (← runAll "encoding-signinput" Encoding.SignInputTests.tests)
   failed := failed + (← runAll "dsl-law"            DSL.LawTests.tests)
+  failed := failed + (← runAll "events-types"      Events.TypesTests.tests)
+  failed := failed + (← runAll "events-extract"    Events.ExtractTests.tests)
+  failed := failed + (← runAll "runtime-hash"      Runtime.HashTests.tests)
+  failed := failed + (← runAll "runtime-logfile"   Runtime.LogFileTests.tests)
+  failed := failed + (← runAll "runtime-replay"    Runtime.ReplayTests.tests)
+  failed := failed + (← runAll "runtime-snapshot"  Runtime.SnapshotTests.tests)
+  failed := failed + (← runAll "runtime-loop"      Runtime.LoopTests.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0

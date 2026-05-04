@@ -37,7 +37,7 @@ Phase status:
     single guarded `apply_admissible` entry point; and the headline
     §8.5.2 `nonce_uniqueness` and `replay_impossible` theorems plus
     the `replaceKey` authority-layer effect (WU 3.10).
-  * Phase 4 prelude (current; positive incentives): added the
+  * Phase 4 prelude (positive incentives): added the
     `IsMonotonic` typeclass + `monotonic_of_conservative` auto-upgrade
     and the `MonotonicLawSet` structure (the type-level firewall for
     "no value destruction" deployments); the
@@ -53,6 +53,22 @@ Phase status:
     negative witness; and three new `Action` constructors (`reward`,
     `distributeOthers`, `proportionalDilute`) with their compile
     branches.
+  * Phase 4 (DSL and Serialization): added the `Encodable` typeclass +
+    CBE byte codec; per-type round-trip and injectivity proofs for
+    primitives and headline types (`Action`, `SignedAction`, `State`,
+    `ExtendedState`); domain-separated `signInput` (§8.8.5); the `law`
+    macro (`pre := ... ; impl := ...`).
+  * Phase 5 (current; Runtime and Extraction): added the deterministic
+    `Runtime.Hash` (FNV-1a-64 fallback for production BLAKE3); the
+    Phase-5 `LogEntry` + framed log-file format with crash-consistent
+    truncation (`Runtime.LogFile`); the standalone `replay` tool
+    (`Runtime.Replay`); state snapshots + incremental shipping
+    (`Runtime.Snapshot`); the `RuntimeState` + `processSignedAction`
+    main loop (`Runtime.Loop`); the `Event` inductive (§8.9.2) and
+    deterministic `extractEvents` (`Events.{Types, Extract}`); the
+    `canon` runtime CLI (with `process` / `replay` / `bootstrap` /
+    `snapshot` subcommands) and the focused `canon-replay` audit
+    binary.
 
 Importing `LegalKernel` is the recommended entry point for downstream
 modules and tests; do *not* import `LegalKernel.Kernel` or
@@ -87,6 +103,13 @@ import LegalKernel.Encoding.SignedAction
 import LegalKernel.Encoding.State
 import LegalKernel.Encoding.SignInput
 import LegalKernel.DSL.Law
+import LegalKernel.Events.Types
+import LegalKernel.Events.Extract
+import LegalKernel.Runtime.Hash
+import LegalKernel.Runtime.LogFile
+import LegalKernel.Runtime.Replay
+import LegalKernel.Runtime.Snapshot
+import LegalKernel.Runtime.Loop
 
 namespace LegalKernel
 
@@ -101,6 +124,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-phase-4-dsl-serialization"
+def kernelBuildTag : String := "canon-phase-5-runtime-extraction"
 
 end LegalKernel
