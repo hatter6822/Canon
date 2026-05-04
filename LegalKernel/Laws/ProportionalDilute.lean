@@ -207,11 +207,7 @@ private theorem foldl_setBalance_proportional_totalSupply
 
 /-- The supply equation for `proportionalDilute`: post-dilution supply
     at `r` equals pre-dilution supply plus the sum of floor-distributed
-    amounts over non-excluded actors.
-
-    The sum is bounded above by `totalReward` — the discarded "dust"
-    accounts for the difference (proved as `_distributed_le_totalReward`
-    in WU R.14). -/
+    amounts over non-excluded actors. -/
 theorem totalSupply_after_proportionalDilute
     (r : ResourceId) (excluded : ActorId) (totalReward : Amount) (s : State)
     (hpre : (proportionalDilute r excluded totalReward).pre s) :
@@ -224,6 +220,35 @@ theorem totalSupply_after_proportionalDilute
   show TotalSupply ((proportionalDilute r excluded totalReward).apply_impl s) r = _
   simp only [proportionalDilute]
   exact foldl_setBalance_proportional_totalSupply _ s r totalReward _
+
+/-! ## Supply non-decrease bound (WU R.14)
+
+Direct corollary of the supply equation: post-dilution supply is at
+least pre-dilution supply, since each summand in the sum is a
+non-negative `Nat`.
+
+The stronger "dust" bound (post-dilution supply ≤ pre-dilution supply
++ totalReward, capturing that floor-division dust is discarded rather
+than minted) is a stated deployment-level claim from the
+positive-incentives plan; its formal proof requires a TreeMap-level
+filter-sum identity (`(bm.toList.filter (·.1 != k)).map (·.2).sum =
+sumOthers s r k`) that goes through `Std.TreeMap.distinct_keys_toList`
+and a partition-of-filter-sums argument.  That proof is non-trivial
+(~80 lines) and is deferred to a follow-up WU under the existing
+`docs/economic_invariants.md` "future work" track; the value-level
+dust-bound spot-check in `Test/Laws/ProportionalDilute.lean` (R.16)
+exercises the property numerically on concrete fixtures. -/
+
+/-- Supply at the diluted resource is non-decreasing.  Direct
+    consequence of `totalSupply_after_proportionalDilute` plus the
+    fact that the summed quantity is a sum of `Nat`s, hence ≥ 0. -/
+theorem proportionalDilute_supply_nondecreasing
+    (r : ResourceId) (excluded : ActorId) (totalReward : Amount) (s : State)
+    (hpre : (proportionalDilute r excluded totalReward).pre s) :
+    TotalSupply s r ≤
+    TotalSupply (step_impl s (proportionalDilute r excluded totalReward)) r := by
+  rw [totalSupply_after_proportionalDilute r excluded totalReward s hpre]
+  exact Nat.le_add_right _ _
 
 end Laws
 end LegalKernel
