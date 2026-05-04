@@ -14,7 +14,7 @@ an append-only file of framed `LogEntry` records (Genesis Plan §8.7).
 Each entry chains to the previous via `prevHash`, making the log
 tamper-evident.
 
-Frame layout (15 + N bytes per record):
+Frame layout (20 + N bytes per record):
 
   ```
   +---------+-------------+-------------------+-----------+
@@ -160,11 +160,14 @@ instance instEncodableLogEntry : Encodable LogEntry where
 
       `LogEntryHash := BLAKE3(encode signedAction || encode previousLogEntryHash)`
 
-    Phase 5 substitutes FNV-1a-64 for BLAKE3 (see `Runtime/Hash.lean`
-    for the production-replacement boundary). -/
+    Both operands are CBE-encoded (so `previousLogEntryHash` carries
+    its 9-byte bytestring header before its raw bytes — the same as
+    any other ByteArray-typed field in CBE).  Phase 5 substitutes
+    FNV-1a-64 for BLAKE3 (see `Runtime/Hash.lean` for the
+    production-replacement boundary); the byte layout is the same. -/
 def LogEntry.hash (e : LogEntry) : ContentHash :=
   hashStream (Encodable.encode (T := SignedAction) e.signedAction ++
-                e.prevHash.toList)
+                Encodable.encode (T := ByteArray) e.prevHash)
 
 /-! ## Frame encoding
 
@@ -283,15 +286,22 @@ termination structural; the fuel never actually runs out
 
     Pre-fueled with `s.length + 1` so the recursion is structural
     (Lean cannot infer termination on `decodeFrame`'s residual
-    bound without an explicit measure).  Fuel exhaustion treats the
-    remaining bytes as corrupt; in practice fuel never runs out
-    because each iteration consumes ≥ 1 byte. -/
+    bound without an explicit measure).  In practice fuel never
+    runs out because each `decodeFrame` iteration consumes ≥ 20
+    bytes (frame header + trailer); we set fuel = `s.length + 1`
+    which is a strict upper bound on iteration count.
+
+    Fuel-exhaustion handling: the empty-stream case takes priority
+    over fuel-exhaustion — `(0, [], …)` returns clean (no error).
+    The unreachable case `(0, byte :: _, …)` surfaces a synthetic
+    `truncated` so the caller's error path is uniform; in practice
+    this is never hit. -/
 def decodeAllFrames' :
     Nat → Stream → Nat → List LogEntry →
     List LogEntry × Nat × Option FrameError
-  | 0,        _, consumed, acc => (acc.reverse, consumed, none)
-  | _ + 1,   [], consumed, acc => (acc.reverse, consumed, none)
-  | fuel + 1, s, consumed, acc =>
+  | _,        [],     consumed, acc => (acc.reverse, consumed, none)
+  | 0,        _ :: _, consumed, acc => (acc.reverse, consumed, some .truncated)
+  | fuel + 1, s,      consumed, acc =>
     match decodeFrame s with
     | .ok (e, rest) =>
       let used := s.length - rest.length

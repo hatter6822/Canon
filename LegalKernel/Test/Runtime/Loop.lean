@@ -217,13 +217,143 @@ def bootstrapErrorRepr : TestCase := {
     let r1 := repr (BootstrapError.replay (.chainBroken 0))
     let r2 := repr (BootstrapError.snapshot .hashMismatch)
     let r3 := repr (BootstrapError.truncated .truncated)
-    -- All three reprs should be non-empty Strings (Format.pretty).
+    let r4 := repr (BootstrapError.logIndexOverrun 5 0)
+    -- All four reprs should be pretty-printer distinct.
     let s1 := r1.pretty
     let s2 := r2.pretty
     let s3 := r3.pretty
-    if s1 == s2 || s2 == s3 || s1 == s3 then
+    let s4 := r4.pretty
+    -- Pairwise distinctness check.
+    if s1 == s2 || s1 == s3 || s1 == s4 ||
+       s2 == s3 || s2 == s4 ||
+       s3 == s4 then
       throw <| IO.userError "BUG: distinct BootstrapError reprs collide"
     pure ()
+}
+
+/-- `bootstrapFromSnapshot` with `snap.logIndex` exceeding the
+    log file's entry count surfaces a precise
+    `logIndexOverrun` diagnostic.  Audit fix #5: the snapshot is
+    coherent on its own but cannot fit on top of the log. -/
+def bootstrapFromSnapshotIndexOverrun : TestCase := {
+  name := "bootstrapFromSnapshot rejects logIndex > log length"
+  body := do
+    let path := System.FilePath.mk "/tmp/canon-test-loop-overrun.bin"
+    if (← path.pathExists) then
+      IO.FS.removeFile path
+    -- Empty log file (zero entries), but snapshot claims index 5.
+    let snap := takeSnapshot genesis zeroHash 5
+    match (← bootstrapFromSnapshot policy snap path) with
+    | .ok _ =>
+      throw <| IO.userError "BUG: accepted overrunning snapshot"
+    | .error (.logIndexOverrun snapIdx logEntries) =>
+      assertEq (5 : Nat) snapIdx "snapIdx field"
+      assertEq (0 : Nat) logEntries "logEntries field"
+    | .error other =>
+      throw <| IO.userError s!"expected logIndexOverrun, got {repr other}"
+}
+
+/-- `bootstrapFromSnapshot` slicing: with `snap.logIndex = log.length`,
+    the post-snapshot tail is empty, so replay is trivial.  The
+    resulting runtime state matches the snapshot's state exactly.
+    This exercises the slicing path without needing Verify=true. -/
+def bootstrapFromSnapshotEmptyTail : TestCase := {
+  name := "bootstrapFromSnapshot slices to empty tail when logIndex = log length"
+  body := do
+    let path := System.FilePath.mk "/tmp/canon-test-loop-empty-tail.bin"
+    if (← path.pathExists) then
+      IO.FS.removeFile path
+    -- Empty log + snap.logIndex = 0 → tail is empty, no replay needed.
+    let snap := takeSnapshot genesis zeroHash 0
+    match (← bootstrapFromSnapshot policy snap path) with
+    | .ok (rs, _) =>
+      -- The resulting state should match the snapshot's state.
+      let snapStateHash := snap.stateHash
+      let rsStateHash := hashEncodable rs.state
+      assertEq snapStateHash.toList rsStateHash.toList "state hash match"
+      assertEq (0 : Nat) rs.logIndex "logIndex"
+    | .error e =>
+      throw <| IO.userError s!"unexpected error: {repr e}"
+}
+
+/-- `bootstrapFromSnapshot` slicing exercises the drop-K path.  We
+    write two synthetic LogEntries to the log file directly
+    (bypassing admissibility), then build a snapshot at
+    `logIndex = 2`.  bootstrapFromSnapshot should drop both entries
+    (slicing) and return the snapshot state at logIndex = 2.  If
+    the slicing were missing, replay would attempt to apply the
+    pre-snapshot entries on top of the snapshot's seedHash, fail
+    chain check, and return `.replay (.chainBroken 0)`. -/
+def bootstrapFromSnapshotDropsPreSnapEntries : TestCase := {
+  name := "bootstrapFromSnapshot drops pre-snapshot entries"
+  body := do
+    let path := System.FilePath.mk "/tmp/canon-test-loop-slice.bin"
+    if (← path.pathExists) then
+      IO.FS.removeFile path
+    -- Two synthetic entries forming a valid chain.
+    let entry1 : LogEntry :=
+      { prevHash := zeroHash
+      , signedAction := transferAction
+      , postStateHash := hashStream [0x01] }
+    let entry2 : LogEntry :=
+      { prevHash := LogEntry.hash entry1
+      , signedAction := { transferAction with nonce := 1 }
+      , postStateHash := hashStream [0x02] }
+    appendEntry path entry1
+    appendEntry path entry2
+    -- Snapshot at index 2 (after both entries), seedHash = hash of
+    -- the last entry.
+    let snap := takeSnapshot genesis (LogEntry.hash entry2) 2
+    match (← bootstrapFromSnapshot policy snap path) with
+    | .ok (rs, _) =>
+      -- Correct slicing → empty tail, snapshot state preserved.
+      assertEq (2 : Nat) rs.logIndex "logIndex preserved"
+      assertEq snap.stateHash.toList (hashEncodable rs.state).toList "state matches snapshot"
+      assertEq snap.seedHash.toList rs.prevHash.toList "prevHash = snap seedHash"
+    | .error (.replay (.chainBroken _)) =>
+      -- This is the bug we're guarding against: pre-snapshot entries
+      -- were not dropped, so replay tried to apply entry1's prevHash
+      -- (zeroHash) against the snapshot's seedHash (hash of entry2),
+      -- failing the chain check at index 0.
+      throw <| IO.userError "BUG: bootstrapFromSnapshot did NOT slice pre-snapshot entries"
+    | .error e =>
+      throw <| IO.userError s!"unexpected error: {repr e}"
+    IO.FS.removeFile path
+}
+
+/-- `bootstrapFromSnapshot` partial slicing: snap.logIndex = 1 for a
+    log with 2 entries.  Slicing leaves 1 entry to replay (entry 2),
+    which would fail at admissibility (Verify=false) — but the
+    failure index in the error is 0 (post-slice index), confirming
+    the slicing happened. -/
+def bootstrapFromSnapshotPartialSlice : TestCase := {
+  name := "bootstrapFromSnapshot reports post-slice failure index"
+  body := do
+    let path := System.FilePath.mk "/tmp/canon-test-loop-partial-slice.bin"
+    if (← path.pathExists) then
+      IO.FS.removeFile path
+    let entry1 : LogEntry :=
+      { prevHash := zeroHash
+      , signedAction := transferAction
+      , postStateHash := hashStream [0x01] }
+    let entry2 : LogEntry :=
+      { prevHash := LogEntry.hash entry1
+      , signedAction := { transferAction with nonce := 1 }
+      , postStateHash := hashStream [0x02] }
+    appendEntry path entry1
+    appendEntry path entry2
+    -- Snapshot at index 1 (after entry1), seedHash = hash of entry1.
+    let snap := takeSnapshot genesis (LogEntry.hash entry1) 1
+    match (← bootstrapFromSnapshot policy snap path) with
+    | .ok _ =>
+      throw <| IO.userError "BUG: replay accepted inadmissible entry2 (Verify=false)"
+    | .error (.replay (.notAdmissible 0)) =>
+      -- Index 0 in the post-slice tail = entry2 in the original log.
+      -- Confirms slicing happened.
+      pure ()
+    | .error other =>
+      throw <| IO.userError s!"expected replay (notAdmissible 0), got {repr other}"
+    IO.FS.removeFile path
 }
 
 /-- All tests. -/
@@ -231,6 +361,8 @@ def tests : List TestCase :=
   [bootstrapEmpty, processInadmissible, processBatchAllReject,
    processPureDeterministic, processPureRejection, deterministicAPI,
    bootstrapTwiceIdempotent, bootstrapFromSnapshotSurfacesSnapshotError,
+   bootstrapFromSnapshotIndexOverrun, bootstrapFromSnapshotEmptyTail,
+   bootstrapFromSnapshotDropsPreSnapEntries, bootstrapFromSnapshotPartialSlice,
    bootstrapErrorRepr]
 
 end LoopTests

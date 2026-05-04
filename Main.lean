@@ -71,14 +71,23 @@ def demoGenesis : ExtendedState := ExtendedState.empty
     successful `SignedAction.decode` consumes ≥ 9 bytes — the CBE
     head of the embedded action — so `rest.length < s.length`).
 
-    For Phase 5 we pre-fuel the loop with the input length to avoid
-    needing a Lean termination proof on the `Encodable.decode`
-    boundary; production deployments wire a real streaming parser. -/
+    For Phase 5 we pre-fuel the loop with the input length + 1 to
+    avoid needing a Lean termination proof on the `Encodable.decode`
+    boundary; production deployments wire a real streaming parser.
+
+    Fuel-exhaustion handling: the empty-stream case takes priority
+    over fuel-exhaustion — so `(0, [], acc)` returns success.  But
+    `(0, byte::_, _)` is unreachable in practice (fuel was set to
+    a strict upper bound on iteration count) and surfaces a clear
+    `invalidLength` error if hit, rather than silently truncating
+    the input.  This makes the function's contract honest: either
+    the entire stream parses or we report exactly why we stopped. -/
 def decodeSignedActionStream :
     Nat → Stream → List SignedAction → Except DecodeError (List SignedAction)
-  | 0, _, acc => .ok acc.reverse
-  | _ + 1, [], acc => .ok acc.reverse
-  | fuel + 1, s, acc =>
+  | _,        [],     acc => .ok acc.reverse
+  | 0,        _ :: _, _   =>
+    .error (.invalidLength "decodeSignedActionStream: fuel exhausted (internal bug)")
+  | fuel + 1, s,      acc =>
     match Encodable.decode (T := SignedAction) s with
     | .ok (sa, rest) => decodeSignedActionStream fuel rest (sa :: acc)
     | .error e       => .error e

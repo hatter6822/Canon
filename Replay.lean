@@ -81,9 +81,19 @@ def usage : IO UInt32 := do
       to replay against the wrong starting state.
     * `SNAPSHOT_DECODE_ERROR <repr>` when the snapshot bytes don't
       parse — same exit semantics as `SNAPSHOT_ERROR`.
+    * `SNAPSHOT_INDEX_OVERRUN snap_index=N log_entries=M` when the
+      snapshot's recorded `logIndex` exceeds the log file's entry
+      count — exit 1 (the snapshot doesn't fit on top of the log).
     * `LOG_TRUNCATED <count>` (info, not failure) when the log file
       had a partial tail; replay still proceeds against the
       recovered prefix.
+
+    Snapshot+log semantics (Genesis Plan §13.2): when a snapshot is
+    provided, the log file is expected to be the *full* log (the
+    same file the runtime appends to), and `canon-replay` slices it
+    to entries `[snap.logIndex..)` to apply "only subsequent log
+    entries".  Equivalent: the on-disk LOG always contains the full
+    history; SNAPSHOT just lets a fresh replica skip the prefix.
 
     Security note: failing fast on snapshot errors is critical.
     Earlier drafts silently continued with an empty genesis when a
@@ -95,34 +105,44 @@ def usage : IO UInt32 := do
 def runReplay (logPath : System.FilePath)
     (snapshotPath : Option System.FilePath) : IO UInt32 := do
   -- Step 1: optionally load the snapshot.  Fail fast on error.
-  let seedResult : Except String (ContentHash × ExtendedState) ←
+  -- The seed triple is (seedHash, seedState, snapLogIndex); snapLogIndex
+  -- is 0 when no snapshot is provided, otherwise the snapshot's
+  -- recorded `logIndex` (used to slice the log to post-snapshot entries).
+  let seedResult : Except String (ContentHash × ExtendedState × Nat) ←
     match snapshotPath with
-    | none => pure (Except.ok (zeroHash, replayGenesis))
+    | none => pure (Except.ok (zeroHash, replayGenesis, 0))
     | some p => do
       match (← loadSnapshot p) with
       | .ok snap =>
         match restoreSnapshot snap with
-        | .ok (st, sh, _) => pure (Except.ok (sh, st))
-        | .error e        => pure (Except.error s!"SNAPSHOT_ERROR {repr e}")
-      | .error e          => pure (Except.error s!"SNAPSHOT_DECODE_ERROR {repr e}")
+        | .ok (st, sh, idx) => pure (Except.ok (sh, st, idx))
+        | .error e          => pure (Except.error s!"SNAPSHOT_ERROR {repr e}")
+      | .error e            => pure (Except.error s!"SNAPSHOT_DECODE_ERROR {repr e}")
   match seedResult with
   | Except.error msg =>
     IO.println msg
     pure 1
-  | Except.ok (seedHash, seedState) =>
+  | Except.ok (seedHash, seedState, snapLogIndex) =>
     -- Step 2: read the log.
     let (entries, _, frameErr?) ← readAllEntries logPath
     if let some _ := frameErr? then
       IO.println s!"LOG_TRUNCATED entries={entries.length}"
-    -- Step 3: replay.
-    match replayFromSeed replayPolicy seedHash seedState entries with
-    | .ok finalState =>
-      let h := hashEncodable finalState
-      IO.println s!"OK {formatHashHex h}"
-      pure 0
-    | .error e =>
-      IO.println s!"REPLAY_ERROR {repr e}"
+    -- Step 3: slice to post-snapshot entries.  Genesis Plan §13.2
+    -- semantics: replica applies "only subsequent log entries".
+    if snapLogIndex > entries.length then
+      IO.println s!"SNAPSHOT_INDEX_OVERRUN snap_index={snapLogIndex} log_entries={entries.length}"
       pure 1
+    else
+      let tail := entries.drop snapLogIndex
+      -- Step 4: replay the post-snapshot tail.
+      match replayFromSeed replayPolicy seedHash seedState tail with
+      | .ok finalState =>
+        let h := hashEncodable finalState
+        IO.println s!"OK {formatHashHex h}"
+        pure 0
+      | .error e =>
+        IO.println s!"REPLAY_ERROR {repr e}"
+        pure 1
 
 /-- The `canon-replay` entry point.  Dispatches on argv. -/
 def main (args : List String) : IO UInt32 :=

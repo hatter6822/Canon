@@ -160,10 +160,11 @@ hundred kilobytes for the cryptographic libraries.
 
 ## 7. Audit-pass hardening (post-landing)
 
-Following the initial Phase-5 landing, an audit pass identified and
-fixed several issues — none required code regeneration of the
-existing binaries, but all touched modules that are shipped to
-production:
+Following the initial Phase-5 landing, two audit passes identified
+and fixed issues — none required code regeneration of the existing
+binaries, but all touched modules that are shipped to production:
+
+**Audit 1:**
 
   * **`partial def decodeAllFrames'` → terminating fueled def.**
     The original `partial def` was opaque to Lean's reducer; the
@@ -183,6 +184,32 @@ production:
   * **`loadSnapshot` graceful missing-file handling.**  Previously
     threw an uncaught IO exception; now returns
     `.error .unexpectedEof`.
+
+**Audit 2 (correctness):**
+
+  * **`bootstrapFromSnapshot` and `canon-replay` snapshot-slicing
+    fix.**  Both code paths previously passed the full log file to
+    `replayFromSeed`, even when the snapshot's `logIndex > 0`.
+    This broke the Genesis Plan §13.2 acceptance criterion ("apply
+    only subsequent log entries") for any non-empty pre-snapshot
+    history.  Now both paths slice `entries.drop snap.logIndex`
+    before replay.
+  * **`BootstrapError.logIndexOverrun`** new variant for the case
+    where `snap.logIndex > entries.length`; previously this was
+    undetectable.
+  * **`canon-replay` `SNAPSHOT_INDEX_OVERRUN` output line** —
+    surfaces the same inconsistency at the CLI boundary.
+  * **`LogEntry.hash` spec alignment** — changed from `encoded
+    action ++ prev.toList` (raw bytes) to `encoded action ++
+    encoded prev` (CBE-encoded), matching Genesis Plan §8.8.4
+    `BLAKE3(encode signedAction || encode previousLogEntryHash)`.
+  * **`hashEncodable` optimisation** — `hashStream (encode v)`
+    directly, avoiding the `Stream → ByteArray → List` round-trip.
+  * **Frame layout doc** — `"15 + N"` corrected to `"20 + N"`.
+  * **Fuel-exhaustion handling** in multi-frame loaders — clarified
+    that fuel-exhaustion (vs stream-exhaustion) is a programming
+    bug; surfaces an explicit diagnostic instead of silently
+    returning success.
 
 ## 8. Limitations
 

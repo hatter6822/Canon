@@ -120,7 +120,7 @@ lake build LegalKernel.Runtime.Snapshot       # Phase-5 snapshot machinery
 lake build LegalKernel.Runtime.Loop           # Phase-5 main runtime loop
 lake build canon                              # Phase-5 `canon` runtime CLI
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (399 tests)
+lake test                           # run Tests.lean driver (403 tests)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 
@@ -1460,7 +1460,9 @@ side); Rust-side WUs (5.4 / 5.7 / 5.8 / 5.11) deferred:
   tail).
 
 **Phase 5 audit fixes (post-landing).**  Following the initial Phase
-5 landing, an audit pass identified and fixed:
+5 landing, two audit passes identified and fixed:
+
+**Audit pass 1:**
 
 * **`partial def decodeAllFrames'` made terminating** — replaced the
   opaque `partial def` with a fueled structurally-recursive
@@ -1499,6 +1501,51 @@ side); Rust-side WUs (5.4 / 5.7 / 5.8 / 5.11) deferred:
 * **`replayStep` / `restoreSnapshot` `by; exact ...` patterns
   simplified** — replaced with direct definitional form.
 
+**Audit pass 2 (correctness):**
+
+* **`bootstrapFromSnapshot` snapshot-slicing fix (correctness
+  bug)** — the function previously passed the full log file to
+  `replayFromSeed`, even when the snapshot's `logIndex > 0`.
+  This meant the runtime would attempt to apply pre-snapshot
+  entries on top of the snapshot state and fail at the chain
+  check (since the snapshot's `seedHash` is the hash of the
+  *last* pre-snapshot entry, not the first).  Failure was
+  surfaced as `.replay (.chainBroken 0)`, but the symptom looked
+  like a chain break rather than the actual cause (the bootstrap
+  was misapplying pre-snapshot entries).  **Fix**: slice
+  `entries.drop snap.logIndex` before replay, fulfilling the
+  Genesis Plan §13.2 acceptance criterion ("apply only subsequent
+  log entries").  Without this fix, the snapshot+log replay path
+  was broken for any non-empty log.
+* **`canon-replay LOG SNAPSHOT` snapshot-slicing fix (same bug,
+  same severity)** — the standalone replay binary had the same
+  defect; now slices the log to post-snapshot entries.
+* **`BootstrapError.logIndexOverrun snapIdx logEntries`** — new
+  variant for the case where `snap.logIndex > entries.length`
+  (snapshot was taken at index N, but log has fewer entries).
+  Previously this was undetectable.
+* **`canon-replay` `SNAPSHOT_INDEX_OVERRUN`** — the
+  corresponding CLI output line + non-zero exit.
+* **`LogEntry.hash` spec divergence fixed** — previously hashed
+  `encode signedAction ++ prevHash.toList` (raw hash bytes);
+  Genesis Plan §8.8.4 specifies `encode signedAction ++ encode
+  previousLogEntryHash` (with `encode` adding a CBE bytestring
+  header).  Fixed to match the spec; future BLAKE3 swap
+  drop-in-compatible.
+* **`hashEncodable` optimised** — was `hashBytes (encodeBytes v)`
+  which round-tripped through `ByteArray ↔ List`; now
+  `hashStream (encode v)` directly on the encoder's `Stream`
+  output.
+* **Frame layout doc fixed** — was "15 + N bytes per record" but
+  actual is `4 + 8 + N + 8 = 20 + N`.
+* **Fuel-exhaustion handling clarified** — `decodeAllFrames'`
+  and `decodeSignedActionStream` now distinguish "stream
+  exhausted" from "fuel exhausted".  In practice fuel is set to
+  a strict upper bound on iteration count, so fuel-exhaustion
+  is unreachable; previously the case silently returned success
+  (potentially masking a bug); now it surfaces an explicit
+  diagnostic.
+
 **Phase 5 design deviations (documented).**
 
 - **Hash function fallback.**  Genesis Plan §8.8.4 specifies
@@ -1530,11 +1577,12 @@ side); Rust-side WUs (5.4 / 5.7 / 5.8 / 5.11) deferred:
   5.4 / 5.7) or in the relevant Phase-5 module headers, so the
   follow-up PR can land them as a drop-in.
 
-**Test coverage (after Phase 5 + audit acceptance).**  399 passing
+**Test coverage (after Phase 5 + two audit passes).**  403 passing
 tests across twenty-nine suites (322 was the post-Phase-4 count;
-Phase 5 adds 77 tests across seven new suites — 67 in the initial
-landing plus 10 in the post-merge audit pass — plus the umbrella
-build-tag check value updated to `canon-phase-5-runtime-extraction`):
+Phase 5 adds 81 tests across seven new suites — 67 in the initial
+landing, 10 in the first post-merge audit pass, and 4 in the second
+audit pass — plus the umbrella build-tag check value updated to
+`canon-phase-5-runtime-extraction`):
 - `KernelTests` (22) — unchanged from Phase 1.
 - `RBMapLemmasTests` (8) — unchanged from Phase 1.
 - `Umbrella` (2) — non-TCB build-tag smoke test, with the Phase-4-
@@ -1715,17 +1763,24 @@ build-tag check value updated to `canon-phase-5-runtime-extraction`):
   `replicaFromSnapshot`-preserves-state hash check, `loadSnapshot`
   on missing file returns `DecodeError` (not throw); term-level
   `takeSnapshot_deterministic` API stability.
-- `Runtime.LoopTests` (9) — Phase 5 WU 5.1.  `bootstrap` of
+- `Runtime.LoopTests` (13) — Phase 5 WU 5.1.  `bootstrap` of
   missing log returns fresh runtime (logIndex = 0, prevHash =
   zeroHash); `processSignedAction` rejects an inadmissible
   action with `notAdmissible` and does NOT touch the log file;
   `processBatch` returns one rejection per inadmissible action;
   `processPure` determinism + rejection check; **post-audit
-  additions**: bootstrap-twice idempotence,
+  additions (audit 1)**: bootstrap-twice idempotence,
   `bootstrapFromSnapshot` surfaces precise `.snapshot
   .hashMismatch` (not collapsed into `chainBroken`),
   `BootstrapError` constructor distinguishability via `Repr`;
-  term-level `processPure_deterministic` API stability.
+  **audit-2 additions**: `bootstrapFromSnapshot` rejects
+  `logIndex > log.length` with `.logIndexOverrun` (the new
+  variant), `bootstrapFromSnapshot` correctly slices to empty
+  tail when `logIndex = log.length`, `bootstrapFromSnapshot`
+  drops pre-snapshot entries via `entries.drop snap.logIndex`
+  (proving the slicing actually slices), and `bootstrapFromSnapshot`
+  surfaces post-slice failure indices correctly.  Term-level
+  `processPure_deterministic` API stability.
 
 Tests use two complementary patterns:
 1. **Value-level**: assert `==` between expected and actual results

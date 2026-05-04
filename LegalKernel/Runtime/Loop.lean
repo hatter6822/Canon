@@ -195,6 +195,12 @@ inductive BootstrapError where
       Diagnostic only — bootstrap continues with the recovered
       prefix. -/
   | truncated (frameError : FrameError)
+  /-- The snapshot's `logIndex` exceeds the log file's entry
+      count.  Indicates a deployment-level inconsistency: the
+      snapshot was taken at a point the log file no longer covers
+      (snapshot kept; log was truncated externally; or the
+      snapshot file is from a different deployment). -/
+  | logIndexOverrun (snapIdx : Nat) (logEntries : Nat)
   deriving Repr
 
 /-- Bootstrap the runtime from a fresh genesis state and a (possibly
@@ -226,16 +232,31 @@ def bootstrap
   | .error e =>
     pure (.error (.replay e))
 
-/-- Bootstrap a replica from a snapshot file plus the post-snapshot
-    log tail.  Like `bootstrap`, but starts from the snapshot's
-    `(state, seedHash)` rather than from genesis.
+/-- Bootstrap a replica from a snapshot plus the runtime's full log
+    file at `logPath`.  Like `bootstrap`, but starts from the
+    snapshot's `(state, seedHash)` rather than from genesis.
 
-    Returns precise diagnostics for snapshot-restoration failure
-    (`.snapshot`) vs replay failure (`.replay`); in particular,
-    the `.snapshot .hashMismatch` case (the snapshot's recorded
-    `stateHash` doesn't match its decoded state's hash) is
-    surfaced as `.snapshot .hashMismatch`, not collapsed into a
-    misleading `.replay (.chainBroken 0)` as in earlier drafts. -/
+    The log file is expected to be the *full* on-disk log
+    (including the entries that were already applied at snapshot
+    time).  This function slices the entries to apply only those
+    *after* the snapshot's `logIndex` — the Genesis Plan §13.2
+    "apply only subsequent log entries" semantics.
+
+    Validation: if `snap.logIndex > entries.length`, the snapshot
+    refers to entries the log doesn't contain (the runtime took a
+    snapshot, then truncated entries — a deployment-level
+    inconsistency).  We surface this as `.logIndexOverrun snapIdx
+    logEntries` so the operator can investigate.
+
+    Returns precise diagnostics for the three failure modes:
+      * `.snapshot e` — the snapshot itself failed to restore
+        (decode error, or recorded stateHash didn't match the
+        decoded state's hash).
+      * `.logIndexOverrun snapIdx logEntries` — the snapshot is
+        coherent on its own, but doesn't fit on top of the
+        available log file.
+      * `.replay e` — replay of the post-snapshot tail failed
+        (chain broken, action inadmissible, etc.). -/
 def bootstrapFromSnapshot
     (policy : AuthorityPolicy) (snap : Snapshot)
     (logPath : System.FilePath) :
@@ -243,21 +264,25 @@ def bootstrapFromSnapshot
   match restoreSnapshot snap with
   | .ok (state, seedHash, baseIdx) =>
     let (entries, frameErr) ← loadAndTruncate logPath
-    match replayFromSeed policy seedHash state entries with
-    | .ok finalState =>
-      let prevHash :=
-        match entries.reverse with
-        | [] => seedHash
-        | last :: _ => LogEntry.hash last
-      let rs : RuntimeState :=
-        { policy   := policy
-        , state    := finalState
-        , prevHash := prevHash
-        , logIndex := baseIdx + entries.length
-        , logPath  := logPath }
-      pure (.ok (rs, frameErr))
-    | .error e =>
-      pure (.error (.replay e))
+    if baseIdx > entries.length then
+      pure (.error (.logIndexOverrun baseIdx entries.length))
+    else
+      let tail := entries.drop baseIdx
+      match replayFromSeed policy seedHash state tail with
+      | .ok finalState =>
+        let prevHash :=
+          match tail.reverse with
+          | [] => seedHash
+          | last :: _ => LogEntry.hash last
+        let rs : RuntimeState :=
+          { policy   := policy
+          , state    := finalState
+          , prevHash := prevHash
+          , logIndex := baseIdx + tail.length
+          , logPath  := logPath }
+        pure (.ok (rs, frameErr))
+      | .error e =>
+        pure (.error (.replay e))
   | .error e =>
     -- Snapshot restoration failed (decode error or hash mismatch);
     -- surface the precise diagnostic rather than collapsing into

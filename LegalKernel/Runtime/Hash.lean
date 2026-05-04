@@ -132,9 +132,12 @@ def hashBytes (bs : ByteArray) : ContentHash :=
   uint64ToBytesLE (fnv1a64Bytes bs)
 
 /-- Hash an `Encodable` value via its CBE bytes.  Convenience wrapper
-    that composes `Encodable.encodeBytes` with `hashBytes`. -/
+    that composes `Encodable.encode` with `hashStream`.  Avoids the
+    `Stream → ByteArray → List` round-trip that `hashBytes` would
+    require (`hashStream` operates directly on the encoder's
+    `List UInt8` output). -/
 def hashEncodable {T : Type} [Encodable T] (v : T) : ContentHash :=
-  hashBytes (Encodable.encodeBytes v)
+  hashStream (Encodable.encode v)
 
 /-! ## The empty / "zero" content hash
 

@@ -288,9 +288,20 @@ Output format (one or two lines):
     hash, etc.).
   * `SNAPSHOT_DECODE_ERROR <repr>` when the snapshot bytes don't
     parse (corrupt / truncated / wrong type / missing file).
+  * `SNAPSHOT_INDEX_OVERRUN snap_index=N log_entries=M` when the
+    snapshot's `logIndex` exceeds the log file's entry count
+    (deployment-level inconsistency: snapshot taken at a point
+    the log no longer covers).
   * `LOG_TRUNCATED entries=<count>` (info line, written before
     the success / error line) when the log file had a partial
     tail; replay still proceeds against the recovered prefix.
+
+**Snapshot+log semantics (Genesis Plan §13.2).**  When a snapshot
+is provided, the LOG file is the *full* log (not pre-sliced).
+`canon-replay` slices the log to entries `[snap.logIndex..)` to
+apply "only subsequent log entries".  The tool refuses to produce
+an `OK` line if the snapshot fails to restore or if the
+`logIndex` is inconsistent with the log file.
 
 **Security contract.**  The tool refuses to print an `OK <hash>`
 line when a requested snapshot fails to restore.  Earlier drafts
