@@ -19,16 +19,21 @@ machine-checkable proof of admissibility, and global system properties
 preservation) are guaranteed by inductive theorems rather than by
 trust in operators.
 
-Current status: **Phases 0 – 1 complete.**  Phase 0 (Foundations)
+Current status: **Phases 0 – 2 complete.**  Phase 0 (Foundations)
 landed the kernel skeleton, the canonical transfer law, the build
 pipeline, and the Genesis Plan.  Phase 1 (Kernel Completion) added
 the §8.3 RBMap proof library, the §4.3 balance lemmas, the §4.9
 multi-step / law-set reachability extensions, the Phase-1 audit
 tooling (`lake exe count_sorries`, `lake exe tcb_audit`), and the
-WU-1.6 / WU-1.13 documentation.  Phases 2 – 7 (Economic invariants,
-Authority layer, DSL and serialization, Runtime and extraction,
-Disputes and adjudication, Advanced capabilities) are scoped in §12
-of the Genesis Plan and have not yet started.
+WU-1.6 / WU-1.13 documentation.  Phase 2 (Economic Invariants)
+landed the §8.1 `TotalSupply` quantity functional, `transfer_conserves`
+(§4.11.1), the `IsConservative` typeclass, the `mint`/`burn`
+non-conservative laws (with explicit non-conservation witnesses), the
+`ConservativeLawSet` machinery, the §5.3 `total_supply_global`
+theorem, and the `freezeResource` / `FrozenForResource` immutability
+layer.  Phases 3 – 7 (Authority layer, DSL and serialization, Runtime
+and extraction, Disputes and adjudication, Advanced capabilities) are
+scoped in §12 of the Genesis Plan and have not yet started.
 
 Canonical source of truth for the design: `docs/GENESIS_PLAN.md`.
 Where this file disagrees with the Genesis Plan, the Genesis Plan
@@ -54,8 +59,12 @@ source ~/.elan/env
 lake build                          # full project build
 lake build LegalKernel.Kernel       # kernel only (fastest feedback loop)
 lake build LegalKernel.RBMapLemmas  # §8.3 fold lemmas only (fast)
+lake build LegalKernel.Conservation # Phase-2 economic-invariants framework
 lake build LegalKernel.Laws.Transfer
-lake test                           # run Tests.lean driver (40 tests)
+lake build LegalKernel.Laws.Mint    # Phase-2 mint law
+lake build LegalKernel.Laws.Burn    # Phase-2 burn law
+lake build LegalKernel.Laws.Freeze  # Phase-2 freeze marker + invariant
+lake test                           # run Tests.lean driver (95 tests)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 ```
@@ -81,21 +90,23 @@ Examples:
 - Edited `LegalKernel/Kernel.lean`     → `lake build LegalKernel.Kernel`
 - Edited `LegalKernel/Laws/Transfer.lean` → `lake build LegalKernel.Laws.Transfer`
 
-**`lake build` (default target) is sufficient at Phases 0 – 1**
+**`lake build` (default target) is sufficient at Phases 0 – 2**
 because `LegalKernel.lean` re-exports the kernel, the §8.3 RBMap
-proof library, and the law set, so every TCB / law / kernel file is
-reachable from the default target.  This convention may change in
-later phases when the law set grows; check the `lean_lib LegalKernel`
-`roots` field in `lakefile.lean` if in doubt.
+proof library, the Phase-2 economic-invariants framework, and every
+deployed law (transfer, mint, burn, freeze), so every TCB / law /
+kernel file is reachable from the default target.  This convention
+may change in later phases when the law set grows; check the
+`lean_lib LegalKernel` `roots` field in `lakefile.lean` if in doubt.
 
 After any source change, also run:
 
-* `lake test` — runs the test driver (43 tests across four suites
-  as of Phase 1; was 24 in Phase 0).  Catches semantic regressions
-  that elaboration-only checks miss (e.g. the §4.11 self-transfer
-  fix would silently survive a build but break a test).  Each new
-  Phase-1 theorem additionally has a term-level API-stability test
-  whose elaboration fails if the theorem signature changes.
+* `lake test` — runs the test driver (95 tests across eight suites
+  as of Phase 2; was 43 in Phase 1, 24 in Phase 0).  Catches semantic
+  regressions that elaboration-only checks miss (e.g. the §4.11
+  self-transfer fix would silently survive a build but break a test).
+  Each new Phase-1+ theorem additionally has a term-level
+  API-stability test whose elaboration fails if the theorem signature
+  changes.
 * `lake exe count_sorries` — fails if any kernel-TCB module
   (`Kernel.lean`, `RBMapLemmas.lean`, `Laws/Transfer.lean`) has a
   `sorry` in proof position.  The detector pre-masks `--` line
@@ -119,19 +130,33 @@ canon/
 ├── tcb_allowlist.txt              -- WU 1.11 TCB import allowlist.
 ├── Main.lean                      -- placeholder runtime; Phase 5 replaces it.
 ├── Tests.lean                     -- @[test_driver]; runs every test module.
-├── LegalKernel.lean               -- umbrella import (kernel + RBMap + laws).
+├── LegalKernel.lean               -- umbrella import (kernel + RBMap + Conservation + laws).
 ├── LegalKernel/
 │   ├── Kernel.lean                -- §4.12 trusted core (TCB).
 │   ├── RBMapLemmas.lean           -- §8.3 RBMap proof library (TCB).
+│   ├── Conservation.lean          -- §8.1 / §5.3 Phase-2 economic invariants
+│   │                                 framework: TotalSupply, IsConservative,
+│   │                                 ConservativeLawSet, total_supply_global
+│   │                                 (non-TCB).
 │   ├── Laws/
-│   │   └── Transfer.lean          -- §4.11 transfer law (with self-transfer fix).
+│   │   ├── Transfer.lean          -- §4.11 transfer law + Phase-2
+│   │   │                             transfer_conserves + IsConservative
+│   │   │                             instance.
+│   │   ├── Mint.lean              -- Phase-2 mint law + non-conservation.
+│   │   ├── Burn.lean              -- Phase-2 burn law + non-conservation.
+│   │   └── Freeze.lean            -- Phase-2 freezeResource marker +
+│   │                                 FrozenForResource invariant.
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness + emptyState.
 │       ├── KernelTests.lean       -- value-level kernel tests (22 cases).
 │       ├── RBMapLemmasTests.lean  -- §8.3 fold-lemma tests (8 cases).
 │       ├── Umbrella.lean          -- umbrella-module smoke tests (2 cases).
+│       ├── ConservationTests.lean -- Phase-2 conservation tests (15 cases).
 │       └── Laws/
-│           └── Transfer.lean      -- transfer-law tests (11 cases).
+│           ├── Transfer.lean      -- transfer-law tests (16 cases incl. Phase 2).
+│           ├── Mint.lean          -- Phase-2 mint tests (10 cases).
+│           ├── Burn.lean          -- Phase-2 burn tests (12 cases).
+│           └── Freeze.lean        -- Phase-2 freeze tests (10 cases).
 ├── Tools/
 │   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 TCB allowlist enforcer.
@@ -146,20 +171,28 @@ canon/
 └── docs/
     ├── GENESIS_PLAN.md            -- canonical design document.
     ├── decidability_discipline.md -- WU 1.6 (decPre) discipline.
-    └── std_dependencies.md        -- WU 1.13 Std lemma audit.
+    ├── std_dependencies.md        -- WU 1.13 Std lemma audit.
+    └── economic_invariants.md     -- Phase 2 design + proof-obligation note.
 ```
 
-### Module dependency graph (Phases 0 – 1)
+### Module dependency graph (Phases 0 – 2)
 
 ```
 LegalKernel.Kernel        (TCB, §4.12 + §4.3 balance lemmas + §4.9 reachability)
   └──── imports LegalKernel.RBMapLemmas
 LegalKernel.RBMapLemmas   (TCB, §8.3 fold + insert lemmas)
-LegalKernel.Laws.Transfer (depends on Kernel)
+LegalKernel.Conservation  (non-TCB; §8.1 TotalSupply + §5.3 framework)
+  └──── imports Kernel + RBMapLemmas
+LegalKernel.Laws.Transfer (non-TCB; depends on Kernel + Conservation)
+LegalKernel.Laws.Mint     (non-TCB; depends on Kernel + Conservation)
+LegalKernel.Laws.Burn     (non-TCB; depends on Kernel + Conservation)
+LegalKernel.Laws.Freeze   (non-TCB; depends on Kernel + Conservation +
+                                    Transfer + Mint + Burn)
 LegalKernel.Test.Framework (no Kernel dependency)
 LegalKernel.Test.KernelTests
 LegalKernel.Test.RBMapLemmasTests
-LegalKernel.Test.Laws.Transfer
+LegalKernel.Test.ConservationTests
+LegalKernel.Test.Laws.{Transfer, Mint, Burn, Freeze}
                                  │
 LegalKernel  (umbrella) ─────────┘
                                  │
@@ -172,8 +205,11 @@ Tools.CountSorries   (parses every .lean under LegalKernel/; no Lean-level dep).
 The kernel has **zero** external Lean-package dependencies.
 `Std.Data.TreeMap` is part of Lean core (since Lean ≥ 4.10), not a
 separate Lake package.  The TCB therefore equals exactly the Lean
-core distribution plus the kernel modules of this repository
-(`Kernel.lean` + `RBMapLemmas.lean`).
+core distribution plus the trusted-core modules of this repository
+(`Kernel.lean` + `RBMapLemmas.lean`).  Phase 2's economic-invariants
+framework is **not** TCB: `Conservation.lean` and the four
+`Laws/*.lean` modules are deployment-facing infrastructure, with
+bugs scoped to deployment-level claims (not kernel invariants).
 
 ## Reading large files
 
@@ -370,36 +406,47 @@ foreground progress.  **Prevent this proactively:**
   Kernel module skeleton"`.  All commits must pass `lake build`
   AND `lake test` — never commit broken or untested code.
 
-## Type-level design properties enforced in Phases 0 – 1
+## Type-level design properties enforced in Phases 0 – 2
 
 The Genesis Plan promises a small set of type-level guarantees
-(§1, §5).  The kernel mechanises each of the following:
+(§1, §5).  The kernel and the Phase-2 economic-invariants framework
+mechanise each of the following:
 
-| # | Property                                | Lean theorem                          | Phase / File              |
-|---|-----------------------------------------|---------------------------------------|---------------------------|
-| 1 | Determinism                             | typing of `step_impl`                 | 0 / `Kernel.lean`         |
-| 2 | No silent illegality                    | `impl_noop_if_not_pre`                | 0 / `Kernel.lean`         |
-| 3 | Refinement                              | `impl_refines_spec`                   | 0 / `Kernel.lean`         |
-| 4 | Invariant preservation                  | `invariant_preservation`              | 0 / `Kernel.lean`         |
-| 5 | Compositionality of invariants          | `invariants_compose`                  | 0 / `Kernel.lean`         |
-| 6 | Certified ≡ executable                  | `apply_certified_eq_step_impl`        | 0 / `Kernel.lean`         |
-| 7 | Pointwise balance (write-then-read)     | `getBalance_setBalance_same/_other`   | 1 / `Kernel.lean` (§4.3)  |
-| 8 | Reachability is reflexive-transitive    | `Reachable.refl`, `Reachable.trans`   | 1 / `Kernel.lean` (§4.9)  |
-| 9 | Per-law-set invariant preservation      | `invariant_preservation_via_laws`     | 1 / `Kernel.lean` (§4.10) |
+| #  | Property                                | Lean theorem                          | Phase / File                       |
+|----|-----------------------------------------|---------------------------------------|------------------------------------|
+| 1  | Determinism                             | typing of `step_impl`                 | 0 / `Kernel.lean`                  |
+| 2  | No silent illegality                    | `impl_noop_if_not_pre`                | 0 / `Kernel.lean`                  |
+| 3  | Refinement                              | `impl_refines_spec`                   | 0 / `Kernel.lean`                  |
+| 4  | Invariant preservation                  | `invariant_preservation`              | 0 / `Kernel.lean`                  |
+| 5  | Compositionality of invariants          | `invariants_compose`                  | 0 / `Kernel.lean`                  |
+| 6  | Certified ≡ executable                  | `apply_certified_eq_step_impl`        | 0 / `Kernel.lean`                  |
+| 7  | Pointwise balance (write-then-read)     | `getBalance_setBalance_same/_other`   | 1 / `Kernel.lean` (§4.3)           |
+| 8  | Reachability is reflexive-transitive    | `Reachable.refl`, `Reachable.trans`   | 1 / `Kernel.lean` (§4.9)           |
+| 9  | Per-law-set invariant preservation      | `invariant_preservation_via_laws`     | 1 / `Kernel.lean` (§4.10)          |
+| 10 | Per-resource accounting on `setBalance` | `totalSupply_setBalance`              | 2 / `Conservation.lean`            |
+| 11 | Transfer preserves total supply         | `transfer_conserves`                  | 2 / `Laws/Transfer.lean` (§4.11.1) |
+| 12 | Transfer is local to its resource       | `transfer_does_not_touch_other_resources` | 2 / `Laws/Transfer.lean` (§4.11.2) |
+| 13 | Transfer is `IsConservative`            | `transfer_isConservative`             | 2 / `Laws/Transfer.lean` (§5.3)    |
+| 14 | Mint is non-conservative                | `mint_not_conservative`               | 2 / `Laws/Mint.lean` (§5.6)        |
+| 15 | Burn is non-conservative                | `burn_not_conservative`               | 2 / `Laws/Burn.lean` (§5.6)        |
+| 16 | Global supply preservation              | `total_supply_global` / `…_via_law_set` | 2 / `Conservation.lean` (§5.3)   |
+| 17 | Frozen-resource preservation by transfer/mint/burn | `*_preserves_freeze` (3 lemmas) | 2 / `Laws/Freeze.lean` (§4.10) |
+| 18 | Mint / burn are local to their resource | `mint_/burn_other_resource_untouched`, `*_does_not_touch_other_resources`, `*_conserves_other_resource` | 2 / `Laws/Mint.lean` and `Laws/Burn.lean` |
 
 These are not stubs.  They are real Lean theorems that the build
 will not accept with a `sorry`, and `#print axioms` confirms that
 each depends only on the three Lean built-in axioms (`propext`,
-`Classical.choice`, `Quot.sound`).  Modifying any of their
-statements is a kernel-TCB change and triggers the two-reviewer
-gate.
+`Classical.choice`, `Quot.sound`).  Modifying any of properties
+#1 – #9 (kernel-TCB) is a TCB change and triggers the two-reviewer
+gate; properties #10 – #17 (Phase-2 deployment infrastructure) are
+non-TCB and need only one reviewer.
 
 The §8.3 RBMap proof library (`LegalKernel/RBMapLemmas.lean`) ships
 the supporting `find?_insert_self`, `find?_insert_other`, and
 `Nat`-summing fold lemmas (`sumValues_eq_values_sum`,
 `sumValues_insert_absent`, `sumValues_insert_present`) that
-property #7 above and the Phase-2 `total_supply_global` argument
-both depend on.
+property #7 above and the Phase-2 `totalSupply_setBalance` master
+lemma both depend on.
 
 ## Std core integration
 
@@ -445,7 +492,7 @@ units.  Brief summary:
 |-------|-----------------------------|--------------------------|-------------|
 | 0     | Foundations                 | 0.1–0.5                  | Complete    |
 | 1     | Kernel completion           | 1.1–1.13                 | Complete    |
-| 2     | Economic invariants         | 2.1–2.9                  | Not started |
+| 2     | Economic invariants         | 2.1–2.9                  | Complete    |
 | 3     | Authority layer             | 3.1–3.10+                | Not started |
 | 4     | DSL and serialization       | 4.x                      | Not started |
 | 5     | Runtime and extraction      | 5.x                      | Not started |
@@ -529,8 +576,8 @@ every match before submission.
 
 ## Active development status
 
-**Current Phase:** Phases 0 – 1 Complete; Phase 2 (Economic
-Invariants) is next.
+**Current Phase:** Phases 0 – 2 Complete; Phase 3 (Authority Layer)
+is next.
 
 WU 0.1 (Lean toolchain pin & Lake project skeleton) — complete:
 - `lean-toolchain` pinned to `leanprover/lean4:v4.29.1` (the latest
@@ -644,23 +691,89 @@ WU 1.13 (Std-dependency audit) — complete:
   the TCB invokes, with stability notes and a per-toolchain-bump
   review checklist.
 
-**Test coverage (after Phase 1).**  43 passing tests across four
+WU 2.1 – 2.9 (Phase 2: Economic Invariants) — complete:
+- WU 2.1: `LegalKernel/Conservation.lean` ships `genesisState`, the
+  §8.1 `TotalSupply` definition, the sanity lemma
+  `totalSupply_genesis_eq_zero`, the more general
+  `totalSupply_eq_zero_of_no_resource`, and the master accounting
+  lemma `totalSupply_setBalance` (the `Nat`-equation that every
+  per-law conservation proof reduces to).
+- WU 2.2 + 2.3: `LegalKernel/Laws/Transfer.lean` proves
+  `transfer_conserves` (§4.11.1).  The proof is *uniform* over the
+  distinct-actor and self-transfer cases — the §4.11 self-transfer
+  fix in `transfer.apply_impl` makes the case-split unnecessary at
+  the conservation level.  Also lands `transfer_other_resource_untouched`
+  (state-level) and `transfer_does_not_touch_other_resources`
+  (pointwise; §4.11.2), both via `RBMap.find?_insert_other`.
+- WU 2.4: `IsConservative` typeclass in `Conservation.lean`;
+  `transfer_isConservative` instance in `Laws/Transfer.lean` combines
+  `transfer_conserves` (at the transferred resource) with
+  `transfer_conserves_other_resource` (at every other resource).
+- WU 2.5: `LegalKernel/Laws/Mint.lean` and `LegalKernel/Laws/Burn.lean`
+  ship the two non-conservative balance mutators with `decPre := fun _
+  => inferInstance` and a single `setBalance` transformer each.  Both
+  ship `totalSupply_after_*` accounting corollaries plus a per-law
+  cross-resource locality triple (state-level
+  `*_other_resource_untouched`, pointwise
+  `*_does_not_touch_other_resources`, and the per-resource supply form
+  `*_conserves_other_resource`) that mirrors the Phase-2 additions to
+  `Laws/Transfer.lean`.
+- WU 2.6: `mint_not_conservative` and `burn_not_conservative` deliver
+  explicit non-conservation witnesses; both negate the
+  `IsConservative` typeclass directly.
+- WU 2.7: `ConservativeLawSet` structure in `Conservation.lean` is
+  the §6.2 type-level firewall — mint/burn cannot be added because
+  no `IsConservative` instance exists.
+- WU 2.8: `total_supply_global` (§5.3 verbatim) plus the
+  typeclass-driven corollary `total_supply_global_via_law_set`.
+- WU 2.9: `LegalKernel/Laws/Freeze.lean` ships the `freezeResource _r`
+  no-op marker (the `_r` parameter is part of the action-layer API
+  but deliberately ignored at the kernel level, so `freezeResource 1`
+  and `freezeResource 2` are *definitionally equal* `Transition`
+  values), the `FrozenForResource r snap` invariant (a closure over
+  the snapshotted per-resource `BalanceMap`), and the four
+  preservation lemmas: `freezeResource_preserves_freeze` reduces to
+  `hI` by definitional equality (`step_impl` on a `True`-precondition
+  identity transition collapses); `transfer_preserves_freeze`,
+  `mint_preserves_freeze`, `burn_preserves_freeze` each consume the
+  corresponding `*_other_resource_untouched` state-level helper and
+  are conditional on operating on a *different* resource than the
+  frozen one.
+
+**Test coverage (after Phase 2).**  95 passing tests across eight
 suites:
-- `KernelTests` (22) — Phase-0 base (12) plus 10 new cases for the
-  §4.3 balance lemmas (3), the §4.9 multi-step reachability
-  (`Reachable.refl`, `Reachable.trans`), the §4.9 / §4.10 per-law-set
-  extensions (`ReachableViaLaws.base`, `ReachableViaLaws.step`,
-  `reachable_of_reachable_via_laws`), and the §4.10 / WU 1.9
-  `invariant_preservation_via_laws` (one term-level API check at
-  the trivial invariant; one driving the inductive step at runtime).
-- `RBMapLemmasTests` (8) — value-level spot-checks for
-  `find?_insert_self`, `find?_insert_other`, the three
-  `sumValues_*` lemmas, and a term-level API check that
-  `sumValues_eq_values_sum` still has its expected signature.
-- `Umbrella` (2) — non-TCB build-tag smoke test, plus the Phase-1
-  bump check (`kernelBuildTag = "canon-phase-1-kernel-completion"`).
-- `Transfer` (11) — unchanged from Phase 0, including the
-  **§4.11 self-transfer regression** witness.
+- `KernelTests` (22) — unchanged from Phase 1.
+- `RBMapLemmasTests` (8) — unchanged from Phase 1.
+- `Umbrella` (2) — non-TCB build-tag smoke test, with the Phase-2
+  bump check (`kernelBuildTag = "canon-phase-2-economic-invariants"`).
+- `ConservationTests` (15) — sanity for `TotalSupply`,
+  `totalSupply_setBalance` value-level checks at four representative
+  inputs, `TotalSupplyEquals` round-trip (positive and negative),
+  two `transfer_conserves` witnesses (distinct + self-transfer),
+  `IsConservative` typeclass resolution, `ConservativeLawSet`
+  construction, runtime `total_supply_global` and
+  `total_supply_global_via_law_set` invocations, and an explicit
+  `totalSupply_eq_zero_of_no_resource` runtime check.
+- `Transfer` (16) — Phase-0 base (11, including the **§4.11
+  self-transfer regression** witness) plus 5 Phase-2 cases
+  (`transfer_conserves`, `transfer_does_not_touch_other_resources`,
+  `transfer_conserves_other_resource`, `IsConservative` instance).
+- `Mint` (10) — precondition decidability, `step_impl`/`apply_impl`
+  value semantics, `totalSupply_after_mint` at runtime,
+  `mint_not_conservative` term-level API check, plus the three new
+  cross-resource helpers (`mint_other_resource_untouched`,
+  `mint_does_not_touch_other_resources`,
+  `mint_conserves_other_resource`).
+- `Burn` (12) — symmetric to mint with the additional edge case
+  "burn down to zero is allowed", plus the three burn cross-resource
+  helpers.
+- `Freeze` (10) — `FrozenForResource` reflexivity at snapshot time,
+  all four preservation lemmas at runtime,
+  freezeResource-is-identity value-level check, and three negative
+  regression tests demonstrating that mutating laws applied at the
+  *frozen* resource genuinely break the snapshot — witnessing the
+  necessity of the disjointness hypothesis in the preservation
+  lemmas.
 
 Tests use two complementary patterns:
 1. **Value-level**: assert `==` between expected and actual results
@@ -673,10 +786,11 @@ Tests use two complementary patterns:
 `lake test` runs the suite via the `Tests.lean` driver and exits
 non-zero on any failure; CI runs the same driver.
 
-**Axiom audit (Phase 1).**  `#print axioms` on every kernel and
-RBMap theorem (kernel: 11 theorems; RBMap: 7 theorems) returns
-exactly `[propext, Classical.choice, Quot.sound]`.  No custom
-axioms have been introduced.
+**Axiom audit (Phase 2).**  `#print axioms` on every kernel, RBMap,
+and Phase-2 theorem (kernel: 11 theorems; RBMap: 7 theorems;
+Conservation + per-law theorems: 19) returns exactly
+`[propext, Classical.choice, Quot.sound]`.  No custom axioms have
+been introduced in Phase 2.
 
 **TCB-audit hardening.**  `Tools.Common.tcbInternalImports` lists
 the project-internal modules each TCB core file may import — only
