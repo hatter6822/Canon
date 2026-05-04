@@ -202,6 +202,18 @@ class IsConservative (t : Transition) : Prop where
               t.pre s →
               TotalSupply (step_impl s t) r = TotalSupply s r
 
+/-! ## `sumOthers` (positive-incentive helper) -/
+
+/-- Total supply at `r` excluding actor `excluded`'s holding.  Used by
+    `proportionalDilute` precondition reasoning (`pre := totalReward >
+    0 ∧ sumOthers > 0`) and by the dust-bound theorem.
+
+    Truncated `Nat` subtraction is safe because `getBalance s r
+    excluded ≤ TotalSupply s r` (proved by `getBalance_le_totalSupply`
+    below). -/
+def sumOthers (s : State) (r : ResourceId) (excluded : ActorId) : Nat :=
+  TotalSupply s r - getBalance s r excluded
+
 /-! ## `getBalance` is bounded by `TotalSupply` (positive-incentive
     helper) -/
 
