@@ -88,26 +88,26 @@ namespace Authority
     a constructor here is a deployment-level decision: the kernel
     never refers to `Action`; only the authority module does.
 
-    **Constructor-ordering policy.**  Constructors are grouped by the
-    component of `ExtendedState` they touch:
+    **Constructor-ordering policy (append-only).**  Constructors are
+    listed in the historical order in which they were introduced:
 
-    * **Balance-mutating** (kernel `State.balances`):
-      `transfer`, `mint`, `burn`, `freezeResource` (no-op), and the
-      three Phase-4-prelude additions `reward`, `distributeOthers`,
+    * Phase 0 / Phase 2 (balance-mutating, kernel `State.balances`):
+      `transfer`, `mint`, `burn`, `freezeResource`.
+    * Phase 3 (registry-mutating, authority-level `KeyRegistry`,
+      applied via `applyActionToRegistry` in `apply_admissible`):
+      `replaceKey`.
+    * Phase-4 prelude (positive-incentive balance-mutating, all
+      classified `IsMonotonic`): `reward`, `distributeOthers`,
       `proportionalDilute`.
-    * **Registry-mutating** (authority-level `KeyRegistry`, applied
-      via `applyActionToRegistry` in `apply_admissible`):
-      `replaceKey`, kept last.
 
-    The Phase-4-prelude work *inserted* `reward`/`distributeOthers`/
-    `proportionalDilute` between `freezeResource` and `replaceKey`
-    rather than appending after `replaceKey`, which shifts
-    `replaceKey`'s constructor index from 4 to 7.  This is safe
-    because Phase 4 (DSL and Serialization) has not yet started, so
-    no on-the-wire encoding is committed; the constructor indices are
-    finalised here for Phase 4's CBOR encoder to consume.  Once Phase
-    4 lands, any subsequent constructor addition must append at the
-    end (after `replaceKey`) to preserve the existing index map.
+    **Indices are stable: every new constructor is appended at the
+    end.**  This is the contract that Phase 4's CBOR encoder will
+    rely on (constructors are encoded by their inductive index).
+    Re-grouping constructors by what they touch — even when it would
+    yield a tidier listing — is forbidden once a constructor has
+    landed, because re-grouping would silently reassign indices and
+    break any deployed serialised data.  Future additions must
+    likewise append at the end.
 
     `DecidableEq` is needed so that `Action` can be hashed, signed, and
     compared at the runtime layer (Phase 5).  `Repr` is needed for the
@@ -121,6 +121,10 @@ inductive Action
   | burn (r : ResourceId) (fromActor : ActorId) (amount : Amount)
   /-- Mark `r` as frozen (no-op at the kernel level; deployment commitment). -/
   | freezeResource (r : ResourceId)
+  /-- Re-point `actor`'s identity to `newKey`, signed by the *old* key.
+      Kernel-level effect is identity on `State`; the authority-level
+      effect (registry update) happens in `apply_admissible`. -/
+  | replaceKey (actor : ActorId) (newKey : PublicKey)
   /-- Reward `to` with `amount` units of `r` (positive-incentive
       analogue of `mint`; classified as `IsMonotonic`).  Distinct from
       `mint` at the Action layer so that authority policies can grant
@@ -136,10 +140,6 @@ inductive Action
       actor `k`.  The strongest analogue of "burning `excluded`'s
       balance share" available without removing tokens. -/
   | proportionalDilute (r : ResourceId) (excluded : ActorId) (totalReward : Amount)
-  /-- Re-point `actor`'s identity to `newKey`, signed by the *old* key.
-      Kernel-level effect is identity on `State`; the authority-level
-      effect (registry update) happens in `apply_admissible`. -/
-  | replaceKey (actor : ActorId) (newKey : PublicKey)
   deriving Repr, DecidableEq
 
 /-! ## Compilation to kernel `Transition`s (§4.13 / WU 3.1) -/
@@ -151,12 +151,12 @@ inductive Action
     * `mint`                → `Laws.mint`
     * `burn`                → `Laws.burn`
     * `freezeResource`      → `Laws.freezeResource`
-    * `reward`              → `Laws.reward`            (positive-incentive credit)
-    * `distributeOthers`    → `Laws.distributeOthers`  (uniform reward)
-    * `proportionalDilute`  → `Laws.proportionalDilute` (proportional reward)
     * `replaceKey`          → `Laws.freezeResource 0`  (kernel-level no-op;
                                the authority-level effect happens in
                                `apply_admissible`).
+    * `reward`              → `Laws.reward`             (positive-incentive credit)
+    * `distributeOthers`    → `Laws.distributeOthers`   (uniform reward)
+    * `proportionalDilute`  → `Laws.proportionalDilute` (proportional reward)
 
     This function is *not injective* on its own — the `freezeResource`
     constructor was deliberately designed in Phase 2 to ignore its
@@ -169,10 +169,10 @@ def Action.compileTransition : Action → Transition
   | .mint r to a                  => Laws.mint r to a
   | .burn r fr a                  => Laws.burn r fr a
   | .freezeResource r             => Laws.freezeResource r
+  | .replaceKey _ _               => Laws.freezeResource 0
   | .reward r to a                => Laws.reward r to a
   | .distributeOthers r e a       => Laws.distributeOthers r e a
   | .proportionalDilute r e tr    => Laws.proportionalDilute r e tr
-  | .replaceKey _ _               => Laws.freezeResource 0
 
 /-! ## The `CompiledAction` wrapper -/
 
@@ -296,6 +296,9 @@ example (r : ResourceId) (fr : ActorId) (am : Amount) :
 example (r : ResourceId) :
     (Action.compile (.freezeResource r)).source = .freezeResource r := rfl
 
+example (actor : ActorId) (newKey : PublicKey) :
+    (Action.compile (.replaceKey actor newKey)).source = .replaceKey actor newKey := rfl
+
 example (r : ResourceId) (to : ActorId) (am : Amount) :
     (Action.compile (.reward r to am)).source = .reward r to am := rfl
 
@@ -306,9 +309,6 @@ example (r : ResourceId) (e : ActorId) (am : Amount) :
 example (r : ResourceId) (e : ActorId) (tr : Amount) :
     (Action.compile (.proportionalDilute r e tr)).source =
       .proportionalDilute r e tr := rfl
-
-example (actor : ActorId) (newKey : PublicKey) :
-    (Action.compile (.replaceKey actor newKey)).source = .replaceKey actor newKey := rfl
 
 end Authority
 end LegalKernel
