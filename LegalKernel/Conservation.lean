@@ -306,4 +306,61 @@ theorem total_supply_global_via_law_set
   intro t htL s hpre
   exact (cls.isConservative t htL).conserves r₀ s hpre
 
+/-! ## Monotonic law-set machinery (positive-incentive tier) -/
+
+/-- A law set restricted to monotonic transitions.  Strictly larger
+    than `ConservativeLawSet`: every conservative law is also monotonic
+    (via `monotonic_of_conservative`), but laws that strictly increase
+    supply (`mint`, `reward`, `distributeOthers`, `proportionalDilute`)
+    can also inhabit `MonotonicLawSet` while being excluded from
+    `ConservativeLawSet`.
+
+    `burn` cannot inhabit this structure: `burn_not_monotonic` (in
+    `Laws/Burn.lean`) proves no `IsMonotonic` instance for `burn`
+    exists. This is the type-level firewall for "positive-only"
+    deployments. -/
+structure MonotonicLawSet where
+  /-- The transitions admitted by the deployment. -/
+  laws : List Transition
+  /-- Per-element monotonicity witness.  Every law surrenders an
+      `IsMonotonic` instance; `burn` cannot. -/
+  isMonotonic : ∀ t ∈ laws, IsMonotonic t
+
+/-- Per-resource non-decrease across reachable states under a per-law
+    monotonicity hypothesis.  The headline guarantee of the
+    positive-incentive tier: if every law in a deployment leaves
+    `TotalSupply` at `r₀` non-decreasing, then no reachable state has
+    less supply at `r₀` than the initial state.
+
+    The hypothesis is *per-resource*: a deployment can instantiate this
+    theorem with a partially-monotonic law set, as long as the law set
+    leaves the *specific* resource `r₀` non-decreasing.  Most
+    deployments will use the typeclass-driven
+    `total_supply_globally_nondecreasing_via_law_set` corollary below. -/
+theorem total_supply_globally_nondecreasing
+    (r₀ : ResourceId) (s0 : State)
+    (laws : List Transition)
+    (h_monotone :
+      ∀ t ∈ laws, ∀ s, t.pre s →
+        TotalSupply s r₀ ≤ TotalSupply (step_impl s t) r₀) :
+    ∀ s, ReachableViaLaws laws s0 s →
+         TotalSupply s0 r₀ ≤ TotalSupply s r₀ := by
+  apply invariant_preservation_via_laws
+    (fun s => TotalSupply s0 r₀ ≤ TotalSupply s r₀) laws s0
+  · exact Nat.le_refl _
+  · intro t htL s hI hpre
+    exact Nat.le_trans hI (h_monotone t htL s hpre)
+
+/-- Typeclass-driven corollary of `total_supply_globally_nondecreasing`:
+    a deployment that supplies a `MonotonicLawSet` gets per-resource
+    non-decrease for every resource and every reachable state, "for
+    free".  Parallels `total_supply_global_via_law_set` exactly. -/
+theorem total_supply_globally_nondecreasing_via_law_set
+    (r₀ : ResourceId) (s0 : State) (mls : MonotonicLawSet) :
+    ∀ s, ReachableViaLaws mls.laws s0 s →
+         TotalSupply s0 r₀ ≤ TotalSupply s r₀ := by
+  apply total_supply_globally_nondecreasing r₀ s0 mls.laws
+  intro t htL s hpre
+  exact (mls.isMonotonic t htL).monotone r₀ s hpre
+
 end LegalKernel
