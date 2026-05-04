@@ -110,9 +110,24 @@ lake build LegalKernel.Authority.Action       # Phase-3 Action layer + compile_i
 lake build LegalKernel.Authority.Identity     # Phase-3 KeyRegistry + AuthorityPolicy
 lake build LegalKernel.Authority.Nonce        # Phase-3 NonceState + ExtendedState
 lake build LegalKernel.Authority.SignedAction # Phase-3 admissibility + replay protection
-lake test                           # run Tests.lean driver (191 tests)
+lake build LegalKernel.Encoding.CBOR          # Phase-4 byte-codec foundation
+lake build LegalKernel.Encoding.State         # Phase-4 State / ExtendedState codec
+lake build LegalKernel.Events.Extract         # Phase-5 extractEvents
+lake build LegalKernel.Runtime.Hash           # Phase-5 FNV-1a-64 hash
+lake build LegalKernel.Runtime.LogFile        # Phase-5 framed log file format
+lake build LegalKernel.Runtime.Replay         # Phase-5 replay tool
+lake build LegalKernel.Runtime.Snapshot       # Phase-5 snapshot machinery
+lake build LegalKernel.Runtime.Loop           # Phase-5 main runtime loop
+lake build canon                              # Phase-5 `canon` runtime CLI
+lake build canon-replay                       # Phase-5 `canon-replay` audit binary
+lake test                           # run Tests.lean driver (389 tests)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
+
+# Phase-5 runtime smoke test (single-shot demo of the binary):
+.lake/build/bin/canon info
+.lake/build/bin/canon bootstrap /tmp/test.log
+.lake/build/bin/canon-replay /tmp/test.log
 ```
 
 **Toolchain:** Lean 4 v4.29.1 (pinned in `lean-toolchain`; the
@@ -174,12 +189,14 @@ After any source change, also run:
 ```
 canon/
 ├── lakefile.lean                  -- Lake config: lib + test driver +
-│                                     canon exe + audit executables.
+│                                     canon + canon-replay exes + audit executables.
 ├── lean-toolchain                 -- pinned Lean version (Section 13.4).
 ├── tcb_allowlist.txt              -- WU 1.11 TCB import allowlist.
-├── Main.lean                      -- placeholder runtime; Phase 5 replaces it.
+├── Main.lean                      -- Phase-5 `canon` runtime CLI (WU 5.1):
+│                                     info / process / replay / bootstrap / snapshot.
+├── Replay.lean                    -- Phase-5 `canon-replay` audit binary (WU 5.5).
 ├── Tests.lean                     -- @[test_driver]; runs every test module.
-├── LegalKernel.lean               -- umbrella import (kernel + RBMap + Conservation + laws + authority).
+├── LegalKernel.lean               -- umbrella import (kernel + RBMap + Conservation + laws + authority + encoding + DSL + events + runtime).
 ├── LegalKernel/
 │   ├── Kernel.lean                -- §4.12 trusted core (TCB).
 │   ├── RBMapLemmas.lean           -- §8.3 RBMap proof library (TCB).
@@ -281,6 +298,48 @@ canon/
 │   │                                 + `law pre := <expr> ; impl :=
 │   │                                 <expr>` macro; auto-fills decPre :=
 │   │                                 fun _ => inferInstance.
+│   ├── Events/                     -- Phase-5 WU 5.6: deployment-facing
+│   │   │                             event log (§8.9.2) derived from log
+│   │   │                             entries.  All non-TCB.
+│   │   ├── Types.lean              -- WU 5.6: `Event` inductive (5 ctors:
+│   │   │                             balanceChanged, nonceAdvanced,
+│   │   │                             identityRegistered/Revoked,
+│   │   │                             timeRecorded; Phase 6 appends 2 more).
+│   │   └── Extract.lean            -- WU 5.6: `extractEvents` —
+│   │                                 deterministic per-action event
+│   │                                 emission rules.
+│   ├── Runtime/                    -- Phase-5 WU 5.1 / 5.2 / 5.3 / 5.5 /
+│   │   │                             5.12: deployment-facing runtime
+│   │   │                             machinery.  All non-TCB.
+│   │   ├── Hash.lean               -- WU 5.1 / 5.5 / 5.12: FNV-1a-64
+│   │   │                             deterministic hash (production
+│   │   │                             swap-point for BLAKE3 via
+│   │   │                             @[extern] linkage; see
+│   │   │                             docs/extraction_notes.md).
+│   │   ├── LogFile.lean            -- WU 5.2 + 5.3: `LogEntry` structure
+│   │   │                             + `Encodable` instance + framed
+│   │   │                             on-disk format (magic + length +
+│   │   │                             payload + FNV-1a-64 trailer);
+│   │   │                             `appendEntry` / `readAllEntries` /
+│   │   │                             `loadAndTruncate` IO; `verifyChain`
+│   │   │                             chain-integrity helper.
+│   │   ├── Replay.lean             -- WU 5.5: `replay` (genesis + log →
+│   │   │                             final state); `replayHash`
+│   │   │                             (final hash only); `replayFromSeed`
+│   │   │                             (snapshot-bootstrap path);
+│   │   │                             `Decidable Admissible` instance.
+│   │   ├── Snapshot.lean           -- WU 5.12: `Snapshot` record (state
+│   │   │                             hash + encoded state + log index +
+│   │   │                             seed hash); `takeSnapshot` /
+│   │   │                             `restoreSnapshot`;
+│   │   │                             `replicaFromSnapshot` (replica
+│   │   │                             bootstrap from snapshot + log tail);
+│   │   │                             file IO helpers.
+│   │   └── Loop.lean               -- WU 5.1: `RuntimeState` record;
+│   │                                 `processSignedAction` (admissibility
+│   │                                 check → apply → log append → events);
+│   │                                 `bootstrap` (load + truncate +
+│   │                                 replay startup path); `processBatch`.
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness + emptyState.
 │       ├── KernelTests.lean       -- value-level kernel tests (22 cases).
@@ -313,8 +372,21 @@ canon/
 │       │   │                         (6 cases).
 │       │   └── SignInput.lean     -- WU 4.8 sign-input distinguishability
 │       │                             tests (7 cases).
-│       └── DSL/
-│           └── Law.lean           -- WU 4.9 `law` macro tests (4 cases).
+│       ├── DSL/
+│       │   └── Law.lean           -- WU 4.9 `law` macro tests (4 cases).
+│       ├── Events/
+│       │   ├── Types.lean         -- Phase-5 WU 5.6 Event-inductive tests
+│       │   │                         (7 cases).
+│       │   └── Extract.lean       -- Phase-5 WU 5.6 extractEvents tests
+│       │                             (10 cases).
+│       └── Runtime/
+│           ├── Hash.lean          -- Phase-5 hash-function tests (10).
+│           ├── LogFile.lean       -- Phase-5 WU 5.2 + 5.3 log-file
+│           │                         tests (17 cases incl. crash-cons.).
+│           ├── Replay.lean        -- Phase-5 WU 5.5 replay tests (10).
+│           ├── Snapshot.lean      -- Phase-5 WU 5.12 snapshot tests (7).
+│           └── Loop.lean          -- Phase-5 WU 5.1 runtime-loop tests
+│                                     (6 cases incl. rejection paths).
 ├── Tools/
 │   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 TCB allowlist enforcer.
@@ -330,11 +402,15 @@ canon/
     ├── GENESIS_PLAN.md            -- canonical design document.
     ├── decidability_discipline.md -- WU 1.6 (decPre) discipline.
     ├── std_dependencies.md        -- WU 1.13 Std lemma audit.
-    └── economic_invariants.md     -- Phase 2 design + Phase-4-prelude
-                                      monotonicity tier section.
+    ├── economic_invariants.md     -- Phase 2 design + Phase-4-prelude
+    │                                 monotonicity tier section.
+    ├── extraction_notes.md        -- Phase 5 WU 5.9: erasure / persistence
+    │                                 map for the `canon` runtime binary.
+    └── abi.md                     -- Phase 5 WU 5.10: on-disk frame format,
+                                      FNV-1a-64 trailer, CLI ABI.
 ```
 
-### Module dependency graph (Phases 0 – 3 + Phase-4 prelude)
+### Module dependency graph (Phases 0 – 5)
 
 ```
 LegalKernel.Kernel        (TCB, §4.12 + §4.3 balance lemmas + §4.9 reachability)
@@ -368,6 +444,36 @@ LegalKernel.Authority.SignedAction (non-TCB; depends on Kernel +
                                               Authority.{Crypto, Action,
                                               Identity, Nonce})
 
+LegalKernel.Encoding.{CBOR, Encodable}    (non-TCB; Phase-4 codec foundation)
+LegalKernel.Encoding.Action               (non-TCB; depends on Authority.Action)
+LegalKernel.Encoding.SignedAction         (non-TCB; depends on Encoding.Action +
+                                                    Authority.SignedAction)
+LegalKernel.Encoding.State                (non-TCB; depends on Authority.Nonce +
+                                                    Encoding.SignedAction)
+LegalKernel.Encoding.SignInput            (non-TCB; depends on Encoding.SignedAction)
+LegalKernel.DSL.Law                       (non-TCB; depends on Kernel)
+
+LegalKernel.Events.Types        (non-TCB; Phase-5 WU 5.6; depends on Kernel +
+                                          Authority.Crypto)
+LegalKernel.Events.Extract      (non-TCB; depends on Authority.SignedAction +
+                                          Events.Types)
+
+LegalKernel.Runtime.Hash        (non-TCB; Phase-5 WU 5.1 / 5.5 / 5.12; FNV-1a-64
+                                          deterministic hash; production swap-point
+                                          for BLAKE3 via @[extern])
+LegalKernel.Runtime.LogFile     (non-TCB; depends on Authority.SignedAction +
+                                          Encoding.{SignedAction, State} +
+                                          Runtime.Hash)
+LegalKernel.Runtime.Replay      (non-TCB; depends on Authority.SignedAction +
+                                          Encoding.State + Runtime.{Hash, LogFile})
+LegalKernel.Runtime.Snapshot    (non-TCB; depends on Authority.SignedAction +
+                                          Encoding.State + Runtime.{Hash,
+                                          LogFile, Replay})
+LegalKernel.Runtime.Loop        (non-TCB; depends on Authority.SignedAction +
+                                          Encoding.{SignedAction, State} +
+                                          Events.Extract + Runtime.{Hash,
+                                          LogFile, Replay, Snapshot})
+
 LegalKernel.Test.Framework (no Kernel dependency)
 LegalKernel.Test.KernelTests
 LegalKernel.Test.RBMapLemmasTests
@@ -375,10 +481,15 @@ LegalKernel.Test.ConservationTests
 LegalKernel.Test.Laws.{Transfer, Mint, Burn, Freeze, Reward,
                        DistributeOthers, ProportionalDilute}
 LegalKernel.Test.Authority.{Action, Identity, Nonce, SignedAction}
+LegalKernel.Test.Encoding.{CBOR, Encodable, Action, SignedAction,
+                            State, SignInput}
+LegalKernel.Test.DSL.Law
+LegalKernel.Test.Events.{Types, Extract}
+LegalKernel.Test.Runtime.{Hash, LogFile, Replay, Snapshot, Loop}
                                  │
 LegalKernel  (umbrella) ─────────┘
                                  │
-Main.lean / Tests.lean ──────────┘
+Main.lean / Replay.lean / Tests.lean ──┘
 
 Tools.TcbAudit       (parses TCB sources; no Lean-level dep on the kernel).
 Tools.CountSorries   (parses every .lean under LegalKernel/; no Lean-level dep).
@@ -389,13 +500,19 @@ The kernel has **zero** external Lean-package dependencies.
 separate Lake package.  The TCB therefore equals exactly the Lean
 core distribution plus the trusted-core modules of this repository
 (`Kernel.lean` + `RBMapLemmas.lean`).  Phase 2's economic-invariants
-framework and Phase 3's authority layer are **not** TCB:
-`Conservation.lean`, the four `Laws/*.lean` modules, and the five
-`Authority/*.lean` modules are deployment-facing infrastructure,
-with bugs scoped to deployment-level claims (not kernel invariants).
-Phase 3's `Verify` axiom is a *trust assumption* (the deployment-
-supplied signature scheme is EUF-CMA secure); the kernel's authority
-guarantees are conditional on this assumption.
+framework, Phase 3's authority layer, Phase 4's encoding / DSL
+modules, and Phase 5's runtime / events modules are **not** TCB:
+all of `Conservation.lean`, the seven `Laws/*.lean` modules, the
+five `Authority/*.lean` modules, the six `Encoding/*.lean`
+modules, the `DSL/Law.lean` module, the two `Events/*.lean`
+modules, and the five `Runtime/*.lean` modules are
+deployment-facing infrastructure, with bugs scoped to
+deployment-level claims (not kernel invariants).  Phase 3's
+`Verify` axiom and Phase 5's `Runtime.Hash` are *trust assumptions*
+(the deployment-supplied signature scheme is EUF-CMA secure; the
+production hash function is collision-resistant); the kernel's
+authority and replay guarantees are conditional on these
+assumptions.
 
 ## Reading large files
 
@@ -723,7 +840,7 @@ units.  Brief summary:
 | 3      | Authority layer                    | 3.1–3.10                 | Complete    |
 | 4-prelude | Positive-incentive mechanisms   | R.1–R.23                 | Complete    |
 | 4      | DSL and serialization              | 4.1–4.9                  | Complete    |
-| 5      | Runtime and extraction             | 5.x                      | Not started |
+| 5      | Runtime and extraction             | 5.1–5.3, 5.5–5.6, 5.9–5.10, 5.12 | Complete (Lean side); Rust-side WUs 5.4 / 5.7 / 5.8 / 5.11 deferred |
 | 6      | Disputes and adjudication          | 6.x                      | Not started |
 | 7      | Advanced capabilities              | 7.x                      | Not started |
 
@@ -804,8 +921,18 @@ every match before submission.
 
 ## Active development status
 
-**Current Phase:** Phases 0 – 4 Complete (Phase 4: DSL and
-Serialization landed); Phase 5 (Runtime and Extraction) is next.
+**Current Phase:** Phases 0 – 5 Complete (Lean-side WUs of Phase 5:
+Runtime and Extraction landed); Phase 6 (Disputes and Adjudication)
+is next.
+
+**Phase 5 deferred sub-WUs.**  The Lean-only implementation
+deliberately defers the Rust-host WUs (5.4 network adaptor, 5.7
+event subscription, 5.8 SQLite indexer, 5.11 10k-tx/sec benchmark)
+to a follow-up PR with its own CI infrastructure.  The on-disk
+log format (WU 5.2), crash-consistency (WU 5.3), replay tool
+(WU 5.5), event extraction (WU 5.6), runtime loop (WU 5.1),
+snapshot machinery (WU 5.12), extraction notes (WU 5.9), and ABI
+documentation (WU 5.10) are all complete and tested.
 
 WU 0.1 (Lean toolchain pin & Lake project skeleton) — complete:
 - `lean-toolchain` pinned to `leanprover/lean4:v4.29.1` (the latest
@@ -1269,8 +1396,98 @@ the kernel proof obligations are independent of that adaptor.
 See the §8.8 deviation block in `docs/GENESIS_PLAN.md` for the
 full list of Phase 4 deviations.
 
-**Test coverage (after Phase 4 dual audit).**  322 passing tests
-across twenty-two suites:
+WUs 5.1 – 5.12 (Phase 5: Runtime and Extraction) — complete (Lean
+side); Rust-side WUs (5.4 / 5.7 / 5.8 / 5.11) deferred:
+- **WU 5.1**: `LegalKernel/Runtime/Loop.lean` ships the
+  `RuntimeState` record (policy, state, prevHash, logIndex,
+  logPath), the `processSignedAction` single-step state advance
+  (admissibility-check → apply → log-append → events), the
+  `bootstrap` startup path (load + truncate + replay), and the
+  `processBatch` convenience helper.  `Main.lean` now hosts the
+  Phase-5 `canon` runtime CLI with five subcommands (`info`,
+  `process`, `replay`, `bootstrap`, `snapshot`).  `Replay.lean`
+  is a separate single-purpose binary (`canon-replay`).
+- **WU 5.2**: `LegalKernel/Runtime/LogFile.lean` ships the
+  `LogEntry` structure (`prevHash`, `signedAction`,
+  `postStateHash`), its `Encodable` instance, the framed on-disk
+  format (`MAGIC + LENGTH + PAYLOAD + TRAILER` with FNV-1a-64
+  trailer), the `appendEntry` / `readAllEntries` IO primitives,
+  and the `verifyChain` chain-integrity helper.  Frame magic is
+  the ASCII string `"CANO"` (0x43 0x41 0x4E 0x4F).
+- **WU 5.3**: crash-consistency lives in the same module
+  (`loadAndTruncate`).  On startup the runtime walks the file
+  frame-by-frame, stops at the first incomplete / corrupt frame,
+  and truncates to the last good byte boundary.  Error
+  diagnostics distinguish `truncated` (legitimate torn write)
+  from `badMagic` / `badTrailer` (genuine corruption).
+- **WU 5.4**: deferred (Rust network adaptor — depends on Rust as
+  the host language).  `docs/abi.md` §10 documents the planned
+  wire format.
+- **WU 5.5**: `LegalKernel/Runtime/Replay.lean` ships `replay`
+  (genesis + log → final state), `replayHash` (final-hash-only),
+  `replayFromSeed` (snapshot-bootstrap-friendly variant), and
+  the `Decidable Admissible` instance the runtime needs to
+  dispatch admissibility checks.  The standalone `canon-replay`
+  binary (`Replay.lean`) is the auditor entry point.  Acceptance:
+  `canon process LOG IN` followed by `canon-replay LOG`
+  reproduces the runtime's `StateHash` byte-for-byte.
+- **WU 5.6**: `LegalKernel/Events/Types.lean` ships the
+  five-constructor `Event` inductive (per §8.9.2; Phase 6 will
+  append two more for disputes / verdicts).
+  `LegalKernel/Events/Extract.lean` ships the deterministic
+  `extractEvents : (preState, postState, signedAction) → List
+  Event` function with per-action emission rules documented in
+  the file's coverage map.
+- **WU 5.7**: deferred (Rust subscription).
+- **WU 5.8**: deferred (Rust + SQLite indexer).
+- **WU 5.9**: `docs/extraction_notes.md` — what survives Lean's
+  compilation pipeline into the runtime binary.  Per-construct
+  erasure / persistence map (Prop-typed values erased; opaque
+  declarations get a placeholder body unless `@[extern]`-linked;
+  state-hash determinism preserved across architectures).
+- **WU 5.10**: `docs/abi.md` — on-disk frame layout, FNV-1a-64
+  trailer format, per-type CBE encodings, CLI subcommand
+  contracts.  External implementers can reproduce a compatible
+  client from this document alone.
+- **WU 5.11**: deferred (10k tx/sec benchmark — depends on the
+  Rust network adaptor for end-to-end measurement).
+- **WU 5.12**: `LegalKernel/Runtime/Snapshot.lean` ships the
+  `Snapshot` record (`stateHash`, `encodedState`, `logIndex`,
+  `seedHash`), `takeSnapshot` / `restoreSnapshot`, the file IO
+  helpers (`saveSnapshot` / `loadSnapshot`), and
+  `replicaFromSnapshot` (the headline operation: a fresh replica
+  bootstraps from a snapshot file plus the post-snapshot log
+  tail).
+
+**Phase 5 design deviations (documented).**
+
+- **Hash function fallback.**  Genesis Plan §8.8.4 specifies
+  BLAKE3-256 (32-byte output).  Phase 5 ships **FNV-1a-64**
+  (8-byte output) as a deterministic Lean-native fallback.  The
+  swap point is `LegalKernel.Runtime.Hash.hashBytes`; production
+  deployments link a real BLAKE3 implementation via `@[extern]`
+  without touching kernel or law modules.  The `zeroHash`
+  constant is 32 bytes (matching BLAKE3-256 width) so the type
+  shape is forward-compatible.
+- **Verify-opaque caveat.**  `Verify` (Phase 3 WU 3.4) is
+  `opaque` with a placeholder body of `false`; without a real
+  Ed25519 adaptor (Phase 5 WU 3.9, deferred), every signature
+  verification fails at runtime.  This means Phase 5's runtime
+  tests exercise the *rejection paths* (`processSignedAction`
+  rejects every action with `notAdmissible`); the
+  success-with-real-actions paths require WU 3.9 to land first.
+  This is documented in each runtime test module's header and
+  in `docs/extraction_notes.md` §2.3.
+- **Rust deliverables (5.4 / 5.7 / 5.8 / 5.11) deferred.**  The
+  Lean-side runtime is fully functional and end-to-end-tested
+  without them.  Each is documented in `docs/abi.md` §10 (for
+  5.4 / 5.7) or in the relevant Phase-5 module headers, so the
+  follow-up PR can land them as a drop-in.
+
+**Test coverage (after Phase 5 acceptance).**  389 passing tests
+across twenty-nine suites (322 was the post-Phase-4 count; Phase 5
+adds 67 tests across seven new suites, plus the umbrella build-tag
+check value updated to `canon-phase-5-runtime-extraction`):
 - `KernelTests` (22) — unchanged from Phase 1.
 - `RBMapLemmasTests` (8) — unchanged from Phase 1.
 - `Umbrella` (2) — non-TCB build-tag smoke test, with the Phase-4-
@@ -1412,6 +1629,46 @@ across twenty-two suites:
   impl-only form defaults `pre` to `True`; DSL-built `transferDSL`
   matches the hand-written `Laws.transfer` at the value level.
   Term-level `Law.mk` API stability.
+- `Events.TypesTests` (7) — Phase 5 WU 5.6 `Event` inductive
+  classification and projection checks; `DecidableEq` coverage.
+- `Events.ExtractTests` (10) — Phase 5 WU 5.6 per-action event
+  emission contracts (transfer = sender + receiver + nonce events;
+  freeze = nonce only; replaceKey = registration + nonce; etc.);
+  determinism + non-emptiness API stability.
+- `Runtime.HashTests` (10) — Phase 5 WU 5.1 / 5.5 / 5.12 FNV-1a-64
+  identity (offset basis on empty input; `* prime` on a single
+  zero); determinism; output-shape; avalanche-ish non-collision;
+  term-level `hashBytes_deterministic` / `_size` / `hashStream_*`
+  API stability.
+- `Runtime.LogFileTests` (17) — Phase 5 WU 5.2 + 5.3.  `LogEntry`
+  encode-then-decode + `encodeFrame` / `decodeFrame` round-trip;
+  multi-frame `decodeAllFrames` recovery; rejection of truncated /
+  bad-magic / bad-trailer inputs; `verifyChain` accept / reject;
+  `appendEntry` / `readAllEntries` IO round-trip;
+  `loadAndTruncate` torn-write recovery (a sweep across multiple
+  partial-tail lengths); empty-log handling; term-level
+  `encodeFrame_deterministic` / `frameTrailer_length` API stability.
+- `Runtime.ReplayTests` (10) — Phase 5 WU 5.5.  Empty-log replay
+  returns genesis; `replayHash` returns the genesis hash;
+  determinism; chain-broken rejection; not-admissible rejection
+  (Verify-stub returns false in tests); `replayFromSeed` empty
+  + chain-broken paths; multi-entry failure-index reporting;
+  term-level `replay_deterministic` / `replay_empty` API stability.
+- `Runtime.SnapshotTests` (7) — Phase 5 WU 5.12.  `takeSnapshot`
+  field shape; `Snapshot.encode` / `decode` round-trip;
+  `restoreSnapshot` recovers state at every probed cell;
+  `restoreSnapshot` rejects tampered `stateHash` with
+  `hashMismatch`; `replicaFromSnapshot` empty-tail bootstrap
+  reproduces snapshot state; `saveSnapshot` / `loadSnapshot` IO
+  round-trip; term-level `takeSnapshot_deterministic` API
+  stability.
+- `Runtime.LoopTests` (6) — Phase 5 WU 5.1.  `bootstrap` of
+  missing log returns fresh runtime (logIndex = 0, prevHash =
+  zeroHash); `processSignedAction` rejects an inadmissible
+  action with `notAdmissible` and does NOT touch the log file;
+  `processBatch` returns one rejection per inadmissible action;
+  `processPure` determinism + rejection check; term-level
+  `processPure_deterministic` API stability.
 
 Tests use two complementary patterns:
 1. **Value-level**: assert `==` between expected and actual results

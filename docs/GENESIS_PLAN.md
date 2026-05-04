@@ -3682,6 +3682,100 @@ Three streams (after 4.4 / 3.7):
 working; replay tool reproduces state from any log; benchmarks pass;
 crash-consistency fuzz green.
 
+**Phase 5 status.** Lean-side WUs complete; Rust-side WUs deferred
+to a follow-up PR.
+
+- WU 5.1: `LegalKernel/Runtime/Loop.lean` ships the `RuntimeState`
+  record + `processSignedAction` (single-step state advance with
+  log append) + `bootstrap` (load + truncate + replay startup
+  path).  The `Main.lean` CLI multiplexes five subcommands
+  (`info`, `process`, `replay`, `bootstrap`, `snapshot`) against
+  an append-only log file at the path supplied on argv.  End-to-end
+  smoke test (`runtime-loop` test suite, 6 cases) verifies the
+  `processSignedAction` rejection path (Verify-stub returns false
+  in test mode) and the `bootstrap` empty-log path; production
+  apply paths require WU 3.9 (Ed25519 adaptor) before they
+  exercise the Verify chain.
+- WU 5.2: `LegalKernel/Runtime/LogFile.lean` ships the `LogEntry`
+  structure (`prevHash`, `signedAction`, `postStateHash`), the
+  `Encodable LogEntry` instance, the framed on-disk format
+  (`magic + length + payload + trailer` with FNV-1a-64 trailer
+  for torn-write detection), the `appendEntry` / `readAllEntries`
+  IO primitives, and the `verifyChain` chain-integrity helper.
+  17 test cases including positive round-trips, negative
+  rejection paths (truncated, bad-magic, bad-trailer), and
+  multi-frame stream tests.
+- WU 5.3: crash-consistency lives in the same module
+  (`loadAndTruncate`).  On startup the runtime walks the file
+  frame-by-frame, stops at the first incomplete / corrupt frame,
+  and truncates the file to the last good byte boundary.  The
+  test suite includes a torn-write simulation
+  (`crashConsistencyTruncation`) and a multi-cut sweep
+  (`crashConsistencySweep`) covering 6 prefix lengths from 1 byte
+  to a near-complete frame.
+- WU 5.4: deferred (Rust network adaptor).  Documented in
+  `docs/abi.md` §10 with the planned wire format so the WU 5.4
+  PR can land as a drop-in.
+- WU 5.5: `LegalKernel/Runtime/Replay.lean` ships the `replay`
+  function (genesis + log → final state) + `replayHash` (final
+  hash only) + `replayFromSeed` (start from a snapshot's seed
+  hash + state).  The `canon-replay` binary in `Replay.lean` /
+  `lakefile.lean` is the audit-oriented standalone tool: a
+  separate process that reproduces the runtime's state hash
+  byte-for-byte by replaying the same log.  10 test cases.
+- WU 5.6: `LegalKernel/Events/{Types, Extract}.lean` ship the
+  five-constructor `Event` inductive (per §8.9.2 — Phase 6 will
+  append `disputeFiled` / `verdictApplied`) and the deterministic
+  `extractEvents : (preState, postState, signedAction) → List
+  Event` function (per-action event-emission rules documented in
+  the file's coverage map).  17 combined test cases.
+- WU 5.7: deferred (Rust subscription).  Documented in
+  `docs/abi.md` §10 + `LegalKernel/Events/Types.lean` module
+  docstring.
+- WU 5.8: deferred (SQLite indexer — depends on a Rust DB layer).
+- WU 5.9: `docs/extraction_notes.md` ships the per-construct
+  erasure / persistence map (what survives Lean's compilation
+  pipeline into the runtime binary) plus the `Verify` /
+  `signingInput` opaque-stub story for production deployments.
+- WU 5.10: `docs/abi.md` ships the on-disk and on-wire byte
+  layouts (frame structure, FNV-1a-64 trailer format, per-type
+  CBE encodings) so an external implementer can reproduce a
+  compatible client.
+- WU 5.11: deferred (10k tx/sec benchmark — depends on the Rust
+  network adaptor for end-to-end measurement).
+- WU 5.12: `LegalKernel/Runtime/Snapshot.lean` ships the
+  `Snapshot` record (`stateHash`, `encodedState`, `logIndex`,
+  `seedHash`), `takeSnapshot` / `restoreSnapshot`, the file IO
+  helpers, and `replicaFromSnapshot` (the headline operation: a
+  fresh replica's snapshot + log-tail bootstrap path).  7 test
+  cases including round-trip, tampered-state rejection, and
+  empty-tail-bootstrap-equals-snapshot-state.
+
+**Phase-5 deviations from §12 (documented).**
+
+- **Hash function.**  Genesis Plan §8.8.4 specifies BLAKE3-256
+  (32-byte output).  Phase 5 ships **FNV-1a-64** (8-byte output)
+  as a deterministic Lean-native fallback, with the FFI swap
+  point at `LegalKernel.Runtime.Hash.hashBytes` so production
+  deployments link a real BLAKE3 implementation via `@[extern]`
+  without touching kernel or law modules.  The runtime adaptor
+  (Phase 5 WU 3.9) is the right boundary for that swap.  Phase
+  5's tests pass with the FNV-1a-64 fallback; the §8.8.4
+  cryptographic-strength acceptance gate requires the BLAKE3
+  swap.
+- **Verify-opaque caveat.**  The `Verify` `opaque` declaration
+  (Phase 3 WU 3.4) returns `false` at runtime in the absence of
+  an `@[extern]` implementation.  Phase 5's runtime tests
+  exercise the *rejection paths* (every `processSignedAction`
+  call rejects as `notAdmissible` because the signature clause
+  fails); the success-with-real-actions paths are deferred to
+  WU 3.9 (Ed25519 adaptor) + integration tests.  This is
+  documented in each runtime test module's header.
+- **Rust deliverables (5.4 / 5.7 / 5.8 / 5.11) deferred.**  The
+  Lean-side runtime is fully functional and end-to-end-tested
+  without them; the Rust adaptors are *interop* deliverables that
+  will land in a follow-up PR with their own CI infrastructure.
+
 ### Phase 6: Disputes and Adjudication
 
 Goal: the §8.4 four-stage pipeline implemented and tested

@@ -72,6 +72,21 @@ enforces that comparable systems leave to convention or audit:
   ; impl := …` macro fills in `decPre := fun _ => inferInstance`;
   if the precondition is not instance-decidable, elaboration fails
   with a clear error rather than silently admitting a partial law.
+- **Crash-consistent persistent log + replay.** Phase 5 ships an
+  append-only `LogEntry` format with FNV-1a-64 framing trailers; on
+  startup the runtime walks the file frame-by-frame and truncates
+  the partial tail of any torn write.  The standalone `canon-replay`
+  binary reconstructs the runtime's `StateHash` byte-for-byte from
+  the same log, on a separate machine, with no shared mutable state.
+- **Deterministic event extraction.** `extractEvents` is a pure Lean
+  function from `(preState, postState, signedAction)` to a `List
+  Event`; two replays of the same log produce byte-identical event
+  streams.  Indexers consume events without re-deriving state diffs.
+- **Snapshot + incremental shipping.** Phase 5 WU 5.12: a `(stateHash,
+  encodedState, logIndex, seedHash)` snapshot lets fresh replicas
+  resume processing without replaying from genesis.  A replica
+  bootstrapped from a snapshot reaches the same final state as one
+  that replayed the entire log.
 
 
 ## Engineering posture
@@ -80,7 +95,7 @@ The build mechanically guarantees the following on every commit:
 
 | Posture                                        | Mechanism                                |
 |------------------------------------------------|------------------------------------------|
-| 322 unit tests across 22 suites pass           | `lake test` (`Tests.lean` driver)        |
+| 389 unit tests across 29 suites pass           | `lake test` (`Tests.lean` driver)        |
 | Zero `sorry` in any kernel-TCB module          | `lake exe count_sorries`                 |
 | TCB imports stay on the allowlist              | `lake exe tcb_audit`                     |
 | Every public surface has a `/-- … -/` doc      | `linter.missingDocs := true` (lakefile)  |
@@ -94,11 +109,15 @@ non-TCB modules require one.
 
 ## Status
 
-Canon is research-stage software. Phases 0 – 4 of the Genesis Plan are
-complete; the Phase-4-prelude (positive-incentive mechanisms) lands a
-type-level firewall against value destruction, and Phase 4 (DSL and
-Serialization) lands the canonical CBE byte codec, full per-type
-round-trip and injectivity proofs, and the `law` DSL macro.
+Canon is research-stage software. Phases 0 – 5 of the Genesis Plan are
+complete (Phase 5's Lean-side WUs are landed; the Rust-host WUs 5.4 /
+5.7 / 5.8 / 5.11 are deferred to a follow-up PR with their own CI
+infrastructure).  Phase 5 lands the deterministic content-hash
+fallback (FNV-1a-64), the framed append-only log file format with
+crash-consistent recovery, the replay tool, the `Event` inductive
+plus deterministic `extractEvents`, the snapshot machinery, the
+runtime main loop, the `canon` runtime CLI, and the standalone
+`canon-replay` audit binary.
 
 | Phase       | Title                                | Status       |
 |-------------|--------------------------------------|--------------|
@@ -108,7 +127,7 @@ round-trip and injectivity proofs, and the `law` DSL macro.
 | 3           | Authority layer (signed actions)     | Complete     |
 | 4-prelude   | Positive-incentive mechanisms        | Complete     |
 | 4           | DSL and serialization                | Complete     |
-| 5           | Runtime and extraction               | Not started  |
+| 5           | Runtime and extraction (Lean side)   | Complete     |
 | 6           | Disputes and adjudication            | Not started  |
 | 7           | Advanced capabilities                | Not started  |
 
@@ -135,9 +154,14 @@ elan toolchain install "$(cat lean-toolchain)"
 # Daily commands:
 source ~/.elan/env
 lake build              # full project (default target)
-lake test               # 255 tests across 15 suites
+lake test               # 389 tests across 29 suites
 lake exe count_sorries  # zero-sorry TCB gate
 lake exe tcb_audit      # TCB allowlist gate
+
+# Phase-5 runtime CLI smoke test:
+.lake/build/bin/canon info                       # build tag + phase
+.lake/build/bin/canon bootstrap /tmp/test.log    # init an empty log
+.lake/build/bin/canon-replay /tmp/test.log       # reproduce state hash
 ```
 
 A green CI run on the same commands is the authoritative signal that
@@ -162,14 +186,24 @@ canon/
 │   │                          AuthorityPolicy), Nonce,
 │   │                          SignedAction (Admissible +
 │   │                          replay_impossible)
-│   └── Test/               -- 15 test suites mirroring the
+│   ├── Encoding/           -- Phase-4 CBE byte codec:
+│   │                          CBOR, Encodable, Action,
+│   │                          SignedAction, State, SignInput
+│   ├── DSL/                -- Phase-4 `law` macro
+│   ├── Events/             -- Phase-5 deployment-facing event
+│   │                          stream: Types, Extract
+│   ├── Runtime/            -- Phase-5 runtime infrastructure:
+│   │                          Hash, LogFile, Replay, Snapshot, Loop
+│   └── Test/               -- 29 test suites mirroring the
 │                              source layout
 ├── LegalKernel.lean        -- umbrella: import this from downstream
 ├── Tools/                  -- audit executables
 │   ├── Common.lean         -- shared TCB constants
 │   ├── TcbAudit.lean       -- enforces tcb_allowlist.txt
 │   └── CountSorries.lean   -- enforces zero `sorry` in TCB
-├── Main.lean               -- placeholder runtime (replaced in Phase 5)
+├── Main.lean               -- Phase-5 `canon` runtime CLI (info /
+│                              process / replay / bootstrap / snapshot)
+├── Replay.lean             -- Phase-5 `canon-replay` audit binary
 ├── Tests.lean              -- @[test_driver] (`lake test` entry point)
 ├── lakefile.lean           -- Lake config + lean options
 ├── lean-toolchain          -- pinned Lean version
@@ -182,7 +216,9 @@ canon/
     ├── GENESIS_PLAN.md         -- canonical design document
     ├── decidability_discipline.md
     ├── economic_invariants.md  -- Phase 2 + Phase-4 prelude
-    └── std_dependencies.md     -- per-toolchain-bump audit
+    ├── std_dependencies.md     -- per-toolchain-bump audit
+    ├── extraction_notes.md     -- Phase 5 WU 5.9: erasure / persistence map
+    └── abi.md                  -- Phase 5 WU 5.10: on-disk + CLI ABI
 ```
 
 ### Reading order for new contributors
@@ -217,6 +253,11 @@ on each returns only the three Lean built-ins.
 | `expectsNonce_strict_mono`               | per-actor expected nonce strictly increases on advance  | `LegalKernel/Authority/Nonce.lean`   |
 | `nonce_uniqueness`                       | no two admissible actions by the same signer share a nonce | `LegalKernel/Authority/SignedAction.lean` |
 | `replay_impossible`                      | a successfully applied signed action is not re-admissible | `LegalKernel/Authority/SignedAction.lean` |
+| `action_roundtrip`                       | every Action's CBE encoding decodes back to itself      | `LegalKernel/Encoding/Action.lean`   |
+| `state_encode_deterministic`             | equal `State` values produce equal canonical bytes      | `LegalKernel/Encoding/State.lean`    |
+| `signInput_deterministic`                | equal sign-input args produce equal sign-input bytes (§8.8.5) | `LegalKernel/Encoding/SignInput.lean` |
+| `hashBytes_deterministic`                | equal byte inputs produce equal content-hash outputs    | `LegalKernel/Runtime/Hash.lean`      |
+| `replay_deterministic`                   | equal `(genesis, log)` pairs produce equal replay outputs | `LegalKernel/Runtime/Replay.lean`    |
 
 CLAUDE.md `#1` – `#43` is the complete table including every
 non-headline lemma the deployment surface depends on.
