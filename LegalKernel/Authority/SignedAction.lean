@@ -481,6 +481,9 @@ theorem non_replaceKey_preserves_registry
   | mint _ _ _            => rfl
   | burn _ _ _            => rfl
   | freezeResource _      => rfl
+  | reward _ _ _          => rfl
+  | distributeOthers _ _ _ => rfl
+  | proportionalDilute _ _ _ => rfl
   | replaceKey actor newKey =>
       exact absurd hact (hne actor newKey)
 

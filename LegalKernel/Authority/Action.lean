@@ -67,6 +67,9 @@ import LegalKernel.Laws.Transfer
 import LegalKernel.Laws.Mint
 import LegalKernel.Laws.Burn
 import LegalKernel.Laws.Freeze
+import LegalKernel.Laws.Reward
+import LegalKernel.Laws.DistributeOthers
+import LegalKernel.Laws.ProportionalDilute
 import LegalKernel.Authority.Crypto
 
 namespace LegalKernel
@@ -96,6 +99,21 @@ inductive Action
   | burn (r : ResourceId) (fromActor : ActorId) (amount : Amount)
   /-- Mark `r` as frozen (no-op at the kernel level; deployment commitment). -/
   | freezeResource (r : ResourceId)
+  /-- Reward `to` with `amount` units of `r` (positive-incentive
+      analogue of `mint`; classified as `IsMonotonic`).  Distinct from
+      `mint` at the Action layer so that authority policies can grant
+      "may reward" permission independently from "may mint". -/
+  | reward (r : ResourceId) (to : ActorId) (amount : Amount)
+  /-- Distribute `amount` to every actor in `r`'s `BalanceMap` except
+      `excluded`.  Empty/excluded-only resources are no-ops.
+      Substitute for "fining `excluded` by the equivalent of `amount *
+      k`" without removing tokens from `excluded`. -/
+  | distributeOthers (r : ResourceId) (excluded : ActorId) (amount : Amount)
+  /-- Proportionally dilute `excluded` by minting `totalReward * v_k /
+      sumOthers` (Nat floor; dust discarded) to each non-excluded
+      actor `k`.  The strongest analogue of "burning `excluded`'s
+      balance share" available without removing tokens. -/
+  | proportionalDilute (r : ResourceId) (excluded : ActorId) (totalReward : Amount)
   /-- Re-point `actor`'s identity to `newKey`, signed by the *old* key.
       Kernel-level effect is identity on `State`; the authority-level
       effect (registry update) happens in `apply_admissible`. -/
@@ -122,11 +140,14 @@ inductive Action
     `Action.compile`/`CompiledAction` wrapper below, which carries the
     originating `Action` as a separate `source` field. -/
 def Action.compileTransition : Action → Transition
-  | .transfer r s r' a       => Laws.transfer r s r' a
-  | .mint r to a             => Laws.mint r to a
-  | .burn r fr a             => Laws.burn r fr a
-  | .freezeResource r        => Laws.freezeResource r
-  | .replaceKey _ _          => Laws.freezeResource 0
+  | .transfer r s r' a            => Laws.transfer r s r' a
+  | .mint r to a                  => Laws.mint r to a
+  | .burn r fr a                  => Laws.burn r fr a
+  | .freezeResource r             => Laws.freezeResource r
+  | .reward r to a                => Laws.reward r to a
+  | .distributeOthers r e a       => Laws.distributeOthers r e a
+  | .proportionalDilute r e tr    => Laws.proportionalDilute r e tr
+  | .replaceKey _ _               => Laws.freezeResource 0
 
 /-! ## The `CompiledAction` wrapper -/
 
@@ -249,6 +270,17 @@ example (r : ResourceId) (fr : ActorId) (am : Amount) :
 
 example (r : ResourceId) :
     (Action.compile (.freezeResource r)).source = .freezeResource r := rfl
+
+example (r : ResourceId) (to : ActorId) (am : Amount) :
+    (Action.compile (.reward r to am)).source = .reward r to am := rfl
+
+example (r : ResourceId) (e : ActorId) (am : Amount) :
+    (Action.compile (.distributeOthers r e am)).source =
+      .distributeOthers r e am := rfl
+
+example (r : ResourceId) (e : ActorId) (tr : Amount) :
+    (Action.compile (.proportionalDilute r e tr)).source =
+      .proportionalDilute r e tr := rfl
 
 example (actor : ActorId) (newKey : PublicKey) :
     (Action.compile (.replaceKey actor newKey)).source = .replaceKey actor newKey := rfl
