@@ -153,10 +153,94 @@ def extendedStateRoundtrip : TestCase := {
     | .error e => throw <| IO.userError s!"ExtendedState round-trip failed: {repr e}"
 }
 
+/-! ## Canonicality enforcement (§8.8.6)
+
+The decoder must reject *non-canonical* CBE map encodings — those
+with unsorted or duplicate keys.  Without these rejections an
+attacker could forge an alternative-but-equally-valid encoding of
+the same logical state with a different signature input. -/
+
+/-- Decoder rejects unsorted-key map. -/
+def decoderRejectsUnsortedKeys : TestCase := {
+  name := "decoder rejects unsorted-key map (canonicality)"
+  body := do
+    -- Build a CBE map manually with keys 5, 3 (unsorted).
+    let mapHead := cborHeadEncode cbeTagMap 2
+    let key5 := cborHeadEncode cbeTagUint 5
+    let val100 := cborHeadEncode cbeTagUint 100
+    let key3 := cborHeadEncode cbeTagUint 3
+    let val200 := cborHeadEncode cbeTagUint 200
+    let unsorted := mapHead ++ key5 ++ val100 ++ key3 ++ val200
+    match BalanceMap.decode unsorted with
+    | .ok _ =>
+      throw <| IO.userError "BUG: decoder accepted unsorted-key map"
+    | .error _ => pure ()
+}
+
+/-- Decoder rejects duplicate-key map. -/
+def decoderRejectsDuplicateKeys : TestCase := {
+  name := "decoder rejects duplicate-key map (canonicality)"
+  body := do
+    let mapHead := cborHeadEncode cbeTagMap 2
+    let key5 := cborHeadEncode cbeTagUint 5
+    let val100 := cborHeadEncode cbeTagUint 100
+    let val200 := cborHeadEncode cbeTagUint 200
+    let dup := mapHead ++ key5 ++ val100 ++ key5 ++ val200
+    match BalanceMap.decode dup with
+    | .ok _ =>
+      throw <| IO.userError "BUG: decoder accepted duplicate-key map"
+    | .error _ => pure ()
+}
+
+/-- Decoder accepts a canonical (sorted, distinct) map.  Sanity
+    check that the canonicality enforcement doesn't reject valid
+    inputs. -/
+def decoderAcceptsCanonicalMap : TestCase := {
+  name := "decoder accepts canonical (sorted, distinct) map"
+  body := do
+    let mapHead := cborHeadEncode cbeTagMap 2
+    let key3 := cborHeadEncode cbeTagUint 3
+    let val200 := cborHeadEncode cbeTagUint 200
+    let key5 := cborHeadEncode cbeTagUint 5
+    let val100 := cborHeadEncode cbeTagUint 100
+    let canonical := mapHead ++ key3 ++ val200 ++ key5 ++ val100
+    match BalanceMap.decode canonical with
+    | .ok (bm, rest) =>
+      assertEq (0 : Nat) rest.length "no residual"
+      assertEq (200 : Amount) (bm[(3 : ActorId)]?.getD 0) "actor 3 balance"
+      assertEq (100 : Amount) (bm[(5 : ActorId)]?.getD 0) "actor 5 balance"
+    | .error e => throw <| IO.userError s!"Canonical map rejected: {repr e}"
+}
+
+/-- Encode-decode-encode idempotence: encoding a state, decoding it,
+    and re-encoding the result must produce the original bytes.
+    This is the operational form of the §8.8.3 canonicality
+    requirement: the canonical bytes are a *fixed point* of the
+    encode-after-decode operation. -/
+def stateEncodeDecodeEncodeIdempotent : TestCase := {
+  name := "encode-decode-encode is idempotent"
+  body := do
+    let s : LegalKernel.State :=
+      LegalKernel.setBalance
+        (LegalKernel.setBalance
+          (LegalKernel.setBalance ({ balances := ∅ }) 1 2 100)
+          2 3 200)
+        1 7 999
+    let bytes1 := Encodable.encode (T := LegalKernel.State) s
+    match Encodable.decode (T := LegalKernel.State) bytes1 with
+    | .ok (s', _) =>
+      let bytes2 := Encodable.encode (T := LegalKernel.State) s'
+      if bytes1 == bytes2 then pure ()
+      else throw <| IO.userError "encode-decode-encode produced different bytes"
+    | .error e => throw <| IO.userError s!"intermediate decode failed: {repr e}"
+}
+
 /-- All tests. -/
 def tests : List TestCase :=
   [emptyStateBytes, emptyStateRoundtrip, stateEncodeDeterministic,
    stateEncodeOrderInvariant, stateRoundtripGetBalance, extendedStateRoundtrip,
+   decoderRejectsUnsortedKeys, decoderRejectsDuplicateKeys, decoderAcceptsCanonicalMap,
+   stateEncodeDecodeEncodeIdempotent,
    stateDeterministicAPI, extendedStateDeterministicAPI, balanceMapEquivAPI]
 
 end StateTests

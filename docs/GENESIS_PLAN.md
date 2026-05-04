@@ -3430,20 +3430,41 @@ round-trip and injectivity proofs; a thin DSL for declaring laws.
 encodable type; cross-deployment signature attacks rejected by
 `sign_input`; DSL produces same `Transition` as hand-written code.
 
-**Phase 4 status: complete (audited).**  All nine work units (WU 4.1
-– WU 4.9) land with a full canonical encoding pipeline plus the
-`law` DSL macro.  A post-Phase-4 audit pass corrected one
-encoder/decoder type-mismatch bug in `State.encode` (the inner
-`BalanceMap` was being encoded as a CBE array of UInt8s but the
-decoder expected a CBE byte string; fixed by wrapping the inner
-encoding via `BalanceMap.encodeAsBytes`), removed dead helpers
-(`nat_mod_pow_succ`, `natToBytesLE_injective`,
-`verdictDomain`/`disputeDomain`), factored the duplicated
-`readUInt64Field_via_nat` helper between `Encoding.Action` and
-`Encoding.SignedAction`, and added explicit `decodeListN`-bounded
-round-trip lemmas (`list_roundtrip`, `option_roundtrip`,
-`uInt16_roundtrip`, `uInt32_roundtrip`).  Implementation deviations
-from the §8.8 sketch (documented):
+**Phase 4 status: complete (twice-audited).**  All nine work units
+(WU 4.1 – WU 4.9) land with a full canonical encoding pipeline plus
+the `law` DSL macro.  Two post-Phase-4 audit passes corrected:
+
+  * **Encoder/decoder type mismatch in `State.encode`** (audit 1):
+    the inner `BalanceMap` was being encoded as a CBE array of
+    UInt8s but the decoder expected a CBE byte string; fixed by
+    wrapping the inner encoding via `BalanceMap.encodeAsBytes`.
+  * **Decoder canonicality violation in `decodeMap`** (audit 2):
+    the previous version accepted any CBE map encoding regardless
+    of key ordering or duplicate-key occurrences, allowing an
+    attacker to forge alternative-but-equally-valid encodings of
+    the same logical state with different signature inputs (a
+    direct §8.8.6 violation).  Fixed by adding a
+    `keysStrictlyAscending` post-decode check that rejects unsorted
+    or duplicate-keyed maps with `nonCanonical`.
+  * **Dead code cleanup** (audit 1+2): removed `nat_mod_pow_succ`,
+    `natToBytesLE_injective`, `verdictDomain`/`disputeDomain`, and
+    the unreachable `if k < 2^64 ... else .error` branches in
+    `BalanceMap.decode`/`NonceState.decode`/`KeyRegistry.decodeMap`/
+    `State.decode` (the CBE Nat decoder by construction returns
+    values in `[0, 2^64)`, so the lower-bound check is always
+    `true`).  Renamed misleading `UInt8.toNat_toUInt8_of_lt` to
+    `nat_lt_256_toUInt8_toNat_eq` (it's a `Nat` lemma, not a
+    `UInt8` member).
+  * **Code duplication factored** (audit 1): factored the
+    duplicated `readUInt64Field_via_nat` helper between
+    `Encoding.Action` and `Encoding.SignedAction`.
+  * **Missing round-trip lemmas added** (audit 1):
+    `list_roundtrip`, `option_roundtrip`, `uInt16_roundtrip`,
+    `uInt32_roundtrip`.  `list_roundtrip` and `option_roundtrip`
+    take a per-element `ElemRoundtrip α` hypothesis to avoid
+    introducing a `LawfulEncodable` typeclass.
+
+Implementation deviations from the §8.8 sketch (documented):
 
 * **CBE replaces canonical CBOR.**  The Genesis Plan §8.8.2 sketch
   prescribes RFC 8949 canonical CBOR with minimal-form integer

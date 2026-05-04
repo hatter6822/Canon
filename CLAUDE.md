@@ -1206,7 +1206,14 @@ WUs 4.1 – 4.9 (Phase 4: DSL and Serialization) — complete:
   string before being placed in the outer map's value slot
   (`BalanceMap.encodeAsBytes`); this length-prefixed framing is
   what lets the decoder cleanly extract each inner-map payload
-  from the outer map's value slot.  `state_encode_deterministic`
+  from the outer map's value slot.  The shared map decoder
+  (`decodeMap`) enforces the §8.8.6 canonicalisation rule via
+  `keysStrictlyAscending`: any CBE map encoding with unsorted or
+  duplicate keys is rejected with `nonCanonical`.  This is the
+  decoder-side counterpart to the encoder's "sorted toList"
+  invariant; without it an attacker could construct alternative-
+  but-equally-valid encodings of the same logical state with
+  distinct sign-input bytes.  `state_encode_deterministic`
   (structural) and `balanceMap_encode_deterministic_of_equiv`
   (extensional via `TreeMap.equiv_iff_toList_eq`).  The
   TreeMap-backed encoding canonicalises away RB-tree shape
@@ -1214,8 +1221,10 @@ WUs 4.1 – 4.9 (Phase 4: DSL and Serialization) — complete:
   `ofList`.  The full abstract `decode_encode_extensional`
   theorem is deferred; the value-level round-trip is verified
   end-to-end by `Test/Encoding/State.lean`'s
-  `stateRoundtripGetBalance` (4 probed cells) and
-  `extendedStateRoundtrip` (probes base, nonces, and registry).
+  `stateRoundtripGetBalance` (4 probed cells),
+  `extendedStateRoundtrip` (probes base, nonces, and registry),
+  and `stateEncodeDecodeEncodeIdempotent` (audit 2: re-encoding a
+  decoded state produces the original bytes).
 - **WU 4.6 + 4.7**: round-trip + injectivity rolled into each
   WU 4.1 – WU 4.5 module above.  Every `Encodable` instance has
   either an unconditional or a bounded round-trip / injectivity
@@ -1260,8 +1269,8 @@ the kernel proof obligations are independent of that adaptor.
 See the §8.8 deviation block in `docs/GENESIS_PLAN.md` for the
 full list of Phase 4 deviations.
 
-**Test coverage (after Phase 4 audit).**  318 passing tests across
-twenty-two suites:
+**Test coverage (after Phase 4 dual audit).**  322 passing tests
+across twenty-two suites:
 - `KernelTests` (22) — unchanged from Phase 1.
 - `RBMapLemmasTests` (8) — unchanged from Phase 1.
 - `Umbrella` (2) — non-TCB build-tag smoke test, with the Phase-4-
@@ -1367,23 +1376,32 @@ twenty-two suites:
   for `SignedAction` carrying transfer and replaceKey actions;
   term-level `signedAction_roundtrip`/`_encode_injective` API
   stability.
-- `Encoding.StateTests` (9) — Phase 4 WU 4.5 + audit expansion.
-  Empty-state encoding shape (9-byte head); empty-state round-trip
-  (encode-then-decode is identity at the value level); structural
-  determinism (encoding twice yields the same bytes); insertion-
-  order invariance (TreeMap canonicalisation makes two states
-  built from different insert sequences encode to the same bytes);
-  populated-state round-trip (`stateRoundtripGetBalance` probes
-  4 `(resource, actor)` cells through encode-then-decode);
+- `Encoding.StateTests` (13) — Phase 4 WU 4.5 + dual audit
+  expansion.  Empty-state encoding shape (9-byte head); empty-state
+  round-trip (encode-then-decode is identity at the value level);
+  structural determinism (encoding twice yields the same bytes);
+  insertion-order invariance (TreeMap canonicalisation makes two
+  states built from different insert sequences encode to the same
+  bytes); populated-state round-trip (`stateRoundtripGetBalance`
+  probes 4 `(resource, actor)` cells through encode-then-decode);
   `extendedStateRoundtrip` (probes `getBalance`, `expectsNonce`,
-  and `KeyRegistry.lookup` through encode-then-decode).  Term-
-  level `state_encode_deterministic`,
+  and `KeyRegistry.lookup` through encode-then-decode);
+  `decoderRejectsUnsortedKeys` and `decoderRejectsDuplicateKeys`
+  (audit 2: §8.8.6 canonicality enforcement — manually constructed
+  malicious inputs must be rejected with `nonCanonical`);
+  `decoderAcceptsCanonicalMap` (sanity: the canonicality check
+  doesn't reject valid inputs);
+  `stateEncodeDecodeEncodeIdempotent` (audit 2: the operational
+  form of canonicality — re-encoding a decoded state produces the
+  original bytes).  Term-level `state_encode_deterministic`,
   `extendedState_encode_deterministic`, and
   `balanceMap_encode_deterministic_of_equiv` API stability.  The
-  populated round-trip test was added in the post-Phase-4 audit
-  pass and surfaced a bug where `State.encode` was producing CBE
-  arrays for inner `BalanceMap`s while `State.decode` expected
-  CBE byte strings; the bug is fixed by `BalanceMap.encodeAsBytes`.
+  populated round-trip test was added in audit 1 and surfaced a
+  bug where `State.encode` was producing CBE arrays for inner
+  `BalanceMap`s while `State.decode` expected CBE byte strings; the
+  bug is fixed by `BalanceMap.encodeAsBytes`.  The unsorted /
+  duplicate-key tests were added in audit 2 and surfaced a
+  §8.8.6 canonicality bug; fixed by `keysStrictlyAscending`.
 - `Encoding.SignInputTests` (7) — Phase 4 WU 4.8.  Domain-prefix
   shape (sign-input begins with the canonical domain bytes);
   cross-deployment / cross-action / cross-nonce distinguishability

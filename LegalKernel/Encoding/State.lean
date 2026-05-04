@@ -85,7 +85,17 @@ namespace Encoding
 
 open LegalKernel.Authority
 
-/-! ## Helpers: encode / decode a sorted-pair list -/
+/-! ## Helpers: encode / decode a sorted-pair list
+
+The CBE map encoding requires the pair list to be sorted ascending
+by key (Genesis Plan §8.8.2 / §8.8.6).  The encoder accepts any
+list (the canonical-encoding obligation is on the caller); the
+decoder *enforces* the sorted-key + distinct-key discipline by
+rejecting non-canonical inputs with `nonCanonical`.  This rejection
+is critical for security: a permissive decoder would let an
+attacker forge an alternative-but-equally-valid encoding of the
+same logical state with a different signature input.  See
+GENESIS_PLAN.md §8.8.6 for the threat model. -/
 
 /-- Encode a list of `(key, value)` pairs (already sorted) as a CBE
     map: map tag + 8-byte LE pair count + alternating key / value
@@ -98,7 +108,11 @@ def encodeSortedPairs {K V : Type} [Encodable K] [Encodable V]
     pairs.foldr (fun p acc =>
       Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) []
 
-/-- Decode `n` `(K × V)` pairs from the front of `s`. -/
+/-- Decode `n` `(K × V)` pairs from the front of `s`.  Returns the
+    pair list (in decode order) and the residual stream.  Does NOT
+    enforce key ordering; that is the caller's responsibility (see
+    `decodeMap`, which performs the canonicalisation check after
+    `decodeNPairs` returns). -/
 def decodeNPairs {K V : Type} [Encodable K] [Encodable V] :
     Nat → Stream → Except DecodeError (List (K × V) × Stream)
   | 0,     s => .ok ([], s)
@@ -113,11 +127,37 @@ def decodeNPairs {K V : Type} [Encodable K] [Encodable V] :
       | .error e => .error e
     | .error e => .error e
 
-/-- Decode a CBE map header + N pairs. -/
-def decodeMap {K V : Type} [Encodable K] [Encodable V] (s : Stream) :
+/-- Predicate: the keys of `pairs` are *strictly* ascending under
+    `cmp`.  Strictly ascending implies both sorted and duplicate-
+    free, which together are the §8.8.2 / §8.8.6 canonicalisation
+    requirement for CBE maps. -/
+def keysStrictlyAscending {K V : Type} (cmp : K → K → Ordering)
+    (pairs : List (K × V)) : Bool :=
+  match pairs with
+  | []                    => true
+  | _ :: []               => true
+  | (k₁, _) :: (k₂, v₂) :: rest =>
+      (cmp k₁ k₂ == Ordering.lt) && keysStrictlyAscending cmp ((k₂, v₂) :: rest)
+
+/-- Decode a CBE map header + N pairs, enforcing the canonical
+    sorted-key + distinct-key discipline.
+
+    Rejects inputs whose decoded pair list is not strictly ascending
+    by key under `cmp` with `nonCanonical`.  The default `cmp` is
+    `compare`, matching what `TreeMap.toList` produces (and what
+    every CBE encoder must produce to be canonical). -/
+def decodeMap {K V : Type} [Encodable K] [Encodable V]
+    (s : Stream) (cmp : K → K → Ordering := by exact compare) :
     Except DecodeError (List (K × V) × Stream) :=
   match cborHeadDecode s cbeTagMap with
-  | .ok (count, rest) => decodeNPairs count rest
+  | .ok (count, rest) =>
+    match decodeNPairs count rest with
+    | .ok (pairs, rest') =>
+      if keysStrictlyAscending cmp pairs then
+        .ok (pairs, rest')
+      else
+        .error (.nonCanonical "map keys must be strictly ascending")
+    | .error e => .error e
   | .error e => .error e
 
 /-! ## State encoding
@@ -160,24 +200,26 @@ def State.encode (s : State) : Stream :=
   encodeSortedPairs (s.balances.toList.map (fun (r, bm) =>
     (r.toNat, BalanceMap.encodeAsBytes bm)))
 
-/-- Decode a `BalanceMap`: read the inner CBE map, rebuild via
-    `TreeMap.ofList`. -/
+/-- Decode a `BalanceMap`: read the inner CBE map (with canonicality
+    check on the keys), rebuild via `TreeMap.ofList`.
+
+    Each key is a CBE-decoded `Nat`; by the codec invariant it lies
+    in `[0, 2^64)` and converts to `UInt64` exactly via `toUInt64`. -/
 def BalanceMap.decode (s : Stream) : Except DecodeError (BalanceMap × Stream) :=
   match decodeMap (K := Nat) (V := Nat) s with
   | .ok (pairs, rest) =>
     let pairs' : List (ActorId × Amount) :=
-      pairs.filterMap (fun (k, v) =>
-        if h : k < 18446744073709551616 then some (k.toUInt64, v) else
-          let _ := h
-          none)
+      pairs.map (fun (k, v) => (k.toUInt64, v))
     .ok (TreeMap.ofList pairs' compare, rest)
   | .error e => .error e
 
 /-- Decode a `State`: read the outer CBE map (whose values are CBE
     byte strings), then for each entry decode the inner balance map
-    from those bytes.  Rejects entries with `ResourceId > 2^64`,
-    inner decode errors, and trailing bytes inside any inner-map
-    payload. -/
+    from those bytes.  Rejects inner decode errors and trailing
+    bytes inside any inner-map payload.
+
+    Each outer key is a CBE-decoded `Nat` in `[0, 2^64)` and
+    converts to `UInt64` exactly via `toUInt64`. -/
 def State.decode (s : Stream) : Except DecodeError (State × Stream) :=
   match decodeMap (K := Nat) (V := ByteArray) s with
   | .ok (pairs, rest) =>
@@ -185,16 +227,11 @@ def State.decode (s : Stream) : Except DecodeError (State × Stream) :=
     -- byte string).  Re-decode each inner payload as a `BalanceMap`.
     let inner : Except DecodeError (List (ResourceId × BalanceMap)) := pairs.foldlM
       (fun (acc : List (ResourceId × BalanceMap)) (p : Nat × ByteArray) =>
-        if h : p.1 < 18446744073709551616 then
-          let _ := h
-          match BalanceMap.decode p.2.data.toList with
-          | .ok (bm, []) => .ok (acc ++ [(p.1.toUInt64, bm)])
-          | .ok (_, _ :: _) =>
-            .error (.trailingBytes 1)
-          | .error e => .error e
-        else
-          let _ := h
-          .error (.invalidLength s!"State decoder: outer key {p.1} exceeds 2^64"))
+        match BalanceMap.decode p.2.data.toList with
+        | .ok (bm, []) => .ok (acc ++ [(p.1.toUInt64, bm)])
+        | .ok (_, _ :: _) =>
+          .error (.trailingBytes 1)
+        | .error e => .error e)
       []
     match inner with
     | .ok entries => .ok ({ balances := TreeMap.ofList entries compare }, rest)
@@ -227,27 +264,23 @@ def ExtendedState.encode (es : ExtendedState) : Stream :=
   NonceState.encode es.nonces ++
   KeyRegistry.encodeMap es.registry
 
-/-- Decode a `NonceState`. -/
+/-- Decode a `NonceState`.  Each key is a CBE-decoded `Nat` in
+    `[0, 2^64)` and converts to `UInt64` exactly. -/
 def NonceState.decode (s : Stream) : Except DecodeError (NonceState × Stream) :=
   match decodeMap (K := Nat) (V := Nat) s with
   | .ok (pairs, rest) =>
     let pairs' : List (ActorId × Nonce) :=
-      pairs.filterMap (fun (k, v) =>
-        if h : k < 18446744073709551616 then some (k.toUInt64, v) else
-          let _ := h
-          none)
+      pairs.map (fun (k, v) => (k.toUInt64, v))
     .ok ({ next := TreeMap.ofList pairs' compare }, rest)
   | .error e => .error e
 
-/-- Decode a `KeyRegistry`. -/
+/-- Decode a `KeyRegistry`.  Each key is a CBE-decoded `Nat` in
+    `[0, 2^64)` and converts to `UInt64` exactly. -/
 def KeyRegistry.decodeMap (s : Stream) : Except DecodeError (KeyRegistry × Stream) :=
   match Encoding.decodeMap (K := Nat) (V := ByteArray) s with
   | .ok (pairs, rest) =>
     let pairs' : List (ActorId × PublicKey) :=
-      pairs.filterMap (fun (k, v) =>
-        if h : k < 18446744073709551616 then some (k.toUInt64, v) else
-          let _ := h
-          none)
+      pairs.map (fun (k, v) => (k.toUInt64, v))
     .ok (TreeMap.ofList pairs' compare, rest)
   | .error e => .error e
 

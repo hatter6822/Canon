@@ -40,6 +40,33 @@ identity that Lean core does not currently expose.  A future Phase
 5 work unit (deployment-facing diagnostic event encoding) will land
 the `String` instance with a hand-proved UTF-8 round-trip lemma.
 
+**Type-collision discipline (schema-implicit).**  CBE encodes a
+single byte tag for each major type but does NOT carry any per-
+schema type discriminator.  As a result, distinct logical types
+that happen to share a major type encode to the same bytes:
+
+  * `Bool false` and `Nat 0` both encode to
+    `[cbeTagUint, 0, 0, 0, 0, 0, 0, 0, 0]` (9 zero-payload bytes
+    after the uint tag).
+  * `Option α none` and `List α []` both encode to
+    `[cbeTagArray, 0, 0, 0, 0, 0, 0, 0, 0]`.
+  * Similarly, `Option α (some v)` and `List α [v]` collide as
+    1-element CBE arrays, etc.
+
+Per-type round-trip and injectivity (`*_encode_injective`) hold
+WITHIN each type.  ACROSS types, the schema is implicit: the
+caller must commit to a fixed type when encoding and the same type
+when decoding.  This matches binary protocols like Protobuf's
+schema-implicit wire format.  Phase 4's higher-level types
+(`Action`, `SignedAction`, `State`, `ExtendedState`) all fix the
+field types at the type level (no across-type ambiguity at any
+field position), so this collision is benign in practice — but
+deployment-level protocols using the raw `Encodable` typeclass
+must commit to a fixed type at signing / hashing time and never
+re-interpret the same bytes under a different type.  Phase 5's
+runtime adaptor will document this as part of its protocol
+specification.
+
 The typeclass works internally over `Stream = List UInt8`
 (`Encoding.CBOR.Stream`), and the public API converts via
 `ByteArray.toList` / `List.toByteArray`.
