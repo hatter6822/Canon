@@ -57,16 +57,20 @@ without constraining the kernel.
 
 **Constructor-ordering policy (append-only).**  Constructors are
 listed in the order of their Genesis-Plan §8.9.2 listing.  Phase 5
-ships indices 0..4; Phase 6 appends indices 5..7 (`disputeFiled`,
-`disputeWithdrawn`, `verdictApplied`).  The indices are part of the
-canonical event encoding and cannot shift retroactively without
-invalidating every indexed event in production. -/
+ships indices 0..4; Phase 6 base appends indices 5..7
+(`disputeFiled`, `disputeWithdrawn`, `verdictApplied`); the
+Phase-6 incentive-integration amendment appends index 8
+(`rewardIssued`).  The indices are part of the canonical event
+encoding and cannot shift retroactively without invalidating
+every indexed event in production. -/
 
 open LegalKernel.Authority
 
 /-- The set of observable events the runtime extracts from each log
-    entry.  Phase-5 ships five constructors; Phase 6 appends three
-    more (`disputeFiled`, `disputeWithdrawn`, `verdictApplied`). -/
+    entry.  Phase-5 ships five constructors; Phase 6 base appends
+    three more (`disputeFiled`, `disputeWithdrawn`,
+    `verdictApplied`); the Phase-6 incentive-integration amendment
+    appends one more (`rewardIssued`). -/
 inductive Event
   /-- A balance changed for `(resource, actor)`.  The `oldV` and
       `newV` fields are the pre / post values from the kernel's
@@ -114,6 +118,22 @@ inductive Event
       `rollback` action whose effect is observable via state-hash
       diffing. -/
   | verdictApplied   (disputeIdx : Nat) (outcomeTag : Nat)
+  /-- A reward of `amount` units of `resource` was issued to
+      `recipient` (Phase-6 incentive-integration amendment).
+      Emitted IN ADDITION to `balanceChanged` so indexers can
+      distinguish "reward-class transfer" (intended payout from
+      a deployment-supplied reward policy) from "regular
+      transfer" without re-deriving the action's intent.
+      Frozen index 8.
+
+      Unlike `balanceChanged`, this event is NOT delta-filtered:
+      a `reward _ _ 0` action emits `rewardIssued _ _ 0` even
+      when the recipient's balance does not change.  Indexers
+      that want the kernel-level effect should subscribe to
+      `balanceChanged`; indexers that want the policy-level
+      intent should subscribe to `rewardIssued`. -/
+  | rewardIssued     (resource : ResourceId) (recipient : ActorId)
+                     (amount : Amount)
   deriving Repr, DecidableEq
 
 /-! ## Convenience predicates -/
@@ -142,10 +162,12 @@ def Event.actor : Event → Option ActorId
   | .disputeFiled c _          => some c
   | .disputeWithdrawn _        => none
   | .verdictApplied _ _        => none
+  | .rewardIssued _ a _        => some a
 
 /-- The resource that this event affects, if any. -/
 def Event.resource : Event → Option ResourceId
   | .balanceChanged r _ _ _ => some r
+  | .rewardIssued r _ _     => some r
   | _                       => none
 
 /-- True iff `e` records a dispute-pipeline observation
@@ -156,6 +178,16 @@ def Event.isDisputeEvent : Event → Bool
   | .disputeWithdrawn _   => true
   | .verdictApplied _ _   => true
   | _                     => false
+
+/-- True iff `e` is a `rewardIssued` event.  Used by indexers that
+    subscribe specifically to deployment-level reward semantics
+    (e.g. for bug-bounty leaderboards).  `balanceChanged` events
+    on reward actions are still emitted; this projection
+    distinguishes the SEMANTIC observable from the kernel-level
+    balance delta. -/
+def Event.isRewardIssued : Event → Bool
+  | .rewardIssued _ _ _ => true
+  | _                   => false
 
 end Events
 end LegalKernel

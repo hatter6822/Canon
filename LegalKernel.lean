@@ -114,6 +114,8 @@ import LegalKernel.Disputes.Types
 import LegalKernel.Disputes.Filing
 import LegalKernel.Disputes.Evidence
 import LegalKernel.Disputes.Verdict
+import LegalKernel.Disputes.LawClassification
+import LegalKernel.Disputes.MonotonicDeployment
 import LegalKernel.Encoding.CBOR
 import LegalKernel.Encoding.Encodable
 import LegalKernel.Encoding.Disputes

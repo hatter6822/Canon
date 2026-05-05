@@ -31,7 +31,7 @@ preserving the actor's balance) emits no balance events, and a
 | `burn r fr a`           | `balanceChanged r fr` (if fr's balance changed)                                |
 | `freezeResource r`      | (no event — kernel-level no-op)                                                |
 | `replaceKey actor key`  | `identityRegistered actor key` (always, unconditionally)                       |
-| `reward r to a`         | `balanceChanged r to` (if to's balance changed)                                |
+| `reward r to a`         | `balanceChanged r to` (if to's balance changed) + `rewardIssued r to a` (always) |
 | `distributeOthers r e a`| one `balanceChanged` per affected actor whose balance changed                  |
 | `proportionalDilute …`  | one `balanceChanged` per affected actor whose balance changed                  |
 | `dispute d`             | `disputeFiled d.challenger (target index of d.claim)`                          |
@@ -134,10 +134,17 @@ def actionEvents
     []  -- kernel-level no-op; commitment to not mutate balances
   | .replaceKey actor newKey =>
     [.identityRegistered actor newKey]
-  | .reward r to _a =>
+  | .reward r to amt =>
+    -- Phase-6 incentive-integration amendment: emit BOTH the
+    -- delta-filtered `balanceChanged` (kernel-level effect) AND
+    -- the unconditional `rewardIssued` (deployment-level
+    -- semantic).  Indexers can subscribe to either or both.
     let oldV := LegalKernel.getBalance preState  r to
     let newV := LegalKernel.getBalance postState r to
-    if oldV != newV then [.balanceChanged r to oldV newV] else []
+    let balanceEv :=
+      if oldV != newV then [Event.balanceChanged r to oldV newV] else []
+    let rewardEv : List Event := [Event.rewardIssued r to amt]
+    balanceEv ++ rewardEv
   | .distributeOthers r excluded _a =>
     balanceChangeEvents preState postState r (affectedActors preState r excluded)
   | .proportionalDilute r excluded _tr =>
