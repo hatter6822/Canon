@@ -91,39 +91,61 @@ The `signingInput` function returns the canonical bytes that an
 adjudicator's signature is computed over.  The function is content-
 distinguishing: distinct `(action, signer, nonce)` triples produce
 distinct byte sequences, by injectivity of the underlying CBE
-encoding (`Action.compile_injective` plus the per-`Nat` round-trip
+encoding (the `Action` encoder of `LegalKernel.Encoding.Action` is
+prefix-tagged + field-wise injective, plus the per-`Nat` round-trip
 of the `Encodable` typeclass).
 
-**Domain separation.**  Cross-deployment-replay protection
-additionally requires a deployment-scoped prefix on the signing
-input: the same triple at two different deployments should yield
-distinct bytes so that a signature minted against one deployment
-cannot be replayed against another.  Genesis Plan §8.8.5 specifies
-this prefix as the genesis-state hash (`deploymentId`).
-`Encoding.signInput` (Phase 4 WU 4.8) provides the canonical
-domain-separated form for in-tree consumers; the function below
-deliberately omits the deploymentId because `Admissible` is
-parameterised only on `ExtendedState`, not on a deployment
-identifier.  In production the runtime adaptor MUST scope `Verify`
-per-deployment (e.g. by binding the public-key registry to a
-deployment-specific keyring) so that signatures are deployment-
-unique even without an explicit prefix.
+**Domain separation.**  The signing input is prefixed with the
+ASCII-encoded domain string `"legalkernel/v1/signedaction"`
+(length-prefixed via the standard CBE byte-string encoding).  This
+prefix prevents *cross-protocol* signature replay: a signature on
+a `SignedAction` cannot be re-interpreted as a signature on (e.g.)
+a `Verdict` payload, because the verdict's signing input begins
+with `"legalkernel/v1/verdict"`.
+
+**Cross-deployment replay.**  The Genesis Plan §8.8.5 also calls
+for a deployment-id (genesis-state hash) prefix to prevent the
+same `(action, signer, nonce)` triple from being signed under one
+deployment and replayed under another.  `Encoding.signInput`
+(Phase 4 WU 4.8) provides the full canonical form including the
+deploymentId.  The function below deliberately omits the
+deploymentId because `Admissible` is parameterised only on
+`ExtendedState`, not on a deployment identifier; in production
+the runtime adaptor MUST scope `Verify` per-deployment (e.g. by
+binding the public-key registry to a deployment-specific keyring)
+so that signatures are deployment-unique even without an explicit
+prefix.
 
 Phase-history note.  Earlier revisions of this file shipped a
 `ByteArray.empty` stub here while `Encoding/SignInput.lean` (Phase
 4) was still under construction.  That stub left every `Verify`
 call seeing identical bytes for every action — a deployment
-correctness blocker.  The body below replaces the stub with the
-real CBE encoding; the within-deployment uniqueness property the
-`Admissible` predicate now asserts at the value level matches
-what the §8.8.5 spec requires modulo the (deployment-scoped)
-domain prefix. -/
+correctness blocker.  The body below replaces the stub with a
+domain-separated CBE encoding; the within-deployment + cross-
+protocol uniqueness properties the `Admissible` predicate now
+asserts at the value level match what the §8.8.5 spec requires
+modulo the (deployment-scoped) deploymentId prefix. -/
+
+/-- Domain separation string prepended to every `signingInput`
+    payload.  Matches `Encoding.signedActionDomain` exactly so
+    that downstream Phase-4 sign-input bytes (with the additional
+    deploymentId prefix) and the kernel's `signingInput` bytes
+    use the same protocol-version family.  The string is encoded
+    as a CBE byte string (length-prefixed) before being prepended;
+    consumers therefore self-delimit the prefix from the action
+    payload that follows. -/
+def signedActionDomain : String := "legalkernel/v1/signedaction"
 
 /-- The canonical signing input bytes for a `(action, signer, nonce)`
     triple.
 
     Layout (concatenation of CBE encodings):
 
+      * Domain prefix — the ASCII bytes of `signedActionDomain`
+        (`"legalkernel/v1/signedaction"`), wrapped as a CBE byte
+        string (1 type byte + 8-byte LE length + UTF-8 bytes).
+        This prevents cross-protocol signature replay (see the
+        section docstring).
       * `Encodable.encode action` — the action constructor + fields,
         per `LegalKernel.Encoding.Action`.
       * `Encodable.encode signer.toNat` — the actor id as a CBE
@@ -138,14 +160,24 @@ domain prefix. -/
     is the within-deployment requirement for `Verify`-based replay
     protection.
 
-    For cross-deployment replay protection see
-    `Encoding.signInput` (Phase 4 WU 4.8), which prepends the
-    canonical `"legalkernel/v1/signedaction"` domain string and the
-    deployment's genesis-state hash. -/
+    For full cross-deployment replay protection see
+    `Encoding.signInput` (Phase 4 WU 4.8), which extends this layout
+    with the deployment's genesis-state hash between the domain
+    prefix and the action payload. -/
 def signingInput (action : Action) (signer : ActorId) (nonce : Nonce) :
     SigningInput :=
+  let domainBytes : Encoding.Stream :=
+    -- CBE-encode the domain string as a byte string: tag + 8-byte
+    -- LE length + UTF-8 payload.  The encoded form is identical to
+    -- `Encodable.encode (T := ByteArray) (signedActionDomain.toUTF8)`
+    -- but written inline here to avoid the `String → ByteArray`
+    -- conversion that requires `String.toUTF8` to be in the
+    -- elaboration context.
+    Encoding.cborHeadEncode Encoding.cbeTagBytes signedActionDomain.toUTF8.size ++
+      signedActionDomain.toUTF8.data.toList
   ByteArray.mk
-    (Encoding.Encodable.encode (T := Action) action ++
+    (domainBytes ++
+     Encoding.Encodable.encode (T := Action) action ++
      Encoding.Encodable.encode (T := Nat) signer.toNat ++
      Encoding.Encodable.encode (T := Nat) nonce).toArray
 

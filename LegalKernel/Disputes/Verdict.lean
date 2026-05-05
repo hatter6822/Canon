@@ -181,10 +181,23 @@ forgery.  The first occurrence of a signer takes precedence; any
 subsequent duplicate (whether the signature verifies or not) is
 silently discarded. -/
 
+/-- Domain-separation string prepended to every `verdictSigningInput`
+    payload.  Distinct from `signedActionDomain`
+    (`"legalkernel/v1/signedaction"`) so a signature minted on a
+    `Verdict` cannot be re-interpreted as a signature on a
+    `SignedAction` payload (cross-protocol replay protection). -/
+def verdictDomain : String := "legalkernel/v1/verdict"
+
 /-- The bytes that adjudicators sign when proposing a verdict.
 
     Layout (concatenation of CBE encodings):
 
+      * Domain prefix — the ASCII bytes of `verdictDomain`
+        (`"legalkernel/v1/verdict"`), wrapped as a CBE byte string
+        (1 type byte + 8-byte LE length + UTF-8 bytes).  This
+        prevents cross-protocol signature replay (a `SignedAction`
+        signature cannot be re-interpreted as a `Verdict`
+        signature, because their domain prefixes differ).
       * `Encodable.encode v.disputeId` — the impugned dispute log
         index, as a CBE unsigned integer.
       * `Encodable.encode v.outcome` — the verdict outcome
@@ -192,26 +205,31 @@ silently discarded. -/
       * `Encodable.encode v.rationale` — the optional human-readable
         rationale bytes.
 
-    Note that the `signers` and `sigs` fields are deliberately NOT
-    included: those are the witnesses we're trying to verify, and
-    including them in the signed bytes would create a circular
-    dependency (each adjudicator's signature would need to predict
-    every other adjudicator's signature).  All adjudicators
-    therefore sign the same `(disputeId, outcome, rationale)`
-    payload, and their individual signatures accumulate in the
-    `signers` / `sigs` lists.
+    The `signers` and `sigs` fields are deliberately NOT included:
+    those are the witnesses we're trying to verify, and including
+    them in the signed bytes would create a circular dependency
+    (each adjudicator's signature would need to predict every
+    other adjudicator's signature).  All adjudicators therefore
+    sign the same `(disputeId, outcome, rationale)` payload, and
+    their individual signatures accumulate in the `signers` /
+    `sigs` lists.
 
     The encoding is content-distinguishing (distinct payloads
     produce distinct bytes by `Encodable` round-trip injectivity),
     so a signature on one verdict cannot be reused on a different
     `(disputeId, outcome, rationale)` payload.  Cross-deployment
     replay protection is provided at the runtime adaptor layer
-    (deployment-scoped `Verify` keyring); a follow-up enhancement
-    can prepend a `"legalkernel/v1/verdict"` domain string and the
-    deployment-id once `proposeVerdict` carries the deploymentId. -/
+    (deployment-scoped `Verify` keyring). -/
 def verdictSigningInput (v : Verdict) : ByteArray :=
+  let domainBytes : Encoding.Stream :=
+    -- CBE-encode the domain string as a byte string: tag + 8-byte
+    -- LE length + UTF-8 payload.  See the matching pattern in
+    -- `Authority.signingInput` for the rationale.
+    Encoding.cborHeadEncode Encoding.cbeTagBytes verdictDomain.toUTF8.size ++
+      verdictDomain.toUTF8.data.toList
   ByteArray.mk
-    (Encoding.Encodable.encode (T := Nat) v.disputeId ++
+    (domainBytes ++
+     Encoding.Encodable.encode (T := Nat) v.disputeId ++
      Encoding.Encodable.encode (T := EvidenceVerdict) v.outcome ++
      Encoding.Encodable.encode (T := ByteArray) v.rationale).toArray
 

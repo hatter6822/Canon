@@ -294,6 +294,30 @@ def quorumPolicyTests : List TestCase :=
         assert ((verdictSigningInput v0).toList = (verdictSigningInput v1).toList)
           "verdictSigningInput must ignore signers/sigs (only signs disputeId/outcome/rationale)"
     }
+  , { name := "verdictSigningInput: domain prefix is present"
+      -- Cross-protocol replay protection: every verdictSigningInput
+      -- begins with the canonical verdictDomain bytes, ensuring the
+      -- bytes can never collide with the SignedAction `signingInput`
+      -- output.  An adversary with a `Verify`-true signature on a
+      -- Verdict therefore cannot reuse it as a SignedAction signature.
+    , body := do
+        let v : Verdict := { disputeId := 0, outcome := .upheld,
+                              rationale := ⟨#[]⟩,
+                              signers := [], sigs := [] }
+        let bytes := (verdictSigningInput v).toList
+        -- Skip the 9-byte CBE byte-string head (1 tag + 8 LE length).
+        let domainPart := bytes.drop 9 |>.take verdictDomain.toUTF8.size
+        let expectedDomain := verdictDomain.toUTF8.data.toList
+        assert (domainPart = expectedDomain)
+          s!"domain prefix missing from verdictSigningInput"
+    }
+  , { name := "verdictSigningInput: domain differs from signedActionDomain"
+      -- The two domain strings MUST differ to prevent cross-protocol
+      -- signature replay between SignedActions and Verdicts.
+    , body := do
+        assert (verdictDomain ≠ Authority.signedActionDomain)
+          s!"verdictDomain ({verdictDomain}) must differ from signedActionDomain"
+    }
   ]
 
 /-! ## Witness-bearing applyVerdict API stability tests (C.8c) -/

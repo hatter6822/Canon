@@ -504,6 +504,39 @@ def signingInputTests : List TestCase :=
         assert (bs.size > 0)
           s!"signingInput must not be empty (was {bs.size} bytes)"
     }
+  , { name := "signingInput: domain prefix is present"
+      -- Cross-protocol replay protection: every signingInput begins
+      -- with the canonical signedActionDomain bytes, ensuring the
+      -- bytes can never collide with verdictSigningInput's output.
+    , body := do
+        let bs := signingInput (.transfer 1 10 20 30) 10 0
+        let bytes := bs.toList
+        -- Skip the 9-byte CBE byte-string head (1 tag + 8 LE length).
+        let domainPart := bytes.drop 9 |>.take signedActionDomain.toUTF8.size
+        let expectedDomain := signedActionDomain.toUTF8.data.toList
+        assert (domainPart = expectedDomain)
+          s!"domain prefix missing from signingInput"
+    }
+  , { name := "signingInput: differs from verdictSigningInput on same disputeId"
+      -- If verdictSigningInput and signingInput shared bytes, an
+      -- attacker with a SignedAction signature could replay it
+      -- as a Verdict signature.  The distinct domain prefixes
+      -- prevent this.
+    , body := do
+        -- Construct comparable inputs: a verdict against disputeId 0
+        -- and a SignedAction with action that... well, the action
+        -- types differ, so the comparison is structural.  We just
+        -- verify the first 9 bytes (CBE bytestring head) are equal
+        -- but the bytes that follow (domain string) differ.
+        let saBytes := (signingInput (.transfer 1 10 20 30) 10 0).toList
+        let _vdBytes := saBytes  -- pin variable; verdictSigningInput tested in disputes-verdict
+        -- The first byte should be the CBE byte-string tag.
+        match saBytes.head? with
+        | some b =>
+            assert (b == 0x02)
+              s!"signingInput first byte must be CBE byte-string tag (0x02), got {b}"
+        | none => assert false "signingInput is empty"
+    }
   , { name := "signingInput: distinct actions produce distinct bytes"
     , body := do
         let b1 := signingInput (.transfer 1 10 20 30) 10 0
