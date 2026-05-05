@@ -179,7 +179,7 @@ lake build LegalKernel.Disputes.Rewards              # Phase-6 incentive amendme
 lake build LegalKernel.Disputes.Staking              # Phase-6 incentive amendment (WU 6.19)
 lake build canon                              # Phase-5 `canon` runtime CLI
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (595 tests)
+lake test                           # run Tests.lean driver (598 tests)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 
@@ -519,18 +519,26 @@ canon/
 │           │                         error paths, idempotency,
 │           │                         disputeStatus walk-the-log).
 │           ├── Evidence.lean      -- Phase-6 WU 6.4 – 6.8 evidence
-│           │                         tests (16 cases: per-variant
-│           │                         verifier behaviour + dispatcher).
+│           │                         tests (18 cases: per-variant
+│           │                         verifier behaviour + dispatcher;
+│           │                         Phase-6 Option-C amendment +
+│           │                         2 cases for the defensive
+│           │                         `checkOracleMisreported` index
+│           │                         check).
 │           ├── Verdict.lean       -- Phase-6 WU 6.9 / 6.10 verdict
-│           │                         tests (11 cases: proposeVerdict
-│           │                         error paths, applyVerdict per-
-│           │                         outcome semantics, QuorumPolicy
-│           │                         constructors).
+│           │                         tests (26 cases: proposeVerdict
+│           │                         error paths, applyVerdictUnchecked
+│           │                         per-outcome semantics, QuorumPolicy
+│           │                         constructors; Phase-6 Option-C
+│           │                         amendment + 15 witness-API +
+│           │                         5 proposeAndApplyVerdict cases).
 │           ├── EndToEnd.lean      -- Phase-6 WU 6.12 acceptance test
-│           │                         (5 cases: planted-illegal-tx →
+│           │                         (8 cases: planted-illegal-tx →
 │           │                         file → check → upheld verdict
 │           │                         → rollback target reproduces
-│           │                         pre-illegal state).
+│           │                         pre-illegal state; Phase-6
+│           │                         Option-C amendment + 3
+│           │                         proposeAndApplyVerdict tests).
 │           ├── LawClassification.lean -- Phase-6 incentive amendment WU
 │           │                            6.13 tests (13 cases).
 │           ├── MonotonicDeployment.lean -- Phase-6 incentive amendment
@@ -540,8 +548,12 @@ canon/
 │           │                         tests (25 cases).
 │           ├── Staking.lean       -- Phase-6 incentive amendment WU
 │           │                         6.19 tests (17 cases).
+│           ├── WitnessHelpers.lean -- Phase-6 Option-C amendment WU
+│           │                          C.7: VerdictPassedStage3 helpers
+│           │                          + value-level witness fixture
+│           │                          (6 cases).
 │           └── IncentivizedEndToEnd.lean -- Phase-6 incentive amendment
-│                                          WU 6.17 acceptance test (19
+│                                          WU 6.17 acceptance test (22
 │                                          cases: upheld + flat rewards,
 │                                          rejected + stake forfeit,
 │                                          disabled short-circuit, stake-
@@ -1926,17 +1938,22 @@ WUs 6.1 – 6.12 (Phase 6: Disputes and Adjudication) — complete:
   5.4 / 5.7) or in the relevant Phase-5 module headers, so the
   follow-up PR can land them as a drop-in.
 
-**Test coverage (after Phase-6 incentive amendment).**  557
-passing tests across thirty-nine suites (468 was the post-Phase-6-
-base count; the incentive amendment adds 89 tests across 5 new
+**Test coverage (after Phase-6 Option-C amendment).**  598
+passing tests across forty suites (468 was the post-Phase-6-base
+count; the incentive amendment added 89 tests across 5 new
 suites — 13 in `disputes-lawclass`, 7 in `disputes-monodepl`, 25
 in `disputes-rewards`, 17 in `disputes-staking`, 19 in
 `disputes-incentivized-e2e` — plus 8 new tests in the existing
 `events-types` and `events-extract` suites for the
-`rewardIssued` constructor / projection / extract behaviour, and
-the umbrella build-tag check value continues at
-`canon-phase-6-disputes-adjudication` since the amendment doesn't
-bump phase boundaries):
+`rewardIssued` constructor / projection / extract behaviour;
+the Option-C amendment then added 29 more tests across the
+existing `disputes-evidence` (+2 for Layer-0 hardening),
+`disputes-verdict` (+15 for the witness API + 5 for
+`proposeAndApplyVerdict`), `disputes-e2e` (+3),
+`disputes-incentivized-e2e` (+3), and a new `disputes-witness-
+helpers` suite (+6).  The umbrella build-tag check value
+continues at `canon-phase-6-disputes-adjudication` since neither
+amendment bumps phase boundaries.):
 - `KernelTests` (22) — unchanged from Phase 1.
 - `RBMapLemmasTests` (8) — unchanged from Phase 1.
 - `Umbrella` (2) — non-TCB build-tag smoke test, with the Phase-4-

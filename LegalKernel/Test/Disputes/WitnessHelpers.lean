@@ -113,10 +113,113 @@ def sanityTests : List TestCase :=
     }
   ]
 
+/-! ## Value-level witness construction on a concrete fixture
+
+Demonstrates that an end-to-end witness construction is feasible
+in tests using the runtime-driven discovery pattern: invoke
+`proposeVerdict` at runtime, match on the success branch, derive
+the input-output equality via `proposeVerdict_ok_returns_input`,
+then construct the witness via `of_proposeVerdict_ok_with_eq`.
+
+The fixture is a 2-entry log: `[transfer, dispute]` where the
+dispute targets a `oracleMisreported 0 ⟨#[]⟩` claim against the
+transfer entry.  With `OraclePolicy.alwaysUpheld` and
+`QuorumPolicy.empty`, the verdict's `.upheld` outcome matches
+`checkEvidence`'s recomputation, the empty quorum check passes
+vacuously, and `proposeVerdict` accepts. -/
+
+/-- A registered actor used by the fixture. -/
+def fixActor : ActorId := 10
+
+/-- A sample public key. -/
+def fixKey : PublicKey := ⟨#[0xAA]⟩
+
+/-- A genesis state with `fixActor` registered. -/
+def fixGenesis : ExtendedState where
+  base     := emptyState
+  nonces   := NonceState.empty
+  registry := KeyRegistry.empty.register fixActor fixKey
+
+/-- The dispute targeting log entry 0 with an `oracleMisreported`
+    claim — chosen because `OraclePolicy.alwaysUpheld` makes the
+    evidence check decidably `.upheld`. -/
+def fixDispute : Dispute :=
+  { challenger := fixActor
+    claim      := .oracleMisreported 0 ⟨#[]⟩
+    evidence   := ⟨#[]⟩
+    nonce      := 0
+    sig        := ⟨#[]⟩ }
+
+/-- The 2-entry log: a transfer (the impugned action) followed by
+    the dispute against it. -/
+def fixLog : List LogEntry :=
+  let entry0 : LogEntry :=
+    { prevHash := ⟨#[]⟩
+      signedAction := { action := .transfer 0 fixActor fixActor 0
+                        signer := fixActor, nonce := 0, sig := ⟨#[]⟩ }
+      postStateHash := ⟨#[]⟩ }
+  let entry1 : LogEntry :=
+    { prevHash := ⟨#[]⟩
+      signedAction := { action := .dispute fixDispute, signer := fixActor
+                        nonce := 0, sig := ⟨#[]⟩ }
+      postStateHash := ⟨#[]⟩ }
+  [entry0, entry1]
+
+/-- A verdict against the dispute at index 1, with `.upheld`
+    outcome (matches `OraclePolicy.alwaysUpheld`). -/
+def fixVerdict : Verdict :=
+  { disputeId := 1, outcome := .upheld
+    rationale := ⟨#[]⟩, signers := [], sigs := [] }
+
+/-- Sub-suite: end-to-end witness construction + invocation. -/
+def valueLevelTests : List TestCase :=
+  [ { name := "proposeVerdict on the fixture returns .ok fixVerdict"
+    , body := do
+        match proposeVerdict AuthorityPolicy.unrestricted OraclePolicy.alwaysUpheld
+                              QuorumPolicy.empty fixGenesis fixGenesis fixLog fixVerdict with
+        | .ok v' =>
+          assert (v' = fixVerdict) "proposeVerdict returns the input verdict"
+        | .error e =>
+          throw <| IO.userError s!"proposeVerdict should succeed, got {repr e}"
+    }
+  , { name := "proposeAndApplyVerdict on the fixture exercises witness construction"
+    , body := do
+        -- This goes through the full `proposeAndApplyVerdict` chain:
+        -- proposeVerdict succeeds → witness is constructed via
+        -- `of_proposeVerdict_ok_with_eq` → witness-bearing `applyVerdict`
+        -- runs → returns the rolled-back state.
+        match proposeAndApplyVerdict AuthorityPolicy.unrestricted OraclePolicy.alwaysUpheld
+                                      QuorumPolicy.empty fixGenesis fixGenesis fixLog fixVerdict with
+        | .ok _es' => pure ()  -- witness chain succeeded, rollback computed
+        | .error e =>
+          throw <| IO.userError s!"proposeAndApplyVerdict should succeed, got {repr e}"
+    }
+  , { name := "applyVerdict_under_witness_succeeds: fixture-level instantiation"
+    , body := do
+        -- Sanity: the strong-correctness theorem typechecks at the
+        -- specific fixture.  We don't need to actually invoke
+        -- applyVerdict (that would require materialising the witness,
+        -- which is a Prop and proof-irrelevant — the test is at the
+        -- type level).
+        let _api :
+            (∀ (h : VerdictPassedStage3
+                AuthorityPolicy.unrestricted OraclePolicy.alwaysUpheld
+                QuorumPolicy.empty fixGenesis fixGenesis fixLog fixVerdict),
+              ∃ es,
+                applyVerdict AuthorityPolicy.unrestricted OraclePolicy.alwaysUpheld
+                  QuorumPolicy.empty fixGenesis fixGenesis fixLog fixVerdict h = .ok es) :=
+          fun h =>
+            applyVerdict_under_witness_succeeds AuthorityPolicy.unrestricted
+              OraclePolicy.alwaysUpheld QuorumPolicy.empty fixGenesis fixGenesis
+              fixLog fixVerdict h
+        pure ()
+    }
+  ]
+
 /-! ## Aggregate -/
 
 /-- All witness-helper sanity tests. -/
-def tests : List TestCase := sanityTests
+def tests : List TestCase := sanityTests ++ valueLevelTests
 
 end WitnessHelpers
 end Disputes

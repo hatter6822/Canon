@@ -4054,6 +4054,143 @@ decisions resolved up-front to avoid implementation re-work:
   * **D6**: `RewardBundle` exposed as `List
     DisputeRewardPolicy` rather than a separate structure.
 
+### Phase 6 Option-C amendment (type-level Stage-3 enforcement)
+
+Per §16.6 amendment process: the Phase-6 Option-C amendment closes
+a defense-in-depth gap on Stage 4 (`applyVerdict`).  Before this
+amendment, `applyVerdict` carried no type-level proof that Stage 3
+had run; the "Stage 3 was called first" contract was enforced by
+documentation only.  A buggy or malicious caller could invoke
+`applyVerdict` directly with a forged `.upheld` verdict and the
+rollback would fire without quorum-signature validation.
+
+The amendment introduces a propositional witness
+`VerdictPassedStage3` and exposes a 3-tier API:
+
+  1. **`proposeAndApplyVerdict` (default-safe)** — chains
+     Stage 3 + Stage 4 atomically, constructing the witness
+     internally via `proposeVerdict_ok_returns_input`.
+  2. **`applyVerdict` (witness-bearing)** — type-safe Stage 4
+     for callers that have already validated the verdict.
+     Cannot be called without a `VerdictPassedStage3`
+     argument; auditors verify bypass-resistance locally at
+     each callsite.
+  3. **`applyVerdictUnchecked` (bypass — testing only)** —
+     preserves the pre-amendment behaviour for test paths
+     where the witness can't be constructed (e.g.
+     `unknownDispute` cases).  Production deployments MUST
+     NOT use this form.
+
+The amendment also includes a Layer-0 hardening: `checkOracleMisreported`
+now takes the log and returns `.inconclusive` on out-of-range
+indices, closing a gap that the strong-correctness proof
+otherwise couldn't discharge for the `oracleMisreported` claim.
+
+| WU  | Title                                                              | Est | Depends on |
+|-----|--------------------------------------------------------------------|-----|-----------|
+| C.0 | Layer 0: defensive `checkOracleMisreported` index check            | 1.3 | 6.7       |
+| C.1 | `proposeVerdict_ok_returns_input` bridge lemma                     | 0.6 | 6.9       |
+| C.2 | `VerdictPassedStage3` structure + 2 constructors                   | 0.4 | C.1       |
+| C.3 | Rename old `applyVerdict` to `applyVerdictUnchecked` (preserve API)| 0.7 | 6.10      |
+| C.4 | New witness-bearing `applyVerdict` + 11 correctness theorems       | 3.5 | C.2, C.3, C.0 |
+| C.5 | `proposeAndApplyVerdict` default-safe entry point                  | 2.0 | C.4       |
+| C.6 | Refactor reward wrappers (rename + new witness-bearing variants)   | 2.0 | C.5       |
+| C.7 | Test fixture builder helpers (`Test/Disputes/WitnessHelpers.lean`) | 0.7 | C.4       |
+| C.8 | API stability tests + value-level fixture tests in Verdict.lean    | 1.7 | C.4, C.5  |
+| C.9 | Parallel `proposeAndApplyVerdict` tests in EndToEnd.lean           | 1.1 | C.5       |
+| C.10| Parallel `proposeAndApply` tests in IncentivizedEndToEnd.lean      | 1.7 | C.6       |
+| C.11| Verdict.lean module docstring 3-tier API explanation               | 0.5 | C.5       |
+| C.12| CLAUDE.md properties table additions (#77 – #92)                   | 0.5 | C.4–C.6   |
+| C.13| GENESIS_PLAN.md amendment record (this section)                    | 0.4 | C.4–C.6   |
+| C.14| Test count update + final acceptance gates                         | 0.2 | C.10      |
+
+**Phase-6 Option-C amendment status.** Complete.
+
+- WU C.0: `checkOracleMisreported` signature extended with
+  `log : List LogEntry` parameter; returns `.inconclusive`
+  when `log[idx]? = none`.  Two new theorems
+  (`checkOracleMisreported_returns_oracle_verdict` updated to
+  the in-range form; `_inconclusive_on_out_of_range` is the new
+  defensive corollary).
+- WU C.1: `proposeVerdict_ok_returns_input` proven by walking
+  `proposeVerdict`'s 6-level match tree.  Discharges every
+  error branch via `absurd` + `simp`; the success branch
+  invokes `Except.ok.inj`.
+- WU C.2: `VerdictPassedStage3` is a single-field `Prop`
+  structure.  `of_proposeVerdict_ok` constructs from a literal
+  success equation; `of_proposeVerdict_ok_with_eq` bridges the
+  `proposeVerdict ... = .ok v'` form via WU C.1.
+- WU C.3: `applyVerdict` → `applyVerdictUnchecked` (preserves
+  body verbatim).  Four existing theorems renamed with
+  `_Unchecked` suffix; internal callers in `Disputes/Rewards.lean`
+  updated.  Existing tests rename function call sites.
+- WU C.4: New `applyVerdict` is `applyVerdictUnchecked` plus a
+  proof-irrelevant `_h : VerdictPassedStage3 ...` argument.
+  `applyVerdict_eq_unchecked` is `rfl`.  Three witness-extraction
+  theorems (`_log_in_range`, `_entry_is_dispute`,
+  `_dispute_open`) recover the per-branch facts of
+  `proposeVerdict`'s match tree from the witness.
+  `claimImpugnedIdx_in_range_when_upheld` is the load-bearing
+  helper (5-claim case-split) that bounds the impugned index.
+  `applyVerdict_under_witness_succeeds` is the strong-correctness
+  theorem: `∃ es, applyVerdict ... = .ok es`.  Three corollary
+  `_unreachable` theorems document the unreachability of each
+  error variant under the witness.
+- WU C.5: `proposeAndApplyVerdict` uses the
+  `match h_propose : ... with | .ok v' => ...` pattern-binding
+  form to extract the success equation, then constructs the
+  witness via `of_proposeVerdict_ok_with_eq` and calls the
+  witness-bearing `applyVerdict`.  Four properties:
+  `_eq_applyVerdict_when_proposed_ok`, `_proposeVerdict_error_path`,
+  `_deterministic`, `_unknown_dispute`.
+- WU C.6: `applyVerdictWithRewards{,Multi}` renamed to
+  `_Unchecked` variants.  New witness-bearing variants take a
+  `VerdictPassedStage3` argument.  Two
+  `proposeAndApplyVerdictWithRewards{,Multi}` default-safe
+  entry points added.  Six properties.
+- WU C.7: `LegalKernel/Test/Disputes/WitnessHelpers.lean`
+  exposes `mkWitnessByDecide` plus three sanity tests.
+  Documents D4 fixture discipline (qp = empty, no `Verify`-opaque
+  paths).
+- WU C.8: 15 API stability tests + 5 `proposeAndApplyVerdict`
+  tests added to `Test/Disputes/Verdict.lean`.
+- WU C.9: 3 parallel `proposeAndApplyVerdict` tests added to
+  `Test/Disputes/EndToEnd.lean`.
+- WU C.10: 3 parallel default-safe-entry tests added to
+  `Test/Disputes/IncentivizedEndToEnd.lean` (covering
+  `proposeAndApplyVerdict`,
+  `proposeAndApplyVerdictWithRewards`, and
+  `proposeAndApplyVerdictWithRewardsMulti`).
+- WU C.11: Verdict.lean module docstring rewritten to document
+  the 3-tier API.
+- WU C.12: CLAUDE.md properties table extended with rows 77–92
+  (16 new properties).
+- WU C.13: This GENESIS_PLAN.md section.
+- WU C.14: Test count grew 569 → 598 (29 new tests across
+  C.7, C.8, C.9, C.10).  All gates green: `lake build`,
+  `lake test`, `count_sorries`, `tcb_audit`.
+
+**Phase-6 Option-C amendment design decisions.**
+
+  * **OC.1**: Witness is a `Prop` structure with a single
+    equation field — proof-irrelevant, zero runtime cost.
+    `applyVerdict`'s body is `applyVerdictUnchecked` verbatim
+    modulo the witness arg; Lean's compiler erases the witness
+    at code-gen.
+  * **OC.2**: `_Unchecked` API is preserved (not removed) so
+    test paths exercising `unknownDispute` / `alreadyDecided`
+    branches remain functional.  The `_Unchecked` suffix is a
+    deliberate visual lint at every callsite.
+  * **OC.3**: `proposeAndApplyVerdict` is the default-safe entry
+    point.  Auditors should treat any direct `applyVerdict`
+    callsite as a deliberate choice (e.g. for callers with their
+    own pre-validation).  Direct `applyVerdictUnchecked`
+    callsites in non-test code are review-blocking.
+  * **OC.4**: The strong-correctness theorem is *under the
+    witness*, not unconditional.  Without a witness,
+    `applyVerdictUnchecked` can still return errors — that's the
+    whole point of the witness.
+
 ### Phase 7: Advanced Capabilities
 
 Goal: explore extensions that the Phase 0–6 architecture admits but

@@ -362,8 +362,26 @@ inductive FilingError
 
 /-! ## Verdict-error vocabulary
 
-`VerdictError` is the unified error vocabulary for **both**
-`proposeVerdict` (Stage 3) and `applyVerdict` (Stage 4).
+`VerdictError` is the unified error vocabulary for the verdict
+pipeline (Stages 3 and 4).  Phase 6's Option-C amendment exposes
+three Stage-4 entry points (see `Disputes/Verdict.lean` for the
+3-tier API documentation):
+
+  1. **`proposeAndApplyVerdict` (default-safe)** — chains Stage 3
+     + Stage 4; can surface every variant below.
+  2. **`applyVerdict` (witness-bearing)** — type-safe Stage 4;
+     under a `VerdictPassedStage3` witness, the
+     `unknownDispute`, `alreadyDecided`, and `replayFailed`
+     variants are *mechanically unreachable* (see the three
+     `applyVerdict_*_unreachable` corollaries of
+     `applyVerdict_under_witness_succeeds`).  The variants are
+     still listed in this enum so the witness-bearing entry
+     point can share an `Except` return type with the unchecked
+     and combined entry points.
+  3. **`applyVerdictUnchecked` (bypass — testing only)** —
+     non-witness Stage 4; can surface `unknownDispute`,
+     `alreadyDecided`, and `replayFailed` from runtime checks
+     against the supplied state and log.
 
 Errors **`proposeVerdict`** can return:
 
@@ -371,29 +389,30 @@ Errors **`proposeVerdict`** can return:
     `Action.dispute` log entry.
   * `alreadyDecided` — the dispute has already been closed by a
     prior verdict or withdraw.
-  * `outcomeMismatch` — the verdict's recorded `outcome` disagrees
-    with the deterministic re-evaluation of the dispute's
-    evidence (the verdict is forged or the inputs have changed
-    since signing).
+  * `outcomeMismatch` — the verdict's recorded `outcome`
+    disagrees with the deterministic re-evaluation of the
+    dispute's evidence (the verdict is forged or the inputs have
+    changed since signing).
   * `quorumNotMet` — fewer than `quorum` signatures verify under
     the listed signers' registered keys.
 
-Errors **`applyVerdict`** can return:
+Errors **`applyVerdictUnchecked`** can return:
 
   * `unknownDispute` — same as above.
   * `alreadyDecided` — same as above.
   * `replayFailed` — replay of `log[0..idx-1]` (used to compute
     the rollback target) failed.  Indicates either a corrupt log
-    or a kernel runtime bug; should be impossible if Stage 1
-    enforced the in-range check on the impugned index.
+    or a kernel runtime bug.  Under a Stage-3 witness this case
+    is unreachable (`applyVerdict_replayFailed_unreachable`);
+    bypass-form callers may still surface it.
 
-`applyVerdict` does NOT return `outcomeMismatch` or `quorumNotMet`
-— it accepts a "validated" verdict (one that already passed
-Stage 3 checks).  Deployments that bypass Stage 3 must apply
-their own verifier discipline; calling `applyVerdict` on an
-unvalidated verdict will faithfully apply whatever outcome the
-verdict claims.  See the `applyVerdict` docstring in
-`Disputes/Verdict.lean` for the runtime-contract details. -/
+`applyVerdictUnchecked` does NOT return `outcomeMismatch` or
+`quorumNotMet` — it does not re-run Stage 3.  The witness-bearing
+`applyVerdict` carries the Stage-3 validation as a propositional
+witness; the default-safe `proposeAndApplyVerdict` returns
+`outcomeMismatch` / `quorumNotMet` when Stage 3 rejects the
+verdict.  See the module-level docstring of
+`Disputes/Verdict.lean` for the full 3-tier API description. -/
 
 /-- Errors that the verdict pipeline (`proposeVerdict` /
     `applyVerdict`) can produce. -/
@@ -412,7 +431,7 @@ inductive VerdictError
   | alreadyDecided
   /-- Replay of the pre-impugned-action log prefix failed. -/
   | replayFailed
-  deriving Repr
+  deriving Repr, DecidableEq
 
 end Disputes
 end LegalKernel
