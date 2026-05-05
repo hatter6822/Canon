@@ -178,7 +178,11 @@ def checkSignatureInvalid
     match currentEs.registry[st.signer]? with
     | none => .inconclusive
     | some pk =>
-      let msg := signingInput st.action st.signer st.nonce
+      -- Audit-3.4: deploymentId defaults to empty bytes; the dispute
+      -- pipeline doesn't carry the deploymentId and the Stage-2 evidence
+      -- check matches what the runtime would have computed (which uses
+      -- the default empty deploymentId via `Admissible`).
+      let msg := signingInput st.action st.signer st.nonce ByteArray.empty
       if Verify pk msg st.sig = true then
         .rejected
       else
