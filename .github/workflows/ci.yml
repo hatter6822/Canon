@@ -115,3 +115,13 @@ jobs:
         # and signals an un-allowlisted import in `Kernel.lean` or
         # `RBMapLemmas.lean`.
         run: lake exe tcb_audit
+
+      - name: lake exe stub_audit (Audit-3.8)
+        # Stub-detection gate.  Walks every `.lean` file under
+        # `LegalKernel/` and flags lines whose code body matches a
+        # placeholder pattern (`:= ByteArray.empty`, `:= []`, etc.)
+        # AND whose preceding docstring contains red-flag tokens
+        # (`stub`, `placeholder`, `TODO`, `wire`, etc.).  Non-zero
+        # exit blocks the merge.  Catches the historical
+        # `signingInput := ByteArray.empty` regression class.
+        run: lake exe stub_audit
