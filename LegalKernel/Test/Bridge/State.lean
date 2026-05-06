@@ -18,11 +18,13 @@ genesis bridge ledger.
 
 import LegalKernel.Bridge.State
 import LegalKernel.Authority.Nonce
+import LegalKernel.Encoding.State
 import LegalKernel.Test.Framework
 
 open LegalKernel
 open LegalKernel.Bridge
 open LegalKernel.Authority
+open LegalKernel.Encoding
 open LegalKernel.Test
 
 namespace LegalKernel.Test.Bridge.StateTests
@@ -115,6 +117,57 @@ def tests : List TestCase :=
           { resource := 2, recipient := EthAddress.zero, amount := 50, l2LogIndex := 0 }
         assert (w1 == w2) "equal pending"
         assert (! (w1 == w3)) "distinct pending"
+    }
+  -- Audit-1: encoding determinism API stability (§7.1.4 deliverable)
+  , { name := "bridgeState_encode_deterministic: term-level API (audit-1)"
+    , body := do
+        let _t : ∀ (bs₁ bs₂ : BridgeState) (h : bs₁ = bs₂),
+                   Encodable.encode (T := BridgeState) bs₁ =
+                   Encodable.encode (T := BridgeState) bs₂ :=
+          bridgeState_encode_deterministic
+        pure ()
+    }
+  , { name := "depositRecord_roundtrip: term-level API (audit-1)"
+    , body := do
+        let _t := @depositRecord_roundtrip
+        pure ()
+    }
+  , { name := "depositRecord_encode_deterministic: term-level API (audit-1)"
+    , body := do
+        let _t := @depositRecord_encode_deterministic
+        pure ()
+    }
+  , { name := "pendingWithdrawal_encode_deterministic: term-level API (audit-1)"
+    , body := do
+        let _t := @pendingWithdrawal_encode_deterministic
+        pure ()
+    }
+  -- Value-level: BridgeState.empty encodes deterministically.
+  , { name := "BridgeState.empty encode is deterministic (value-level)"
+    , body := do
+        let bytes1 := Encodable.encode (T := BridgeState) BridgeState.empty
+        let bytes2 := Encodable.encode (T := BridgeState) BridgeState.empty
+        if bytes1 == bytes2 then pure () else throw <| IO.userError "non-deterministic"
+    }
+  -- Value-level: BridgeState with one consumed deposit encodes
+  -- to a different byte stream than empty.
+  , { name := "Non-empty BridgeState distinguishable from empty"
+    , body := do
+        let bs := BridgeState.empty.markConsumed 42 ({ resource := 1, amount := 100 })
+        let b1 := Encodable.encode (T := BridgeState) bs
+        let b2 := Encodable.encode (T := BridgeState) BridgeState.empty
+        if b1 == b2 then
+          throw <| IO.userError "non-empty BridgeState collided with empty bytes"
+        else pure ()
+    }
+  -- Audit-1: BridgeState.consumed map insertion is mathematically
+  -- correct (insert-then-contains = true).
+  , { name := "markConsumed then isConsumed: insert-then-contains semantics"
+    , body := do
+        let bs := BridgeState.empty.markConsumed 7 ({ resource := 1, amount := 50 })
+        assertEq (expected := true) (actual := bs.isConsumed 7) "freshly consumed"
+        -- A different deposit-id is NOT consumed.
+        assertEq (expected := false) (actual := bs.isConsumed 8) "absent"
     }
   ]
 

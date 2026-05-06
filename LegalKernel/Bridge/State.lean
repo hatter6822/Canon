@@ -73,18 +73,46 @@ namespace Bridge
 
 /-! ## DepositId / WithdrawalId scalar types -/
 
-/-- An L1 deposit-receipt identifier — the canonical big-endian
-    numeric form of the 32-byte L1 deposit-receipt hash.
+/-- An L1 deposit-receipt identifier — the canonical numeric
+    form of the 32-byte L1 deposit-receipt hash.
 
     Implemented as `Nat` (rather than `ByteArray`) so that the
     deposit-id index in `BridgeState.consumed` can be a
     `Std.TreeMap` keyed on Lean core's lawful `compare : Nat → Nat
     → Ordering`.  The runtime adaptor performs the BE-byte → Nat
     conversion at the bridge boundary; conversion is injective on
-    fixed-length 32-byte inputs.
+    fixed-length 32-byte inputs (the natural number value of the
+    32 bytes interpreted big-endian uniquely identifies the
+    underlying byte array).
+
+    **Wire-encoding bound (§8.8.5).**  The Phase-4 CBE encoder
+    encodes `Nat` as a 1-byte tag + 8-byte LE payload; values
+    `≥ 2^64` are not roundtrip-safe.  An `Action.deposit` with a
+    full 32-byte (256-bit) hash thus does NOT round-trip through
+    `Encoding.Action.encode/decode`; the runtime adaptor must
+    project the L1 hash into a 64-bit *deployment-canonical* form
+    before it crosses the wire.  Practical projections include:
+
+      * `keccak256(blockHash ‖ logIdx)[0:8]` — 64-bit deterministic
+        identifier; collision-resistant for the lifetime of a
+        single deployment under standard cryptographic assumptions.
+      * Sequential numbering by the L1 contract (`uint64`
+        per-event counter), bounded by the contract's lifetime.
+
+    The `BridgeAdmissibleWith` conjunct 6 (deposit-id uniqueness
+    against the `consumed` set) protects against replay regardless
+    of which projection the deployment chooses; injectivity of the
+    projection is the deployment's correctness obligation.  The
+    Lean side simply requires the deposit-id to be unique within
+    the bridge's lifetime.
 
     Documented as a Lean-level encoding deviation from the
-    integration plan §7.1.1's `abbrev DepositId := ByteArray`. -/
+    integration plan §7.1.1's `abbrev DepositId := ByteArray`.
+    Switching to `ByteArray` is a follow-up that would require
+    defining a `byteArrayCompare : ByteArray → ByteArray →
+    Ordering` plus the `TransCmp` / `LawfulEqCmp` instances; the
+    current `Nat` choice keeps proofs lawful by Lean core's
+    built-in `compare : Nat → Nat → Ordering`. -/
 abbrev DepositId : Type := Nat
 
 /-- A monotonically-increasing per-bridge withdrawal index.  Assigned

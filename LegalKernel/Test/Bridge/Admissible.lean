@@ -32,14 +32,25 @@ namespace LegalKernel.Test.Bridge.AdmissibleTests
 
 /-- Tests for the bridge admissibility layer. -/
 def tests : List TestCase :=
-  [ { name := "Action.isBridgeOnly: bridge constructors are flagged"
+  [ { name := "Action.isBridgeOnly: bridge-attested constructors flagged"
     , body := do
+        -- Workstream-C audit-1: only `deposit` and `registerIdentity`
+        -- are bridge-only.  `withdraw` is user-initiated and NOT in
+        -- this set (see CLAUDE.md changelog).
         assertEq (expected := true)  (actual := Action.isBridgeOnly (.deposit 1 10 50 0))
                  "deposit flagged"
-        assertEq (expected := true)  (actual := Action.isBridgeOnly (.withdraw 1 10 50 EthAddress.zero))
-                 "withdraw flagged"
         assertEq (expected := true)  (actual := Action.isBridgeOnly (.registerIdentity 10 ⟨#[]⟩))
                  "registerIdentity flagged"
+    }
+  , { name := "Action.isBridgeOnly: withdraw is NOT bridge-only (audit-1)"
+    , body := do
+        -- Critical audit-1 invariant: `withdraw` must NOT be
+        -- bridge-only.  Otherwise conjunct 8 of `BridgeAdmissibleWith`
+        -- would force every withdrawal to be bridge-actor-signed,
+        -- breaking the user-initiated withdrawal flow.
+        assertEq (expected := false)
+          (actual := Action.isBridgeOnly (.withdraw 1 10 50 EthAddress.zero))
+          "withdraw must NOT be bridge-only"
     }
   , { name := "Action.isBridgeOnly: non-bridge constructors are not flagged"
     , body := do
@@ -145,6 +156,22 @@ def tests : List TestCase :=
                    ¬ BridgeAdmissibleWith Verify P ByteArray.empty
                        (apply_bridge_admissible_with Verify P ByteArray.empty es st idx h) st :=
           bridge_replay_impossible
+        pure ()
+    }
+  -- Audit-1 post-state invariants
+  , { name := "deposit_marks_consumed: term-level API (audit-1)"
+    , body := do
+        let _t := @deposit_marks_consumed
+        pure ()
+    }
+  , { name := "deposit_replay_blocked_by_consumed: term-level API (audit-1)"
+    , body := do
+        let _t := @deposit_replay_blocked_by_consumed
+        pure ()
+    }
+  , { name := "withdraw_bumps_nextWdId: term-level API (audit-1)"
+    , body := do
+        let _t := @withdraw_bumps_nextWdId
         pure ()
     }
   ]

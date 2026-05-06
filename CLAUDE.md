@@ -1295,6 +1295,14 @@ each mechanise one or more of the following:
 | 157| `applyActionToBridgeState_deposit` (shape) | `applyActionToBridgeState_deposit` | E-C.6.2 / `Bridge/Accounting.lean` |
 | 158| `applyActionToBridgeState_withdraw` (shape) | `applyActionToBridgeState_withdraw` | E-C.6.2 / `Bridge/Accounting.lean` |
 | 159| `Action.compile_injective` extends to deposit / withdraw | `Action.compile_injective` | E-C.4 / `Authority/Action.lean` |
+| 160| `bridgePolicy_rejects_withdraw` (§12.9 #33; audit-1) | `bridgePolicy_rejects_withdraw` | E-C audit-1 / `Bridge/BridgeActor.lean` |
+| 161| `deposit_marks_consumed` (post-app: depositId in consumed; audit-1) | `deposit_marks_consumed` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 162| `deposit_replay_blocked_by_consumed` (audit-1) | `deposit_replay_blocked_by_consumed` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 163| `withdraw_bumps_nextWdId` (audit-1) | `withdraw_bumps_nextWdId` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 164| `bridgeState_encode_deterministic` (audit-1) | `bridgeState_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
+| 165| `depositRecord_roundtrip` (under bound; audit-1) | `depositRecord_roundtrip` | E-C audit-1 / `Encoding/State.lean` |
+| 166| `depositRecord_encode_deterministic` (audit-1) | `depositRecord_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
+| 167| `pendingWithdrawal_encode_deterministic` (audit-1) | `pendingWithdrawal_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
 
 The "Phase / File" `R` markers identify the Phase-4-prelude
 positive-incentive WUs (`R.1` – `R.23`); they precede Phase 4 (DSL and
@@ -1635,6 +1643,73 @@ documented Lean-level deviations from
 
 Both deviations are recorded in this CLAUDE.md changelog;
 neither weakens any kernel guarantee.
+
+**Workstream-C audit-1 hardening summary.**  A first post-landing
+audit identified three issues; all are now closed.
+
+  * **Critical: `Action.isBridgeOnly` flagged `withdraw` (security
+    bug).**  The pre-audit `Action.isBridgeOnly : Action → Bool`
+    returned `true` for `withdraw`, which through `BridgeAdmissibleWith`
+    conjunct 8 (`Action.isBridgeOnly st.action = true → st.signer
+    = bridgeActor`) forced ALL withdrawals to be bridge-actor-
+    signed.  This contradicted the design where users sign their
+    own withdrawals — a user attempting to withdraw their own
+    balance would fail bridge admissibility.  Audit-1 removes
+    `withdraw` from `isBridgeOnly`; only `registerIdentity` and
+    `deposit` (the truly bridge-attested L1 → L2 actions) remain.
+    User-signed withdrawals now pass conjunct 8 vacuously.
+  * **`bridgePolicy_authorizes_withdraw` → `bridgePolicy_rejects_withdraw`.**
+    The pre-audit `bridgePolicy` admitted `withdraw` for the
+    bridge actor, which (combined with the `isBridgeOnly` bug)
+    meant the bridge could in principle drain L2 balances and
+    forge L1 redemption proofs.  The integration plan §12.9 #33
+    spec is `bridgePolicy_rejects_withdraw`: the bridge actor is
+    forbidden from signing withdrawals, closing the coordinated-
+    attack vector.  `bridgeAuthorizedAction` updated to exclude
+    `withdraw`; the test suite now confirms the bridge actor
+    cannot withdraw on any user's behalf.
+  * **Added post-application bridge-state invariants.**  Three
+    new theorems pin the type-level evolution of `BridgeState`
+    under bridge-admissible application:
+
+    - `deposit_marks_consumed`: after a `deposit r recipient
+      amount d` admissible application, `d` IS in the post-
+      state's `consumed` map.  Direct corollary: a second
+      admissibility check on the same `d` fails conjunct 6 —
+      closes the L1-deposit-replay attack at the type level.
+    - `deposit_replay_blocked_by_consumed`: the post-state's
+      `consumed` map cannot evaluate `false` at `d` after a
+      successful deposit application — proof-irrelevant
+      reformulation of the above.
+    - `withdraw_bumps_nextWdId`: after a `withdraw r sender
+      amount rcp` admissible application, `bridge.nextWdId` is
+      exactly one greater than the pre-state's — distinct
+      withdrawals get distinct ids, closing the L2-withdraw-
+      replay attack at the type level.
+  * **Added BridgeState encoding determinism + DepositRecord
+    round-trip.**  Three new theorems:
+    `bridgeState_encode_deterministic` (structural rfl-class),
+    `depositRecord_encode_deterministic`, and
+    `pendingWithdrawal_encode_deterministic` cover the §7.1.4
+    deliverable for the `BridgeState` CBE encoding.  Plus
+    `depositRecord_roundtrip` (under canonical-encoding
+    bounds), the per-record decode-after-encode identity.
+  * **Documented `DepositId` 64-bit constraint.**  The Lean-
+    side `DepositId : Nat` representation has a CBE round-trip
+    bound of `< 2^64`.  Real L1 32-byte hashes are 256 bits
+    and don't fit losslessly.  The runtime adaptor must
+    project the L1 hash into a 64-bit deployment-canonical
+    form (e.g. `keccak256(blockHash ‖ logIdx)[0:8]`,
+    collision-resistant for the deployment lifetime; or
+    sequential `uint64` numbering by the L1 contract).
+    Documented in `Bridge/State.lean`'s `DepositId` docstring;
+    the deployment-side projection's injectivity is a
+    deployment-correctness obligation.
+
+Audit-1 raised the test count from 921 to 934 (+13: 6 new
+admissible/state encoding tests, 4 new bridge-actor tests for
+the deposit-admit / withdraw-reject changes, 3 new tests for
+the post-application invariants).
 
 **Ethereum Workstream B (identity and authority) summary.**  Three
 work units (B.1 – B.3) landing the Lean-side identity-translation

@@ -70,16 +70,30 @@ open LegalKernel.Authority
 /-! ## Bridge-only action classification
 
 `Action.isBridgeOnly` is `true` exactly for the action constructors
-that are only legal when signed by the bridge actor:
-`registerIdentity`, `deposit`, `withdraw`.  Other actions are user-
-authored and need not be signed by the bridge. -/
+that **must** be signed by the bridge actor — namely the
+L1-attested actions: `registerIdentity` (first-time identity
+registration) and `deposit` (L1 deposit credit).
 
-/-- Predicate: the action is one that the bridge actor exclusively
-    authors.  Used by `BridgeAdmissibleWith` conjunct 8. -/
+`withdraw` is *not* bridge-only.  Withdrawals are user-initiated:
+the L2 sender signs their own withdrawal, and the deployment's
+per-actor authority policy authorises the action.  The bridge
+records the resulting `PendingWithdrawal` entry into its ledger
+via `applyActionToBridgeState`, but does NOT need to sign the
+withdrawal itself.  Workstream-C audit-1 hardening removed
+`withdraw` from this set after surfacing that the original
+listing forced ALL withdrawals to be bridge-actor-signed via
+conjunct 8 of `BridgeAdmissibleWith` — contradicting the
+user-initiated flow.  See CLAUDE.md's audit-1 changelog. -/
+
+/-- Predicate: the action is a bridge-attested L1 → L2 action that
+    must be signed by the bridge actor.  Used by
+    `BridgeAdmissibleWith` conjunct 8.  Returns `true` only for
+    `registerIdentity` (first-time bridge-attested identity
+    registration) and `deposit` (bridge-attested L1 deposit
+    credit).  Returns `false` for `withdraw` (user-initiated). -/
 def Action.isBridgeOnly : Action → Bool
   | .registerIdentity _ _ => true
   | .deposit _ _ _ _      => true
-  | .withdraw _ _ _ _     => true
   | _                     => false
 
 /-! ## applyActionToBridgeState
@@ -308,13 +322,92 @@ theorem apply_bridge_admissible_with_preserves_bridge_for_non_bridge
   show applyActionToBridgeState es.bridge st.action idx = es.bridge
   exact applyActionToBridgeState_non_bridge es.bridge st.action idx hne_dep hne_wd
 
+/-! ## §7.0a — Post-application bridge-state invariants
+
+After a successful `apply_bridge_admissible_with` call, the
+`bridge` field reflects the action's effect:
+
+  * Deposit: the depositId IS in `consumed` (so a replay attempt
+    fails conjunct 6).  Closes the L1-deposit-replay attack:
+    a malicious bridge cannot credit the same L1 deposit twice
+    on L2.
+  * Withdraw: a new `PendingWithdrawal` is at `nextWdId`, and
+    `nextWdId` is bumped.  Closes the L2-withdraw-replay
+    attack: distinct withdrawals get distinct ids.
+
+These are the type-level statements that the bridge ledger
+actually evolves under bridge-admissible application. -/
+
+/-- §7.0a / audit-1: after `apply_bridge_admissible_with` of a
+    `deposit r recipient amount d`, the depositId `d` IS in the
+    post-state's `consumed` map.  Direct corollary: the same
+    deposit cannot be admissibly applied twice (the second attempt
+    fails `BridgeAdmissibleWith` conjunct 6). -/
+theorem deposit_marks_consumed
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (depId : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P depId es st)
+    (r : ResourceId) (recipient : ActorId) (amount : Amount)
+    (d : DepositId)
+    (heq : st.action = .deposit r recipient amount d) :
+    (apply_bridge_admissible_with verify P depId es st idx h).bridge.consumed.contains d
+      = true := by
+  unfold apply_bridge_admissible_with
+  show (applyActionToBridgeState es.bridge st.action idx).consumed.contains d = true
+  rw [heq]
+  show (es.bridge.markConsumed d ({ resource := r, amount := amount })).consumed.contains d
+       = true
+  unfold BridgeState.markConsumed
+  show (es.bridge.consumed.insert d ({ resource := r, amount := amount })).contains d = true
+  exact Std.TreeMap.contains_insert_self
+
+/-- §7.0a / audit-1: a successful deposit-bridge-admissible
+    application means the depositId is ALWAYS recorded as
+    consumed at the post-state.  Cannot be `false` in the
+    `consumed` map after a successful application. -/
+theorem deposit_replay_blocked_by_consumed
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (depId : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P depId es st)
+    (r : ResourceId) (recipient : ActorId) (amount : Amount)
+    (d : DepositId)
+    (heq : st.action = .deposit r recipient amount d) :
+    ¬ ((apply_bridge_admissible_with verify P depId es st idx h).bridge.consumed.contains d
+       = false) := by
+  rw [deposit_marks_consumed verify P depId es st idx h r recipient amount d heq]
+  intro hcontra
+  cases hcontra
+
+/-- §7.0a / audit-1: after `apply_bridge_admissible_with` of a
+    `withdraw r sender amount rcp`, the post-state's
+    `bridge.nextWdId` is exactly one greater than the pre-state's.
+    Direct corollary: distinct withdrawals get distinct ids. -/
+theorem withdraw_bumps_nextWdId
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (depId : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P depId es st)
+    (r : ResourceId) (sender : ActorId) (amount : Amount)
+    (rcp : EthAddress)
+    (heq : st.action = .withdraw r sender amount rcp) :
+    (apply_bridge_admissible_with verify P depId es st idx h).bridge.nextWdId =
+    es.bridge.nextWdId + 1 := by
+  unfold apply_bridge_admissible_with
+  show (applyActionToBridgeState es.bridge st.action idx).nextWdId =
+       es.bridge.nextWdId + 1
+  rw [heq]
+  rfl
+
 /-! ## Bridge-aware replay-impossible (lift via projection) -/
 
 /-- §7.0a: the Phase-3 `replay_impossible` theorem lifts to bridge
-    admissibility via the projection `BridgeAdmissibleWith.toAdmissibleWith`
-    plus the kernel agreement theorem on the nonces field.  A
-    successfully applied bridge-admissible action cannot be bridge-
-    admissible at the post-state. -/
+    admissibility via the projection
+    `BridgeAdmissibleWith.toAdmissibleWith` plus the kernel agreement
+    theorem on the nonces field.  A successfully applied
+    bridge-admissible action cannot be bridge-admissible at the
+    post-state. -/
 theorem bridge_replay_impossible
     (P : AuthorityPolicy) (es : ExtendedState) (st : SignedAction)
     (idx : Nat)

@@ -301,6 +301,49 @@ backed by the existing Phase-6 fraud-proof pipeline.
          predicate over `ExtendedState`, which is a structural
          lift over what is already shipped.
 
+    **Workstream-C audit-1 hardening summary.**  A first post-
+    landing audit identified three issues; all are now closed.
+
+      * **Critical: `Action.isBridgeOnly` flagged `withdraw`
+        (security bug).**  The pre-audit listing forced ALL
+        withdrawals to be bridge-actor-signed via conjunct 8 of
+        `BridgeAdmissibleWith`, contradicting the design where
+        users sign their own withdrawals.  Audit-1 removes
+        `withdraw` from `isBridgeOnly`; only the L1-attested
+        actions (`registerIdentity`, `deposit`) remain.
+
+      * **`bridgePolicy_authorizes_withdraw` →
+        `bridgePolicy_rejects_withdraw`.**  Aligns with §12.9 #33.
+        The bridge actor is forbidden from signing withdrawals,
+        closing a coordinated-attack vector.
+        `bridgeAuthorizedAction` updated to exclude `withdraw`.
+
+      * **Added post-application bridge-state invariants.**
+        `deposit_marks_consumed` (the depositId IS in `consumed`
+        after admissibility), `deposit_replay_blocked_by_consumed`
+        (the same depositId cannot be admissibly applied twice),
+        `withdraw_bumps_nextWdId` (distinct withdrawals get
+        distinct ids).  These close the L1-deposit-replay and
+        L2-withdraw-replay attacks at the type level.
+
+      * **Added BridgeState encoding theorems.**
+        `bridgeState_encode_deterministic`,
+        `depositRecord_encode_deterministic`,
+        `pendingWithdrawal_encode_deterministic`,
+        `depositRecord_roundtrip`.  Closes the §7.1.4
+        deliverable.
+
+      * **Documented `DepositId` 64-bit projection requirement.**
+        The CBE round-trip bound `< 2^64` means production 32-byte
+        L1 hashes need a deployment-canonical projection
+        (`keccak256(blockHash ‖ logIdx)[0:8]`, or sequential
+        `uint64` numbering); the projection's injectivity is the
+        deployment's correctness obligation.
+
+    Audit-1 raised the test count from 921 to 934 (+13).  All
+    additions ship without `sorry` and depend only on the standard
+    Lean built-in axioms.
+
 ## Executive summary
 
 The MVP makes Canon usable by any Ethereum wallet against any

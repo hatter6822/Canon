@@ -525,5 +525,62 @@ theorem extendedState_encode_deterministic
     Encodable.encode (T := ExtendedState) es₁ = Encodable.encode (T := ExtendedState) es₂ :=
   h ▸ rfl
 
+/-! ## BridgeState encoding determinism (§7.1.4) -/
+
+/-- Determinism (structural) for `BridgeState`: equal inputs
+    produce equal bytes.  Trivially true (encode is a function);
+    stated explicitly so the Workstream-C §7.1.4 deliverable is
+    documented. -/
+theorem bridgeState_encode_deterministic
+    (bs₁ bs₂ : Bridge.BridgeState) (h : bs₁ = bs₂) :
+    Encodable.encode (T := Bridge.BridgeState) bs₁ =
+    Encodable.encode (T := Bridge.BridgeState) bs₂ :=
+  h ▸ rfl
+
+/-- Determinism for `DepositRecord`: equal inputs produce equal
+    bytes. -/
+theorem depositRecord_encode_deterministic
+    (rec₁ rec₂ : Bridge.DepositRecord) (h : rec₁ = rec₂) :
+    Bridge.DepositRecord.encode rec₁ = Bridge.DepositRecord.encode rec₂ :=
+  h ▸ rfl
+
+/-- Determinism for `PendingWithdrawal`. -/
+theorem pendingWithdrawal_encode_deterministic
+    (wd₁ wd₂ : Bridge.PendingWithdrawal) (h : wd₁ = wd₂) :
+    Bridge.PendingWithdrawal.encode wd₁ = Bridge.PendingWithdrawal.encode wd₂ :=
+  h ▸ rfl
+
+/-- Round-trip for `DepositRecord`: under the canonical-encoding
+    bound on the resource, encode-then-decode is the identity. -/
+theorem depositRecord_roundtrip
+    (rec : Bridge.DepositRecord) (rest : Stream)
+    (h : rec.resource.toNat < 256 ^ 8 ∧ rec.amount < 256 ^ 8) :
+    Bridge.DepositRecord.decode (Bridge.DepositRecord.encode rec ++ rest) =
+    .ok (rec, rest) := by
+  unfold Bridge.DepositRecord.encode Bridge.DepositRecord.decode
+  obtain ⟨h1, h2⟩ := h
+  rw [show Encodable.encode (T := Nat) rec.resource.toNat ++
+            Encodable.encode (T := Nat) rec.amount ++ rest =
+          Encodable.encode (T := Nat) rec.resource.toNat ++
+            (Encodable.encode (T := Nat) rec.amount ++ rest)
+      from by simp [List.append_assoc]]
+  rw [nat_roundtrip rec.resource.toNat _ h1]
+  dsimp only
+  have hp : rec.resource.toNat < 18446744073709551616 := by
+    have h_eq : (256 : Nat) ^ 8 = 18446744073709551616 := by decide
+    omega
+  rw [dif_pos hp]
+  rw [nat_roundtrip rec.amount rest h2]
+  show Except.ok ({ resource := rec.resource.toNat.toUInt64, amount := rec.amount }, rest)
+       = .ok (rec, rest)
+  congr 1
+  congr 1
+  show Bridge.DepositRecord.mk rec.resource.toNat.toUInt64 rec.amount = rec
+  cases rec with
+  | mk resource amount =>
+    show Bridge.DepositRecord.mk resource.toNat.toUInt64 amount = ⟨resource, amount⟩
+    have : resource.toNat.toUInt64 = resource := UInt64.ofNat_toNat
+    rw [this]
+
 end Encoding
 end LegalKernel
