@@ -11,8 +11,8 @@ import LegalKernel
 /-!
 Phase-5 `canon` runtime CLI.
 
-The Phase-5 binary multiplexes six subcommands via its first
-argument (plus the `help` alias):
+The Phase-5 / Workstream-D binary multiplexes seven subcommands via
+its first argument (plus the `help` alias):
 
   * `canon info`         — print the kernel build tag.
   * `canon process LOG IN [OUT]`
@@ -31,6 +31,12 @@ argument (plus the `help` alias):
   * `canon snapshot LOG SNAP_PATH`
                         — load + replay `LOG`, then write a snapshot
                           of the final state to `SNAP_PATH`.
+  * `canon withdrawal-proof SNAP_PATH ID`  (Workstream D.2)
+                        — load `SNAP_PATH`, extract the canonical
+                          withdrawal proof for `ID`, and print the
+                          hex-encoded leaf + sibling path to stdout.
+                          Suitable for piping into `CanonBridge.sol`'s
+                          L1 redemption call.
   * `canon help`         — show the per-subcommand usage text.
 
 The CLI uses the `unrestricted` `AuthorityPolicy` (every signer can
@@ -237,16 +243,56 @@ def cmdSnapshot (logPath : System.FilePath) (snapPath : System.FilePath) :
     IO.println s!"  wrote {snapPath}"
     pure 0
 
+/-- Format a `WithdrawalProof` as a hex-encoded summary string —
+    leaf bytes + index + 64 sibling hashes.  Suitable for piping to
+    a Solidity test driver via stdout. -/
+def formatWithdrawalProof (proof : LegalKernel.Bridge.WithdrawalProof) : String :=
+  let leafHex := formatHashHex proof.leaf
+  let sibsHex := proof.siblings.toList.map formatHashHex
+  let lines :=
+    s!"leaf    : {leafHex}\n" ++
+    s!"index   : {proof.index}\n" ++
+    s!"siblings:\n" ++
+    String.join (sibsHex.map (fun s => s!"  {s}\n"))
+  lines
+
+/-- Subcommand: `canon withdrawal-proof SNAPSHOT_FILE WITHDRAWAL_ID`.
+    Reads the snapshot file, extracts the withdrawal proof for the
+    given id, and prints a hex-encoded summary to stdout.  Exits
+    non-zero if the snapshot fails to load or the id is not in the
+    snapshot's pending set. -/
+def cmdWithdrawalProof (snapPath : System.FilePath) (idStr : String) :
+    IO UInt32 := do
+  match idStr.toNat? with
+  | none =>
+    IO.eprintln s!"withdrawal-proof: '{idStr}' is not a valid Nat"
+    pure 2
+  | some idx =>
+    match (← loadSnapshot snapPath) with
+    | .error e =>
+      IO.eprintln s!"snapshot load failed: {repr e}"
+      pure 1
+    | .ok snap =>
+      match LegalKernel.Bridge.extractProof snap idx with
+      | none =>
+        IO.eprintln s!"withdrawal-proof: id {idx} is not in snapshot's pending set"
+        pure 1
+      | some proof =>
+        IO.println (formatWithdrawalProof proof)
+        IO.println s!"root    : {formatHashHex snap.bridgeWithdrawalRoot}"
+        pure 0
+
 /-- Print the CLI help text. -/
 def cmdHelp : IO UInt32 := do
   IO.println "canon — Phase-5 runtime CLI"
   IO.println ""
   IO.println "Usage:"
   IO.println "  canon [GLOBAL_FLAGS] info"
-  IO.println "  canon [GLOBAL_FLAGS] process    LOG IN [OUT]"
-  IO.println "  canon [GLOBAL_FLAGS] replay     LOG"
-  IO.println "  canon [GLOBAL_FLAGS] bootstrap  LOG"
-  IO.println "  canon [GLOBAL_FLAGS] snapshot   LOG SNAP_PATH"
+  IO.println "  canon [GLOBAL_FLAGS] process          LOG IN [OUT]"
+  IO.println "  canon [GLOBAL_FLAGS] replay           LOG"
+  IO.println "  canon [GLOBAL_FLAGS] bootstrap        LOG"
+  IO.println "  canon [GLOBAL_FLAGS] snapshot         LOG SNAP_PATH"
+  IO.println "  canon [GLOBAL_FLAGS] withdrawal-proof SNAP_PATH ID"
   IO.println "  canon help"
   IO.println ""
   IO.println "Global flags:"
@@ -259,7 +305,8 @@ def cmdHelp : IO UInt32 := do
   IO.println "  LOG       path to the append-only transition log."
   IO.println "  IN        path to a binary file of concatenated SignedAction CBE records."
   IO.println "  OUT       optional path to write the final state hash (32 bytes)."
-  IO.println "  SNAP_PATH path to write the snapshot file."
+  IO.println "  SNAP_PATH path to write or read the snapshot file."
+  IO.println "  ID        a `WithdrawalId` (Nat) to look up in the snapshot."
   IO.println ""
   IO.println "See docs/abi.md for the on-disk and on-wire byte layouts."
   pure 0
@@ -299,6 +346,9 @@ def main (args : List String) : IO UInt32 := do
   | ["snapshot", log, snap] => do
     warnIfFallbackHash allowFallbackHash
     cmdSnapshot (System.FilePath.mk log) (System.FilePath.mk snap)
+  | ["withdrawal-proof", snap, idStr] => do
+    warnIfFallbackHash allowFallbackHash
+    cmdWithdrawalProof (System.FilePath.mk snap) idStr
   | _ => do
     IO.eprintln "canon: unrecognised arguments; try `canon help`."
     pure 2

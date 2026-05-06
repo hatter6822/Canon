@@ -188,9 +188,12 @@ lake build LegalKernel.Bridge.Admissible             # Workstream C.0 BridgeAdmi
 lake build LegalKernel.Bridge.Accounting             # Workstream C.6 totalDeposited / totalWithdrawn
 lake build LegalKernel.Laws.Deposit                  # Workstream C.2 deposit law
 lake build LegalKernel.Laws.Withdraw                 # Workstream C.3 withdraw law
-lake build canon                              # Phase-5 `canon` runtime CLI
+lake build LegalKernel.Bridge.WithdrawalRoot         # Workstream D.1 sparse Merkle tree (D.1.1 - D.1.5)
+lake build LegalKernel.Bridge.WithdrawalProof        # Workstream D.2 withdrawal proof extractor
+lake build LegalKernel.Bridge.Finalisation           # Workstream D.3 snapshot finalisation policy
+lake build canon                              # Phase-5 `canon` runtime CLI (D.2: withdrawal-proof subcommand)
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (835 tests post-Workstream-B audit-1)
+lake test                           # run Tests.lean driver (1024 tests post-Workstream-D audit-2)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
@@ -583,16 +586,59 @@ canon/
 │   │   │                                `apply_admissible_with_preserves_bridge`
 │   │   │                                pass-through;
 │   │   │                                `bridge_replay_impossible` lift.
-│   │   └── Accounting.lean          -- Workstream C.6: `totalDeposited`,
-│   │                                    `totalWithdrawn` quantity
-│   │                                    functionals; per-action
-│   │                                    accounting deltas (transfer,
-│   │                                    freeze, replaceKey,
-│   │                                    registerIdentity, non-bridge
-│   │                                    parameterised);
-│   │                                    `applyActionToBridgeState`
-│   │                                    shape lemmas; genesis
-│   │                                    sanity lemmas.
+│   │   ├── Accounting.lean          -- Workstream C.6: `totalDeposited`,
+│   │   │                                `totalWithdrawn` quantity
+│   │   │                                functionals; per-action
+│   │   │                                accounting deltas (transfer,
+│   │   │                                freeze, replaceKey,
+│   │   │                                registerIdentity, non-bridge
+│   │   │                                parameterised);
+│   │   │                                `applyActionToBridgeState`
+│   │   │                                shape lemmas; genesis
+│   │   │                                sanity lemmas.
+│   │   ├── WithdrawalRoot.lean      -- Workstream D.1
+│   │   │                                (D.1.1 – D.1.4): sparse Merkle
+│   │   │                                tree (`smtHeight = 64`,
+│   │   │                                `defaultHash`, `pathBitAtLevel`,
+│   │   │                                `hashUp`, `leafBytes`,
+│   │   │                                `rangeRoot` with empty short-
+│   │   │                                circuit, `withdrawalRoot`);
+│   │   │                                verifier and constructor
+│   │   │                                (`WithdrawalProof`,
+│   │   │                                `verifyProofRec`, `verifyProof`,
+│   │   │                                `constructProofAux` with empty
+│   │   │                                short-circuit, `constructProof`,
+│   │   │                                `emptyProofSiblings`);
+│   │   │                                completeness theorem
+│   │   │                                (`verifyProof_complete`,
+│   │   │                                unconditional);
+│   │   │                                soundness theorem
+│   │   │                                (`verifyProof_sound`, under
+│   │   │                                `CollisionFree H` +
+│   │   │                                `UniformOutputSize H 32` +
+│   │   │                                leaf / sibling size hyps);
+│   │   │                                helper lemmas
+│   │   │                                (`verifyProofRec_eq_rangeRoot`,
+│   │   │                                `verifyProofRec_inj`,
+│   │   │                                `hashUp_inj_of_collisionFree`,
+│   │   │                                `byteArray_append_inj`).
+│   │   ├── WithdrawalProof.lean     -- Workstream D.2: `extractProof`
+│   │   │                                (snapshot-based proof
+│   │   │                                extractor); `Snapshot.bridgeWithdrawalRoot`
+│   │   │                                (decoded-state-derived root);
+│   │   │                                `extractProof_consistent_with_root`
+│   │   │                                (extracted proofs verify against
+│   │   │                                the snapshot's root).
+│   │   └── Finalisation.lean        -- Workstream D.3:
+│   │                                    `FinalisableSnapshot` wrapper
+│   │                                    (snapshot + L1 confirmation
+│   │                                    metadata + log range);
+│   │                                    `hasUpheldInRange` (forward-walk
+│   │                                    upheld-dispute scan);
+│   │                                    `isFinalised` predicate;
+│   │                                    `isFinalised_monotonic_in_currentBlock`
+│   │                                    + `isFinalised_implies_no_upheld_against`
+│   │                                    headline theorems.
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness + emptyState.
 │       ├── KernelTests.lean       -- value-level kernel tests (22 cases).
@@ -769,15 +815,53 @@ canon/
 │           │                           sequence, term-level API
 │           │                           stability for the WU C.0
 │           │                           theorems).
-│           └── Accounting.lean      -- Workstream C.6 accounting tests
-│                                       (19 cases: genesis sanity,
-│                                       totalDeposited / totalWithdrawn
-│                                       at single + multi-element
-│                                       fixtures, amountAt projections,
-│                                       per-action delta term-level
-│                                       APIs, end-to-end 4-step trace
-│                                       [deposit, transfer, withdraw,
-│                                       transfer]).
+│           ├── Accounting.lean      -- Workstream C.6 accounting tests
+│           │                           (19 cases: genesis sanity,
+│           │                           totalDeposited / totalWithdrawn
+│           │                           at single + multi-element
+│           │                           fixtures, amountAt projections,
+│           │                           per-action delta term-level
+│           │                           APIs, end-to-end 4-step trace
+│           │                           [deposit, transfer, withdraw,
+│           │                           transfer]).
+│           ├── WithdrawalRoot.lean  -- Workstream D.1 SMT tests
+│           │                           (30 cases: shape constants,
+│           │                           defaultHash recursion, root
+│           │                           extensionality, verifier
+│           │                           positive / negative paths,
+│           │                           constructor on absent /
+│           │                           present indices, completeness
+│           │                           on 1- / 2- / 8-leaf fixtures,
+│           │                           soundness API stability).
+│           ├── WithdrawalProof.lean -- Workstream D.2 extractor tests
+│           │                           (12 cases: extract on
+│           │                           valid / absent / empty
+│           │                           snapshots, bridgeWithdrawalRoot
+│           │                           shape, end-to-end extract +
+│           │                           verify, determinism API).
+│           ├── WithdrawalProofCLI.lean -- Workstream D.2 CLI
+│           │                           integration tests (6 cases:
+│           │                           end-to-end save / load /
+│           │                           extract / verify flow,
+│           │                           byte-stability across runs,
+│           │                           absent-id / corrupt-snapshot
+│           │                           handling, bridgeWithdrawalRoot
+│           │                           preservation across save/load).
+│           ├── Finalisation.lean    -- Workstream D.3 finalisation
+│           │                           tests (14 cases: predicate
+│           │                           value-level checks at the
+│           │                           dispute-window boundary,
+│           │                           monotonicity, hasUpheldInRange
+│           │                           shape, FinalisableSnapshot
+│           │                           field accessibility).
+│           └── WithdrawalRootGoldens.lean -- Workstream D.1.5
+│                                       cross-stack 16-leaf golden
+│                                       fixture (5 cases: all-canonical
+│                                       proofs verify, root size /
+│                                       determinism, root distinguishes
+│                                       populated from empty,
+│                                       non-membership proof for
+│                                       out-of-fixture id).
 ├── Tools/
 │   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 TCB allowlist enforcer.
@@ -1304,6 +1388,24 @@ each mechanise one or more of the following:
 | 166| `depositRecord_encode_deterministic` (audit-1) | `depositRecord_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
 | 167| `pendingWithdrawal_encode_deterministic` (audit-1) | `pendingWithdrawal_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
 | 168| `EthAddress.ofBytes_toBytes` (lossless 20-byte BE round-trip; audit-2) | `EthAddress.ofBytes_toBytes` | E-C audit-2 / `Bridge/AddressBook.lean` |
+| 169| `withdrawalRoot_empty_eq_defaultHash_top` (D.1.1) | `withdrawalRoot_empty_eq_defaultHash_top` | E-D.1.1 / `Bridge/WithdrawalRoot.lean` |
+| 170| `withdrawalRoot_extensional` (D.1.1) | `withdrawalRoot_extensional` | E-D.1.1 / `Bridge/WithdrawalRoot.lean` |
+| 171| `defaultHash_well_defined` (D.1.1) | `defaultHash_well_defined` | E-D.1.1 / `Bridge/WithdrawalRoot.lean` |
+| 172| `constructProof_deterministic` (D.1.2) | `constructProof_deterministic` | E-D.1.2 / `Bridge/WithdrawalRoot.lean` |
+| 173| `constructProof_siblings_length` (D.1.2; static via `Vector n` discipline) | `constructProof_siblings_length` | E-D.1.2 / `Bridge/WithdrawalRoot.lean` |
+| 174| `verifyProof_total` (D.1.2) | `verifyProof_total` | E-D.1.2 / `Bridge/WithdrawalRoot.lean` |
+| 175| `verifyProof_complete` (D.1.3; unconditional structural-recursion identity) | `verifyProof_complete` | E-D.1.3 / `Bridge/WithdrawalRoot.lean` |
+| 176| `verifyProof_sound` (D.1.4; under `CollisionFree` + `UniformOutputSize` + size-match hyps) | `verifyProof_sound` | E-D.1.4 / `Bridge/WithdrawalRoot.lean` |
+| 177| `verifyProofRec_eq_rangeRoot` (D.1.3 workhorse) | `verifyProofRec_eq_rangeRoot` | E-D.1.3 / `Bridge/WithdrawalRoot.lean` |
+| 178| `verifyProofRec_inj` (D.1.4 verifier injectivity) | `verifyProofRec_inj` | E-D.1.4 / `Bridge/WithdrawalRoot.lean` |
+| 179| `extractProof_consistent_with_root` (D.2 extractor consistency) | `extractProof_consistent_with_root` | E-D.2 / `Bridge/WithdrawalProof.lean` |
+| 180| `extractProof_deterministic` (D.2) | `extractProof_deterministic` | E-D.2 / `Bridge/WithdrawalProof.lean` |
+| 181| `bridgeWithdrawalRoot_deterministic` (D.2) | `bridgeWithdrawalRoot_deterministic` | E-D.2 / `Bridge/WithdrawalProof.lean` |
+| 182| `isFinalised_monotonic_in_currentBlock` (D.3) | `isFinalised_monotonic_in_currentBlock` | E-D.3 / `Bridge/Finalisation.lean` |
+| 183| `isFinalised_implies_no_upheld_against` (D.3) | `isFinalised_implies_no_upheld_against` | E-D.3 / `Bridge/Finalisation.lean` |
+| 184| `isFinalised_deterministic` (D.3) | `isFinalised_deterministic` | E-D.3 / `Bridge/Finalisation.lean` |
+| 185| `hasUpheldInRange_false_implies` (D.3 helper) | `hasUpheldInRange_false_implies` | E-D.3 / `Bridge/Finalisation.lean` |
+| 186| `emptyProofSiblings_length` (D.1.2 helper) | `emptyProofSiblings_length` | E-D.1.2 / `Bridge/WithdrawalRoot.lean` |
 
 The "Phase / File" `R` markers identify the Phase-4-prelude
 positive-incentive WUs (`R.1` – `R.23`); they precede Phase 4 (DSL and
@@ -1397,7 +1499,7 @@ units.  Brief summary:
 | E-A    | Ethereum: cryptographic adaptors   | A.1–A.3 (`docs/ethereum_integration_plan.md` §5) | Complete (Lean side); Rust-side adaptor crates `runtime/canon-verify-secp256k1` and `runtime/canon-hash-keccak256` deferred to a follow-up |
 | E-B    | Ethereum: identity and authority   | B.1–B.3 (`docs/ethereum_integration_plan.md` §6) | Complete (Lean side); Rust-side ingestor binary deferred to a follow-up.  Pulls forward the `Action.registerIdentity` constructor (originally attributed to C.4) at frozen index 12. |
 | E-C    | Ethereum: bridge laws              | C.0–C.6 (`docs/ethereum_integration_plan.md` §7) | Complete (Lean side; per-action accounting deltas; chain-level §7.6.4 / §7.6.5 deferred as a structural follow-up over a custom `BridgeReachable` predicate) |
-| E-D    | Ethereum: withdrawal proofs        | D.1–D.4 (`docs/ethereum_integration_plan.md` §8) | Not started |
+| E-D    | Ethereum: withdrawal proofs        | D.1 (5 sub-WUs) – D.3 (`docs/ethereum_integration_plan.md` §8) | Complete (Lean side; `canon withdrawal-proof` CLI ships, Rust-side adaptor for production keccak256 deferred to A-track follow-up) |
 | E-E    | Ethereum: Solidity contracts       | E.1–E.4 (`docs/ethereum_integration_plan.md` §9) | Not started (Solidity side; out of Lean scope) |
 | E-F    | Ethereum: cross-stack verification | F.1–F.5 (`docs/ethereum_integration_plan.md` §10) | Not started |
 | E-G    | Ethereum: documentation + amendment| G.1–G.5 (`docs/ethereum_integration_plan.md` §11) | Not started |
@@ -1483,11 +1585,287 @@ every match before submission.
 
 **Current Phase:** Phases 0 – 6 Complete; Audit-3 hardening
 complete; Ethereum-integration Workstreams A (cryptographic
-adaptors), B (identity and authority), and C (bridge laws)
-complete.  Workstreams D – G of the Ethereum integration plan
-(`docs/ethereum_integration_plan.md`) and Phase 7 (Advanced
-Capabilities of the original Genesis Plan) are the next scoped
-work; both are open-ended and per-WU chartered.
+adaptors), B (identity and authority), C (bridge laws), and
+D (withdrawal proofs) complete.  Workstreams E – G of the
+Ethereum integration plan (`docs/ethereum_integration_plan.md`)
+and Phase 7 (Advanced Capabilities of the original Genesis Plan)
+are the next scoped work; both are open-ended and per-WU
+chartered.
+
+**Ethereum Workstream D (withdrawal proofs) summary.**  Workstream D
+adds the user-facing withdrawal redemption flow: a sparse Merkle
+tree (SMT) over `BridgeState.pending`, a verifier and constructor
+for inclusion proofs, a snapshot-window finalisation policy, and
+the `canon withdrawal-proof` CLI subcommand for emitting hex-
+encoded proofs ready for L1 submission.  Bumped `kernelBuildTag`
+to `"canon-ethereum-workstream-d-withdrawal-proofs"`.  Test count
+grew from 940 to 1024 (+84 tests across five new suites:
+`bridge-withdrawal-root` (+41), `bridge-withdrawal-proof` (+12),
+`bridge-withdrawal-proof-cli` (+6), `bridge-finalisation` (+20),
+`bridge-withdrawal-goldens` (+5)).
+TCB unchanged; no new axioms; no new opaque declarations.
+
+  * **WU D.1.1 (`LegalKernel/Bridge/WithdrawalRoot.lean`,
+    SMT data structures + tree construction)** — `smtHeight = 64`,
+    `emptyLeafHash := zeroHash` (32 zero bytes per Audit-3.1),
+    `defaultHash H i` (level-`i` empty-subtree hash, recursive),
+    `pathBitAtLevel idx level` (LSB-up bit indexing — bit 0
+    selects at the leaf level, bit 63 at the root), `hashUp H
+    bit current sibling` (per-level hash combinator with bit-
+    based ordering), `leafBytes wd` (canonical CBE encoding of a
+    `PendingWithdrawal`, ~56 bytes), `rangeRoot H level entries`
+    (the recursive SMT root over a sub-list of `pending.toList`,
+    with a critical performance short-circuit on empty `entries`
+    that returns `defaultHash H level` directly — without this
+    short-circuit, computing `rangeRoot 64 []` would take O(2^64)
+    work via empty-subtree forking), `withdrawalRoot H b :=
+    rangeRoot H smtHeight b.pending.toList`.  Three §8.1.1
+    headline theorems: `defaultHash_well_defined` (totality),
+    `withdrawalRoot_empty_eq_defaultHash_top` (the empty bridge
+    state's root equals `defaultHash 64`), and
+    `withdrawalRoot_extensional` (extensional in `pending.toList`).
+  * **WU D.1.2 (verifier + constructor definitions)** —
+    `WithdrawalProof` structure (leaf : ByteArray, index :
+    WithdrawalId, siblings : Vector ByteArray smtHeight; siblings
+    ordered root-to-leaf so `siblings[0]` is root-adjacent and
+    `siblings[smtHeight - 1]` is leaf-adjacent); `verifyProofRec`
+    (the recursive verifier walking siblings root-to-leaf,
+    composing `hashUp` at each level); `verifyProof H proof root
+    := decide (recomputed_root = root)` (top-level entry);
+    `constructProofAux` (recursive descent that mirrors
+    `rangeRoot` exactly, with a short-circuit on empty entries
+    via `emptyProofSiblings H level := [defaultHash (level - 1),
+    ..., defaultHash 0]`); `constructProof H b idx` (top-level
+    entry: builds the `WithdrawalProof` from the bridge state).
+    Three §8.1.2 headline theorems: `constructProof_deterministic`,
+    `constructProof_siblings_length` (= smtHeight, statically
+    enforced by the `Vector ByteArray smtHeight` type), and
+    `verifyProof_total` (always returns Bool).
+  * **WU D.1.3 (`verifyProof_complete`, unconditional)** —
+    The completeness theorem: for any populated `(idx, wd) ∈
+    b.pending`, `verifyProof H (constructProof H b idx)
+    (withdrawalRoot H b) = true`.  Proved without
+    collision-resistance hypotheses, by structural induction on
+    the recursion depth of `constructProofAux` (which mirrors
+    `rangeRoot`'s recursion exactly, so the per-level hashes
+    agree by definitional unfolding).  Auxiliary lemmas:
+    `verifyProofRec_eq_rangeRoot` (the workhorse identity
+    relating verifier and constructor on canonical inputs),
+    `verifyProofRec_emptyProof_eq_defaultHash` (verifier output
+    on the all-empty proof equals `defaultHash`),
+    `rangeRoot_succ_cons` and `rangeRoot_nil_eq_defaultHash`
+    (per-step rangeRoot reductions),
+    `constructProof_siblings_toList` /
+    `constructProof_leaf` / `constructProof_index` (Vector ↔
+    list bridge lemmas).
+  * **WU D.1.4 (`verifyProof_sound`, hash-conditional)** —
+    The soundness theorem: under `CollisionFree H`,
+    `UniformOutputSize H 32`, and matched leaf / sibling sizes,
+    a verifying proof's leaf and siblings match the canonical
+    construction's.  Proved via verifier injectivity:
+    `verifyProofRec_inj` (the verifier function, viewed as a
+    function of `(leaf, siblings)`, is injective under the
+    hypotheses).  The injection works by induction on `level`,
+    using `hashUp_inj_of_collisionFree` (one-level hash
+    injectivity from CR + size match) and
+    `byteArray_append_inj` (byte-prefix injectivity at known
+    sizes, lifted from `List.append_inj` via `.data.toList`).
+    Auxiliary helpers include `verifyProofRec_size_succ` (every
+    non-zero-level verifier output is 32 bytes by `UniformOutputSize`).
+  * **WU D.1.5 (`Test/Bridge/WithdrawalRootGoldens.lean`)** —
+    The 16-leaf cross-stack golden fixture.  Lean side: builds
+    the canonical 16-leaf `BridgeState`, computes the root, and
+    verifies all 16 canonical proofs against it.  The fixture
+    is byte-stable across runs (deterministic FNV-1a-64 fallback
+    or production keccak256 binding).  Solidity-side
+    integration is deferred to Workstream E.1.3 (where
+    `CanonBridge.sol`'s SMT verifier consumes the same fixture
+    bytes); the Lean side documents the wire format and provides
+    the reference computation.
+  * **WU D.2 (`LegalKernel/Bridge/WithdrawalProof.lean`,
+    extractor + CLI)** — `Snapshot.bridgeWithdrawalRoot`
+    (function on `Runtime.Snapshot` that decodes the snapshot's
+    encoded `ExtendedState` and applies `withdrawalRoot
+    hashBytes` to its `bridge` field; falls back to the empty-
+    tree root on decode failure); `extractProof snap idx`
+    (returns `some (constructProof hashBytes es.bridge idx)`
+    if decode succeeds and `idx ∈ pending`; `none` otherwise);
+    headline theorem `extractProof_consistent_with_root` (every
+    extracted proof verifies against the snapshot's bridge root,
+    by case analysis on the decode + lookup paths plus
+    `verifyProof_complete`).  Plus determinism theorems for
+    both functions.  CLI: `canon withdrawal-proof SNAP_PATH ID`
+    subcommand in `Main.lean` that loads a snapshot, extracts
+    the proof for `ID`, and emits a hex-encoded leaf + sibling
+    path to stdout (suitable for piping to a Solidity test
+    driver).
+  * **WU D.3 (`LegalKernel/Bridge/Finalisation.lean`,
+    snapshot-window finalisation)** — `FinalisableSnapshot`
+    structure wrapping a `Runtime.Snapshot` with the
+    finalisation metadata (`submitL1Block`, `logIndexLow`,
+    `logIndexHigh`); `hasUpheldInRange log fromIdx toIdx`
+    (forward-walk that returns `true` iff any
+    `disputeStatus log i = some (.decided .upheld)` for `i ∈
+    [fromIdx, toIdx)`); `isFinalised fsnap currentL1Block
+    disputeWindowBlocks log` (= `currentL1Block ≥
+    submitL1Block + disputeWindowBlocks ∧ no upheld in
+    range`).  Two §8.3 headline theorems:
+    `isFinalised_monotonic_in_currentBlock` (once finalised,
+    always finalised under the same log) and
+    `isFinalised_implies_no_upheld_against` (a finalised
+    snapshot's covered log range has no upheld disputes,
+    proved by induction on the fuel parameter of
+    `hasUpheldInRange`).  **Audit-1** adds
+    `extractFinalisedProof` (combines D.2's `extractProof`
+    with D.3's `isFinalised`, matching §8.2's spec form
+    "returns `none` if not finalised") plus
+    `extractFinalisedProof_consistent_with_root` and
+    determinism / negative theorems.
+
+**Workstream-D audit-2 hardening (this branch).**  A second
+deep audit found that the audit-1 soundness theorem's
+"all canonical siblings = 32 bytes" hypothesis was *unsatisfiable*
+for the realistic dense-pair case (sequentially-assigned
+WithdrawalIds 0 and 1 share a deepest pair, so the canonical
+leaf-adjacent sibling for id 0 is `leafBytes wd_1` ≈ 56 bytes,
+not 32).  Audit-2 generalises:
+
+  * **`siblingsHaveMatchingSizes` predicate**:
+    `∀ p ∈ List.zip sibs₁ sibs₂, p.1.size = p.2.size`.
+    Element-wise size match between proof and canonical siblings.
+    Dischargeable in production: the runtime adaptor knows both
+    sizes (proof's from user input, canonical's from the bridge
+    state) and can size-check element-wise.
+
+  * **Refactored `verifyProofRec_inj`** to use
+    `siblingsHaveMatchingSizes` instead of "all 32 bytes".
+    The 32-byte form is preserved as
+    `siblingsHaveMatchingSizes_of_all_32` (a corollary).
+
+  * **`verifyProof_sound`** now takes element-wise size match
+    (handles dense-pair case).  The "all 32 bytes" form is
+    preserved as `verifyProof_sound_all_32` corollary (applies
+    when the runtime hashes leaves before placing in the SMT —
+    standard SMT design).
+
+  * **Edge-case tests added** verifying:
+    - Dense-pair case (id 0 + id 1 both mapped): both canonical
+      proofs verify against the root, and the leaf-adjacent
+      sibling has size 56 (not 32) confirming the variable-size
+      path is exercised.
+    - Empty bridge state: `withdrawalRoot empty = defaultHash 64`.
+    - Max-Nat WithdrawalId: doesn't crash (treated as
+      `idx mod 2^smtHeight` due to bit-shifting semantics).
+    - Unmapped idx: canonical proof verifies as a non-membership
+      claim (leaf = sentinel, siblings = canonical path).
+
+Audit-2 raised the test count from 1016 to 1024 (+8 tests).
+TCB unchanged; no new axioms; all theorems use only the
+canonical 3.
+
+**Workstream-D audit-1 hardening (this branch).**  A first
+post-implementation audit identified several issues; all are
+now closed.
+
+  * **`extractProof` doesn't check finalisation (§8.2 spec
+    drift).**  The integration plan §8.2 says `extractProof`
+    should return `none` if the snapshot is not yet finalised.
+    The pre-audit `extractProof` only checked pending
+    membership; finalisation was a separate predicate that
+    the caller had to invoke.  Audit-1 adds the
+    `extractFinalisedProof` wrapper (D.3 module) that combines
+    pending-check with finalisation check; the `canon
+    withdrawal-proof` CLI subcommand can be wired to it in a
+    follow-up.  The pre-audit `extractProof` is preserved for
+    callers that handle finalisation separately.
+
+  * **Dead code in `constructProofAux` level=0 nonempty
+    case.**  The pre-audit code had an inner
+    `match entries with | [] => emptyLeafHash | _ :: _ =>
+    leafBytes wd` inside an outer `_ :: _` pattern — the `[]`
+    branch was unreachable.  Audit-1 simplifies to
+    `(leafBytes wd, [])` directly with explicit pattern
+    `(_, wd) :: _` in the outer match.
+
+  * **Strengthened `verifyProof_complete_any_index`.**  The
+    pre-audit `verifyProof_complete` required a hypothesis
+    `b.pending[idx]? = some wd` but never used it (the
+    canonical proof for any idx — mapped or unmapped —
+    verifies against the actual root, with the unmapped case
+    being a valid non-membership proof).  Audit-1 introduces
+    the stronger `verifyProof_complete_any_index` (no
+    hypothesis) and keeps `verifyProof_complete` as a direct
+    corollary that retains the spec's exact signature.
+
+  * **Added auxiliary `constructProofAux_leaf_singleton` and
+    `mem_filter_pathBitAtLevel_self` lemmas.**  These are
+    work-horses for any future proof of the spec-form
+    soundness corollary (`∃ wd, mapped ∧ proof.leaf = encode
+    wd`).  The current `verifyProof_sound` proves the
+    canonical-match form; the spec-form corollary requires an
+    additional leaf-recovery lemma over the TreeMap-backed
+    filter chain, scoped as a follow-up.
+
+  * **Added `WithdrawalId ≥ 2^64` aliasing documentation.**
+    The SMT consults only `smtHeight = 64` bits of each
+    WithdrawalId.  Two ids whose low 64 bits agree map to the
+    same SMT position.  The runtime adaptor's `nextWdId`
+    counter is a UInt64 in production, so this aliasing
+    doesn't occur in practice; the Lean type uses `Nat` for
+    arithmetic flexibility and documents the bound as a
+    deployment-correctness obligation.
+
+  * **Added 15 new tests:**
+    - `bridge-withdrawal-root`: +3 (tampered-index rejection,
+      tampered leaf-adjacent-sibling rejection, non-membership
+      proof for unmapped idx verifies).
+    - `bridge-finalisation`: +6 (extractFinalisedProof API
+      checks + value-level negative cases).
+    - `bridge-withdrawal-proof-cli` (NEW suite, 6 tests):
+      end-to-end CLI flow (save / load / extract / verify),
+      byte-stability across runs, absent-id behaviour,
+      bridgeWithdrawalRoot preservation across save/load,
+      corrupt-snapshot handling, bridgeWithdrawalRoot
+      determinism.
+
+Audit-1 raised the test count from 1001 to 1016 (+15 tests).
+TCB unchanged; no new axioms; all theorems use only the
+canonical 3 (`propext`, `Classical.choice`, `Quot.sound`).
+
+**Workstream-D deviations from the integration plan.**  Three
+documented Lean-level deviations from
+`docs/ethereum_integration_plan.md` §8:
+
+  1. **`rangeRoot` short-circuits on empty entries** (§8.1.1):
+     the integration plan's pseudocode does not specify the
+     short-circuit, but without it the function is O(2^smtHeight)
+     in the worst case (computing `rangeRoot 64 []` forks into
+     two recursive calls on the empty list at level 63, etc.).
+     The fix: pattern-match on `entries` first, returning
+     `defaultHash H level` on empty.  Logically equivalent (the
+     `rangeRoot_nil_eq_defaultHash` theorem reduces to `rfl`
+     under the new definition); operationally O(N * smtHeight)
+     for a sparse tree with N populated entries.
+
+  2. **`constructProofAux` short-circuits on empty entries**
+     (§8.1.2): same reasoning.  The empty case returns
+     `(emptyLeafHash, emptyProofSiblings H level)`, where
+     `emptyProofSiblings` is a fresh definition that emits
+     `[defaultHash (level - 1), ..., defaultHash 0]` (root-to-
+     leaf order, length = level).  This makes `constructProof
+     hashBytes BridgeState.empty 0` terminate in O(smtHeight)
+     hashes rather than O(2^smtHeight).
+
+  3. **`Snapshot.bridgeWithdrawalRoot` uses a fallback**
+     (§8.2): if `snap.encodedState` fails to decode, the
+     function returns `withdrawalRoot hashBytes
+     BridgeState.empty` (the empty-tree root) rather than
+     panicking.  This keeps the function total at the Lean
+     level; the runtime adaptor checks the decode status
+     separately and reports diagnostic errors via the CLI.
+
+These deviations are recorded in this CLAUDE.md changelog;
+none weakens any kernel guarantee.
 
 **Ethereum Workstream C (bridge laws) summary.**  Workstream C
 introduces the bridge L1 ↔ L2 deposit / withdrawal flow at the

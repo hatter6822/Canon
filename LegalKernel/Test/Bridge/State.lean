@@ -121,7 +121,7 @@ def tests : List TestCase :=
   -- Audit-1: encoding determinism API stability (§7.1.4 deliverable)
   , { name := "bridgeState_encode_deterministic: term-level API (audit-1)"
     , body := do
-        let _t : ∀ (bs₁ bs₂ : BridgeState) (h : bs₁ = bs₂),
+        let _t : ∀ (bs₁ bs₂ : BridgeState) (_h : bs₁ = bs₂),
                    Encodable.encode (T := BridgeState) bs₁ =
                    Encodable.encode (T := BridgeState) bs₂ :=
           bridgeState_encode_deterministic

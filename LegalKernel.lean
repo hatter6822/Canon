@@ -195,6 +195,9 @@ import LegalKernel.Bridge.Ingest
 import LegalKernel.Bridge.State
 import LegalKernel.Bridge.Admissible
 import LegalKernel.Bridge.Accounting
+import LegalKernel.Bridge.WithdrawalRoot
+import LegalKernel.Bridge.WithdrawalProof
+import LegalKernel.Bridge.Finalisation
 
 namespace LegalKernel
 
@@ -209,6 +212,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-ethereum-workstream-c-bridge-laws"
+def kernelBuildTag : String := "canon-ethereum-workstream-d-withdrawal-proofs"
 
 end LegalKernel

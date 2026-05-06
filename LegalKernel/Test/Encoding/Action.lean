@@ -193,6 +193,7 @@ def actionInjectiveAPI : TestCase := {
 
 /-! ## Workstream C.4 — deposit / withdraw round-trip tests -/
 
+/-- `Action.deposit` round-trip test case. -/
 def depositRT : TestCase := {
   name := "Action.deposit roundtrip"
   body := do
@@ -209,6 +210,7 @@ def depositRT : TestCase := {
     | .error _ => throw <| IO.userError "decode failed"
 }
 
+/-- `Action.withdraw` round-trip test case. -/
 def withdrawRT : TestCase := {
   name := "Action.withdraw roundtrip"
   body := do

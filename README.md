@@ -110,6 +110,20 @@ enforces that comparable systems leave to convention or audit:
   the kernel level); `Event.rewardIssued` gives indexers a
   semantic observable distinct from the kernel-level
   `balanceChanged` delta.
+- **Withdrawal proofs (Workstream D).** A height-64 sparse Merkle
+  tree over `BridgeState.pending` produces a 32-byte
+  `withdrawalRoot` that an L1 redemption contract can verify
+  against.  `constructProof` builds the canonical inclusion proof
+  (leaf bytes + 64 sibling hashes, root-to-leaf), and `verifyProof`
+  walks the path leaf-to-root.  Two headline theorems certify the
+  pair: `verifyProof_complete` (unconditional — every populated
+  withdrawal's canonical proof verifies) and `verifyProof_sound`
+  (under collision-resistance and uniform-output-size hypotheses
+  on the hash function — a verifying proof matches the canonical
+  construction).  `extractProof` pulls a proof from a finalised
+  snapshot via the `canon withdrawal-proof SNAP_PATH ID` CLI;
+  `isFinalised` enforces the dispute-window finalisation policy
+  (no upheld disputes against the snapshot's covered log range).
 
 
 ## Engineering posture
@@ -141,11 +155,13 @@ evidence verifiers and an end-to-end planted-illegal-tx → rollback
 acceptance test.  Ethereum-integration Workstreams A (cryptographic
 adaptors: ECDSA secp256k1, keccak256, EIP-712), B (identity and
 authority: `EthAddress`, `AddressBook`, `bridgeActor`,
-`bridgePolicy`, L1 event ingestor), and C (bridge laws:
+`bridgePolicy`, L1 event ingestor), C (bridge laws:
 `BridgeState`, `BridgeAdmissibleWith`, `Action.deposit` /
-`Action.withdraw`, `totalDeposited` / `totalWithdrawn` accounting)
-are complete on the Lean side; Workstreams D – G remain to be
-scoped per
+`Action.withdraw`, `totalDeposited` / `totalWithdrawn` accounting),
+and D (withdrawal proofs: sparse Merkle tree, verifier and
+constructor with completeness + soundness theorems, snapshot-window
+finalisation policy, `canon withdrawal-proof` CLI) are complete
+on the Lean side; Workstreams E – G remain to be scoped per
 [`docs/ethereum_integration_plan.md`](docs/ethereum_integration_plan.md).
 
 | Phase       | Title                                | Status       |
@@ -162,7 +178,7 @@ scoped per
 | E-A         | Ethereum: cryptographic adaptors     | Complete (Lean side) |
 | E-B         | Ethereum: identity and authority     | Complete (Lean side) |
 | E-C         | Ethereum: bridge laws                | Complete (Lean side) |
-| E-D         | Ethereum: withdrawal proofs          | Not started  |
+| E-D         | Ethereum: withdrawal proofs          | Complete (Lean side) |
 | 7           | Advanced capabilities                | Not started  |
 
 A full per-WU changelog (Phase 0.1 onward) lives in [CLAUDE.md](CLAUDE.md);
@@ -188,7 +204,7 @@ elan toolchain install "$(cat lean-toolchain)"
 # Daily commands (after setup):
 source ~/.elan/env
 lake build              # full project (default target)
-lake test               # 940 tests across 50 suites (post-Workstream-C audit-2)
+lake test               # 1024 tests across 55 suites (post-Workstream-D audit-2)
 lake exe count_sorries  # zero-sorry TCB gate
 lake exe tcb_audit      # TCB allowlist gate
 lake exe stub_audit     # placeholder-stub detection gate (Audit-3.8)
