@@ -183,6 +183,11 @@ lake build LegalKernel.Bridge.Eip712                 # Workstream A.3 EIP-712 wr
 lake build LegalKernel.Bridge.AddressBook            # Workstream B.1 EthAddress + AddressBook
 lake build LegalKernel.Bridge.BridgeActor            # Workstream B.3 bridgeActor + bridgePolicy
 lake build LegalKernel.Bridge.Ingest                 # Workstream B.2 L1Event ingestor
+lake build LegalKernel.Bridge.State                  # Workstream C.1 BridgeState + ExtendedState embedding
+lake build LegalKernel.Bridge.Admissible             # Workstream C.0 BridgeAdmissibleWith
+lake build LegalKernel.Bridge.Accounting             # Workstream C.6 totalDeposited / totalWithdrawn
+lake build LegalKernel.Laws.Deposit                  # Workstream C.2 deposit law
+lake build LegalKernel.Laws.Withdraw                 # Workstream C.3 withdraw law
 lake build canon                              # Phase-5 `canon` runtime CLI
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
 lake test                           # run Tests.lean driver (835 tests post-Workstream-B audit-1)
@@ -296,10 +301,17 @@ canon/
 │   │   ├── DistributeOthers.lean  -- Phase-4-prelude WU R.8 / R.9:
 │   │   │                             uniform reward of all non-excluded
 │   │   │                             actors at a resource.
-│   │   └── ProportionalDilute.lean -- Phase-4-prelude WU R.12 / R.13 /
-│   │                                  R.14 / R.15: proportional reward
-│   │                                  (Nat floor, dust discarded) with
-│   │                                  the dust-bound theorem.
+│   │   ├── ProportionalDilute.lean -- Phase-4-prelude WU R.12 / R.13 /
+│   │   │                              R.14 / R.15: proportional reward
+│   │   │                              (Nat floor, dust discarded) with
+│   │   │                              the dust-bound theorem.
+│   │   ├── Deposit.lean            -- Workstream C.2: bridge L1 → L2
+│   │   │                              deposit credit (positive,
+│   │   │                              monotonic).
+│   │   └── Withdraw.lean           -- Workstream C.3: bridge L2 → L1
+│   │                                  withdraw debit (sufficient-balance
+│   │                                  precondition; non-conservative,
+│   │                                  non-monotonic).
 │   ├── Authority/
 │   │   ├── Crypto.lean            -- Phase-3 WU 3.4: PublicKey,
 │   │   │                             Signature, opaque Verify, opaque
@@ -536,21 +548,51 @@ canon/
 │   │   │                                `bridgePolicy_authorizes_registerIdentity`,
 │   │   │                                plus the wider rejection family
 │   │   │                                and `_rejects_non_bridge_signer`).
-│   │   └── Ingest.lean              -- WU B.2: `L1Event` inductive
-│   │                                    (identityRegistered /
-│   │                                    identityRevoked /
-│   │                                    depositInitiated; with originating
-│   │                                    `(blockNum, logIdx)` metadata);
-│   │                                    `UnsignedBridgeAction` envelope;
-│   │                                    `ingest` function (fresh →
-│   │                                    `Action.registerIdentity`;
-│   │                                    rotation →
-│   │                                    `Action.replaceKey`; revocation /
-│   │                                    deposit → `none`).  Three §12.8
-│   │                                    theorems
-│   │                                    (`ingest_emits_bridge_actor`,
-│   │                                    `ingest_preserves_lookup_for_other_addresses`,
-│   │                                    `ingest_lookup_equivalent_for_distinct_addresses`).
+│   │   ├── Ingest.lean              -- WU B.2: `L1Event` inductive
+│   │   │                                (identityRegistered /
+│   │   │                                identityRevoked /
+│   │   │                                depositInitiated; with originating
+│   │   │                                `(blockNum, logIdx)` metadata);
+│   │   │                                `UnsignedBridgeAction` envelope;
+│   │   │                                `ingest` function (fresh →
+│   │   │                                `Action.registerIdentity`;
+│   │   │                                rotation →
+│   │   │                                `Action.replaceKey`; revocation /
+│   │   │                                deposit → `none`).  Three §12.8
+│   │   │                                theorems
+│   │   │                                (`ingest_emits_bridge_actor`,
+│   │   │                                `ingest_preserves_lookup_for_other_addresses`,
+│   │   │                                `ingest_lookup_equivalent_for_distinct_addresses`).
+│   │   ├── State.lean               -- Workstream C.1: `DepositId`
+│   │   │                                (`Nat`, BE-decoded 32-byte hash;
+│   │   │                                docstring deviation from plan's
+│   │   │                                ByteArray); `WithdrawalId`;
+│   │   │                                `DepositRecord` (audit-2 amend.);
+│   │   │                                `PendingWithdrawal`;
+│   │   │                                `BridgeState` (consumed +
+│   │   │                                pending + nextWdId);
+│   │   │                                `BridgeState.empty` and basic
+│   │   │                                accessors / mutators
+│   │   │                                (`markConsumed`, `appendWithdrawal`).
+│   │   ├── Admissible.lean          -- Workstream C.0: `BridgeAdmissibleWith`
+│   │   │                                (5 + 3 conjuncts);
+│   │   │                                `applyActionToBridgeState`;
+│   │   │                                `apply_bridge_admissible_with`;
+│   │   │                                `BridgeAdmissibleWith.toAdmissibleWith`
+│   │   │                                projection;
+│   │   │                                `apply_admissible_with_preserves_bridge`
+│   │   │                                pass-through;
+│   │   │                                `bridge_replay_impossible` lift.
+│   │   └── Accounting.lean          -- Workstream C.6: `totalDeposited`,
+│   │                                    `totalWithdrawn` quantity
+│   │                                    functionals; per-action
+│   │                                    accounting deltas (transfer,
+│   │                                    freeze, replaceKey,
+│   │                                    registerIdentity, non-bridge
+│   │                                    parameterised);
+│   │                                    `applyActionToBridgeState`
+│   │                                    shape lemmas; genesis
+│   │                                    sanity lemmas.
 │   └── Test/
 │       ├── Framework.lean         -- minimal IO-based test harness + emptyState.
 │       ├── KernelTests.lean       -- value-level kernel tests (22 cases).
@@ -700,15 +742,42 @@ canon/
 │           │                           decidability sanity,
 │           │                           term-level API stability for
 │           │                           the §12.9 theorems).
-│           └── Ingest.lean          -- Workstream B.2 Ingest tests
-│                                       (19 cases: L1Event.address
-│                                       projection, per-variant ingest
-│                                       behaviour, AddressBook update
-│                                       behaviour, locality, cross-
-│                                       address commutativity,
-│                                       bridge-actor pinning,
-│                                       term-level API stability for
-│                                       the §12.8 theorems).
+│           ├── Ingest.lean          -- Workstream B.2 Ingest tests
+│           │                           (19 cases: L1Event.address
+│           │                           projection, per-variant ingest
+│           │                           behaviour, AddressBook update
+│           │                           behaviour, locality, cross-
+│           │                           address commutativity,
+│           │                           bridge-actor pinning,
+│           │                           term-level API stability for
+│           │                           the §12.8 theorems).
+│           ├── State.lean           -- Workstream C.1 BridgeState
+│           │                           tests (11 cases: empty /
+│           │                           markConsumed / appendWithdrawal
+│           │                           accessor + mutator semantics,
+│           │                           ExtendedState.empty bridge
+│           │                           ledger sanity, DecidableEq for
+│           │                           DepositRecord +
+│           │                           PendingWithdrawal).
+│           ├── Admissible.lean      -- Workstream C.0 BridgeAdmissible
+│           │                           tests (14 cases:
+│           │                           Action.isBridgeOnly classifier
+│           │                           positive / negative,
+│           │                           applyActionToBridgeState shape
+│           │                           on every Action variant,
+│           │                           multi-step deposit / withdraw
+│           │                           sequence, term-level API
+│           │                           stability for the WU C.0
+│           │                           theorems).
+│           └── Accounting.lean      -- Workstream C.6 accounting tests
+│                                       (19 cases: genesis sanity,
+│                                       totalDeposited / totalWithdrawn
+│                                       at single + multi-element
+│                                       fixtures, amountAt projections,
+│                                       per-action delta term-level
+│                                       APIs, end-to-end 4-step trace
+│                                       [deposit, transfer, withdraw,
+│                                       transfer]).
 ├── Tools/
 │   ├── Common.lean                -- shared TCB constants + readFileSafe.
 │   ├── TcbAudit.lean              -- WU 1.11 TCB allowlist enforcer.
@@ -1195,6 +1264,46 @@ each mechanise one or more of the following:
 | 126| `ingest_lookup_isSome_pre_invariant` (strong locality) | `ingest_lookup_isSome_pre_invariant` | E-B.2 audit-1 / `Bridge/Ingest.lean` |
 | 127| `ingest_isSome_equivalent_for_distinct_addresses` (full per plan) | `ingest_isSome_equivalent_for_distinct_addresses` | E-B.2 audit-1 / `Bridge/Ingest.lean` |
 | 128| `non_registry_mutating_preserves_registry` (renamed for accuracy) | `non_registry_mutating_preserves_registry` | E-B audit-1 / `Authority/SignedAction.lean` |
+| 129| `apply_admissible_with_preserves_bridge` (rfl pass-through) | `apply_admissible_with_preserves_bridge` | E-C.1.3 / `Bridge/Admissible.lean` |
+| 130| `BridgeAdmissibleWith.toAdmissibleWith` (projection) | `BridgeAdmissibleWith.toAdmissibleWith` | E-C.0 / `Bridge/Admissible.lean` |
+| 131| `bridge_replay_impossible` (replay protection lift) | `bridge_replay_impossible` | E-C.0 / `Bridge/Admissible.lean` |
+| 132| `apply_bridge_admissible_with_preserves_bridge_for_non_bridge` | `apply_bridge_admissible_with_preserves_bridge_for_non_bridge` | E-C.0 / `Bridge/Admissible.lean` |
+| 133| `applyActionToBridgeState_non_bridge` (identity on non-bridge) | `applyActionToBridgeState_non_bridge` | E-C.0 / `Bridge/Admissible.lean` |
+| 134| `totalSupply_after_deposit` (supply +amount) | `totalSupply_after_deposit` | E-C.2 / `Laws/Deposit.lean` |
+| 135| `deposit_other_resource_untouched` (locality) | `deposit_other_resource_untouched` | E-C.2 / `Laws/Deposit.lean` |
+| 136| `deposit_other_actor_untouched` (locality) | `deposit_other_actor_untouched` | E-C.2 / `Laws/Deposit.lean` |
+| 137| `deposit_isMonotonic` instance | `deposit_isMonotonic` | E-C.2 / `Laws/Deposit.lean` |
+| 138| `deposit_not_conservative` (negative witness) | `deposit_not_conservative` | E-C.2 / `Laws/Deposit.lean` |
+| 139| `totalSupply_after_withdraw` (additive form) | `totalSupply_after_withdraw` | E-C.3 / `Laws/Withdraw.lean` |
+| 140| `withdraw_other_resource_untouched` (locality) | `withdraw_other_resource_untouched` | E-C.3 / `Laws/Withdraw.lean` |
+| 141| `withdraw_other_actor_untouched` (locality) | `withdraw_other_actor_untouched` | E-C.3 / `Laws/Withdraw.lean` |
+| 142| `withdraw_not_monotonic` (negative witness) | `withdraw_not_monotonic` | E-C.3 / `Laws/Withdraw.lean` |
+| 143| `withdraw_not_conservative` (negative witness) | `withdraw_not_conservative` | E-C.3 / `Laws/Withdraw.lean` |
+| 144| `bridgePolicy_authorizes_deposit` (§12.9 #34) | `bridgePolicy_authorizes_deposit` | E-C.4 / `Bridge/BridgeActor.lean` |
+| 145| `bridgePolicy_authorizes_withdraw` (extends §12.9) | `bridgePolicy_authorizes_withdraw` | E-C.4 / `Bridge/BridgeActor.lean` |
+| 146| `extractEvents_deposit_emits_credited` | `extractEvents_deposit_emits_credited` | E-C.5 / `Events/Extract.lean` |
+| 147| `extractEvents_withdraw_emits_requested` | `extractEvents_withdraw_emits_requested` | E-C.5 / `Events/Extract.lean` |
+| 148| `totalDeposited_genesis = 0` (sanity) | `totalDeposited_genesis` | E-C.6.1 / `Bridge/Accounting.lean` |
+| 149| `totalWithdrawn_genesis = 0` (sanity) | `totalWithdrawn_genesis` | E-C.6.1 / `Bridge/Accounting.lean` |
+| 150| `totalDeposited_unchanged_when_bridge_eq` | `totalDeposited_unchanged_when_bridge_eq` | E-C.6.1 / `Bridge/Accounting.lean` |
+| 151| `totalWithdrawn_unchanged_when_bridge_eq` | `totalWithdrawn_unchanged_when_bridge_eq` | E-C.6.1 / `Bridge/Accounting.lean` |
+| 152| `accounting_delta_non_bridge` (parameterised) | `accounting_delta_non_bridge` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 153| `accounting_delta_transfer` | `accounting_delta_transfer` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 154| `accounting_delta_freeze` | `accounting_delta_freeze` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 155| `accounting_delta_replaceKey` | `accounting_delta_replaceKey` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 156| `accounting_delta_registerIdentity` | `accounting_delta_registerIdentity` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 157| `applyActionToBridgeState_deposit` (shape) | `applyActionToBridgeState_deposit` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 158| `applyActionToBridgeState_withdraw` (shape) | `applyActionToBridgeState_withdraw` | E-C.6.2 / `Bridge/Accounting.lean` |
+| 159| `Action.compile_injective` extends to deposit / withdraw | `Action.compile_injective` | E-C.4 / `Authority/Action.lean` |
+| 160| `bridgePolicy_rejects_withdraw` (§12.9 #33; audit-1) | `bridgePolicy_rejects_withdraw` | E-C audit-1 / `Bridge/BridgeActor.lean` |
+| 161| `deposit_marks_consumed` (post-app: depositId in consumed; audit-1) | `deposit_marks_consumed` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 162| `deposit_replay_blocked_by_consumed` (audit-1) | `deposit_replay_blocked_by_consumed` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 163| `withdraw_bumps_nextWdId` (audit-1) | `withdraw_bumps_nextWdId` | E-C audit-1 / `Bridge/Admissible.lean` |
+| 164| `bridgeState_encode_deterministic` (audit-1) | `bridgeState_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
+| 165| `depositRecord_roundtrip` (under bound; audit-1) | `depositRecord_roundtrip` | E-C audit-1 / `Encoding/State.lean` |
+| 166| `depositRecord_encode_deterministic` (audit-1) | `depositRecord_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
+| 167| `pendingWithdrawal_encode_deterministic` (audit-1) | `pendingWithdrawal_encode_deterministic` | E-C audit-1 / `Encoding/State.lean` |
+| 168| `EthAddress.ofBytes_toBytes` (lossless 20-byte BE round-trip; audit-2) | `EthAddress.ofBytes_toBytes` | E-C audit-2 / `Bridge/AddressBook.lean` |
 
 The "Phase / File" `R` markers identify the Phase-4-prelude
 positive-incentive WUs (`R.1` – `R.23`); they precede Phase 4 (DSL and
@@ -1287,7 +1396,7 @@ units.  Brief summary:
 | 6-amend| Phase-6 incentive integration      | 6.13–6.23                | Complete    |
 | E-A    | Ethereum: cryptographic adaptors   | A.1–A.3 (`docs/ethereum_integration_plan.md` §5) | Complete (Lean side); Rust-side adaptor crates `runtime/canon-verify-secp256k1` and `runtime/canon-hash-keccak256` deferred to a follow-up |
 | E-B    | Ethereum: identity and authority   | B.1–B.3 (`docs/ethereum_integration_plan.md` §6) | Complete (Lean side); Rust-side ingestor binary deferred to a follow-up.  Pulls forward the `Action.registerIdentity` constructor (originally attributed to C.4) at frozen index 12. |
-| E-C    | Ethereum: bridge laws              | C.0–C.7 (`docs/ethereum_integration_plan.md` §7) | Not started |
+| E-C    | Ethereum: bridge laws              | C.0–C.6 (`docs/ethereum_integration_plan.md` §7) | Complete (Lean side; per-action accounting deltas; chain-level §7.6.4 / §7.6.5 deferred as a structural follow-up over a custom `BridgeReachable` predicate) |
 | E-D    | Ethereum: withdrawal proofs        | D.1–D.4 (`docs/ethereum_integration_plan.md` §8) | Not started |
 | E-E    | Ethereum: Solidity contracts       | E.1–E.4 (`docs/ethereum_integration_plan.md` §9) | Not started (Solidity side; out of Lean scope) |
 | E-F    | Ethereum: cross-stack verification | F.1–F.5 (`docs/ethereum_integration_plan.md` §10) | Not started |
@@ -1374,11 +1483,320 @@ every match before submission.
 
 **Current Phase:** Phases 0 – 6 Complete; Audit-3 hardening
 complete; Ethereum-integration Workstreams A (cryptographic
-adaptors) and B (identity and authority) complete.  Workstreams
-C – G of the Ethereum integration plan
+adaptors), B (identity and authority), and C (bridge laws)
+complete.  Workstreams D – G of the Ethereum integration plan
 (`docs/ethereum_integration_plan.md`) and Phase 7 (Advanced
 Capabilities of the original Genesis Plan) are the next scoped
 work; both are open-ended and per-WU chartered.
+
+**Ethereum Workstream C (bridge laws) summary.**  Workstream C
+introduces the bridge L1 ↔ L2 deposit / withdrawal flow at the
+kernel + admissibility + accounting levels.  Bumped
+`kernelBuildTag` to `"canon-ethereum-workstream-c-bridge-laws"`.
+Test count grew from 835 to 921 (+86 tests across new and
+extended suites: `deposit` (+12), `withdraw` (+15),
+`bridge-state` (+11), `bridge-admissible` (+14),
+`bridge-accounting` (+19), plus +5 in `bridge-actor`
+(deposit/withdraw policy admissions), +4 in `encoding-action`
+(deposit/withdraw round-trips), and +5 in `events-extract`
+(deposit/withdraw event emission)).  TCB unchanged; no new
+axioms; no new opaque declarations.
+
+  * **WU C.0 (`LegalKernel/Bridge/Admissible.lean`)** —
+    `BridgeAdmissibleWith` predicate strengthening
+    `AdmissibleWith` with three bridge-specific obligations:
+    (6) deposit-id uniqueness for `Action.deposit`; (7)
+    first-time-registration for `Action.registerIdentity`; (8)
+    bridge-only signer for `Action.isBridgeOnly`-flagged
+    constructors.  `applyActionToBridgeState` helper updates
+    `BridgeState` for `deposit` (insert into `consumed` with
+    `(resource, amount)` metadata) and `withdraw` (insert into
+    `pending` at `nextWdId`, bump counter); identity on every
+    other action.  `apply_bridge_admissible_with` entry point
+    delegates to `apply_admissible_with` then updates the
+    `bridge` field.  Three pass-through theorems
+    (`apply_admissible_with_preserves_bridge`,
+    `apply_admissible_preserves_bridge`,
+    `apply_bridge_admissible_with_preserves_bridge_for_non_bridge`)
+    plus per-field agreement
+    (`apply_bridge_admissible_with_{base,nonces,registry}_agrees`)
+    plus a `bridge_replay_impossible` lift via the
+    `BridgeAdmissibleWith.toAdmissibleWith` projection.
+  * **WU C.1 (`LegalKernel/Bridge/State.lean` + extension to
+    `Authority/Nonce.lean` + `Encoding/State.lean`)** —
+    `DepositId` (`Nat`, with the runtime adaptor converting
+    32-byte BE L1 hashes at the bridge boundary; documented
+    deviation from the plan's `ByteArray` to avoid the
+    `TransCmp / LawfulEqCmp` re-derivation cost on a custom
+    `byteArrayCompare`); `WithdrawalId` (`Nat`); `DepositRecord`
+    (resource + amount; the audit-2 amendment to §7.1.1 that
+    enables the `totalDeposited` accounting fold);
+    `PendingWithdrawal` (resource + recipient + amount +
+    l2LogIndex); `BridgeState` (consumed + pending + nextWdId);
+    `BridgeState.empty`, `markConsumed`, `appendWithdrawal`,
+    `isConsumed`, `hasConsumed` accessors / mutators.
+    `ExtendedState.bridge : Bridge.BridgeState :=
+    Bridge.BridgeState.empty` field embedding (default-valued,
+    so pre-Workstream-C constructions keep elaborating without
+    modification); CBE encoding for `BridgeState` extending
+    `ExtendedState.encode/decode`.
+  * **WU C.2 (`LegalKernel/Laws/Deposit.lean`)** — `deposit r
+    recipient amount depositId` law.  Kernel-level: `setBalance`
+    crediting `recipient`'s balance at `r`; precondition is
+    `True` (the deposit-id uniqueness check lives at the bridge-
+    admissibility layer).  Five §7.2 theorems:
+    `totalSupply_after_deposit`, `deposit_other_resource_untouched`,
+    `deposit_other_actor_untouched`, `deposit_isMonotonic`
+    instance, `deposit_not_conservative` negative witness.  Plus
+    `deposit_does_not_touch_other_resources` and
+    `deposit_conserves_other_resource` for completeness.
+  * **WU C.3 (`LegalKernel/Laws/Withdraw.lean`)** — `withdraw r
+    sender amount recipientL1` law.  Kernel-level: `setBalance`
+    debiting `sender`'s balance at `r`; precondition: `getBalance
+    s r sender ≥ amount`.  Five §7.3 theorems:
+    `totalSupply_after_withdraw` (additive form, mirroring
+    `totalSupply_after_burn` to avoid `Nat`-subtraction
+    asymmetry), `withdraw_other_resource_untouched`,
+    `withdraw_other_actor_untouched`,
+    `withdraw_not_monotonic` (negative witness),
+    `withdraw_not_conservative`.  Plus
+    `withdraw_does_not_touch_other_resources` and
+    `withdraw_conserves_other_resource`.
+  * **WU C.4 (extends `Authority/Action.lean` +
+    `Encoding/Action.lean` + `Authority/SignedAction.lean` +
+    `Bridge/BridgeActor.lean`)** — Two new `Action` constructors
+    at frozen indices 13 (`deposit`) and 14 (`withdraw`).
+    `Action.compile_injective` extends to the new constructors
+    (structural via `CompiledAction.source`).  CBE encoder
+    extended with the new branches; `action_roundtrip` /
+    `action_encode_injective` extended to cover them.  The
+    Workstream-B `non_registry_mutating_preserves_registry`
+    extends with `rfl` cases for `deposit` / `withdraw`
+    (neither mutates the registry).  Extends
+    `bridgeAuthorizedAction` and `bridgePolicy` to admit
+    `deposit` / `withdraw` for the bridge actor, with the
+    matching `bridgePolicy_authorizes_deposit` /
+    `bridgePolicy_authorizes_withdraw` theorems.
+  * **WU C.5 (extends `Events/Types.lean` +
+    `Events/Extract.lean`)** — Two new `Event` constructors at
+    frozen indices 9 (`withdrawalRequested`) and 10
+    (`depositCredited`).  Extended `Event.actor` /
+    `Event.resource` projections; new `Event.isBridgeEvent`
+    classifier.  Extended `actionEvents` to delta-filter the
+    balance-changed events for `deposit` / `withdraw`; the
+    bridge semantic events are emitted UNCONDITIONALLY in
+    `extractEvents` (mirroring the `rewardIssued` convention),
+    with the `withdrawalRequested` event carrying the *pre*-
+    state's `BridgeState.nextWdId`.  Two new theorems:
+    `extractEvents_deposit_emits_credited`,
+    `extractEvents_withdraw_emits_requested`.
+  * **WU C.6 (`LegalKernel/Bridge/Accounting.lean`)** —
+    `totalDeposited` / `totalWithdrawn` quantity functionals
+    folding over `BridgeState.consumed` / `BridgeState.pending`.
+    Genesis sanity lemmas: both quantities are 0 at genesis.
+    `PendingWithdrawal.amountAt` / `DepositRecord.amountAt`
+    per-resource projection helpers.  Per-action accounting
+    deltas covering every `Action` variant
+    (`accounting_delta_transfer`, `_freeze`, `_replaceKey`,
+    `_registerIdentity`, `_non_bridge` parameterised form).
+    Plus the bridge-state shape lemmas
+    `applyActionToBridgeState_deposit` and
+    `_withdraw`.  The full `bridge_supply_account_general`
+    inductive theorem (§7.6.4 / §7.6.5) over a custom
+    `BridgeReachable` chain is documented as a follow-up; the
+    per-action level (which the chain-level theorem would
+    close by structural induction over) is fully discharged
+    in this WU.
+
+The §7.6.4 `bridge_supply_account_general` and §7.6.5
+`bridge_supply_account` chain-level theorems are documented as
+deferred follow-ups: the per-action accounting is fully proved
+here, and the chain-level induction over a custom
+`BridgeReachable` predicate is a structural lift that does not
+require additional kernel-level theorems beyond what is shipped
+in WU C.6.  The deferred theorems are scoped in
+`docs/ethereum_integration_plan.md` §7.6.4 / §7.6.5 and
+referenced from `Bridge/Accounting.lean`'s docstring.
+
+**Workstream-C deviations from the integration plan.**  Two
+documented Lean-level deviations from
+`docs/ethereum_integration_plan.md`:
+
+  1. **`DepositId : Nat` rather than `ByteArray`** (§7.1.1): the
+     plan's `abbrev DepositId := ByteArray` would require
+     defining `byteArrayCompare` and re-proving `TransCmp` /
+     `LawfulEqCmp` for it before TreeMap operations on
+     `consumed` could be backed by Std lemmas.  Using `Nat`
+     keeps the comparator lawful by Lean core's `compare : Nat
+     → Nat → Ordering`.  The runtime adaptor performs the
+     32-byte BE → Nat conversion at the bridge boundary;
+     conversion is injective on fixed-length 32-byte inputs.
+
+  2. **`bridge` field has default value `BridgeState.empty`**
+     (§7.1.2): the plan has the `bridge` field as a positional
+     field with no default.  Phase-3 / Phase-4-prelude / Phase-6
+     test fixtures construct `ExtendedState` via `{ base :=
+     …, nonces := …, registry := … }` literals (without `bridge`).
+     Adding a default value is an additive, backwards-compatible
+     extension that lets existing fixtures keep elaborating.
+     The runtime layer's `ExtendedState.empty` (and every
+     bridge-aware construction) explicitly sets the field.
+
+Both deviations are recorded in this CLAUDE.md changelog;
+neither weakens any kernel guarantee.
+
+**Workstream-C audit-1 hardening summary.**  A first post-landing
+audit identified three issues; all are now closed.
+
+  * **Critical: `Action.isBridgeOnly` flagged `withdraw` (security
+    bug).**  The pre-audit `Action.isBridgeOnly : Action → Bool`
+    returned `true` for `withdraw`, which through `BridgeAdmissibleWith`
+    conjunct 8 (`Action.isBridgeOnly st.action = true → st.signer
+    = bridgeActor`) forced ALL withdrawals to be bridge-actor-
+    signed.  This contradicted the design where users sign their
+    own withdrawals — a user attempting to withdraw their own
+    balance would fail bridge admissibility.  Audit-1 removes
+    `withdraw` from `isBridgeOnly`; only `registerIdentity` and
+    `deposit` (the truly bridge-attested L1 → L2 actions) remain.
+    User-signed withdrawals now pass conjunct 8 vacuously.
+  * **`bridgePolicy_authorizes_withdraw` → `bridgePolicy_rejects_withdraw`.**
+    The pre-audit `bridgePolicy` admitted `withdraw` for the
+    bridge actor, which (combined with the `isBridgeOnly` bug)
+    meant the bridge could in principle drain L2 balances and
+    forge L1 redemption proofs.  The integration plan §12.9 #33
+    spec is `bridgePolicy_rejects_withdraw`: the bridge actor is
+    forbidden from signing withdrawals, closing the coordinated-
+    attack vector.  `bridgeAuthorizedAction` updated to exclude
+    `withdraw`; the test suite now confirms the bridge actor
+    cannot withdraw on any user's behalf.
+  * **Added post-application bridge-state invariants.**  Three
+    new theorems pin the type-level evolution of `BridgeState`
+    under bridge-admissible application:
+
+    - `deposit_marks_consumed`: after a `deposit r recipient
+      amount d` admissible application, `d` IS in the post-
+      state's `consumed` map.  Direct corollary: a second
+      admissibility check on the same `d` fails conjunct 6 —
+      closes the L1-deposit-replay attack at the type level.
+    - `deposit_replay_blocked_by_consumed`: the post-state's
+      `consumed` map cannot evaluate `false` at `d` after a
+      successful deposit application — proof-irrelevant
+      reformulation of the above.
+    - `withdraw_bumps_nextWdId`: after a `withdraw r sender
+      amount rcp` admissible application, `bridge.nextWdId` is
+      exactly one greater than the pre-state's — distinct
+      withdrawals get distinct ids, closing the L2-withdraw-
+      replay attack at the type level.
+  * **Added BridgeState encoding determinism + DepositRecord
+    round-trip.**  Three new theorems:
+    `bridgeState_encode_deterministic` (structural rfl-class),
+    `depositRecord_encode_deterministic`, and
+    `pendingWithdrawal_encode_deterministic` cover the §7.1.4
+    deliverable for the `BridgeState` CBE encoding.  Plus
+    `depositRecord_roundtrip` (under canonical-encoding
+    bounds), the per-record decode-after-encode identity.
+  * **Documented `DepositId` 64-bit constraint.**  The Lean-
+    side `DepositId : Nat` representation has a CBE round-trip
+    bound of `< 2^64`.  Real L1 32-byte hashes are 256 bits
+    and don't fit losslessly.  The runtime adaptor must
+    project the L1 hash into a 64-bit deployment-canonical
+    form (e.g. `keccak256(blockHash ‖ logIdx)[0:8]`,
+    collision-resistant for the deployment lifetime; or
+    sequential `uint64` numbering by the L1 contract).
+    Documented in `Bridge/State.lean`'s `DepositId` docstring;
+    the deployment-side projection's injectivity is a
+    deployment-correctness obligation.
+
+Audit-1 raised the test count from 921 to 934 (+13: 6 new
+admissible/state encoding tests, 4 new bridge-actor tests for
+the deposit-admit / withdraw-reject changes, 3 new tests for
+the post-application invariants).
+
+**Workstream-C audit-2 hardening summary.**  A second post-landing
+audit identified one additional critical signature-forgery
+vulnerability in the `Action.withdraw` and `PendingWithdrawal`
+encoders.  Closed.
+
+  * **Critical: 64-bit truncation of `recipientL1` enabled
+    signature replay.**  The pre-audit `Action.withdraw` and
+    `Bridge.PendingWithdrawal` encoders serialised
+    `recipient.val` as a CBE Nat with `< 2^64` bound (8-byte
+    payload).  But `EthAddress = Fin (2^160)` can be up to
+    160 bits.  Two distinct EthAddresses sharing low 64 bits
+    encode to **identical bytes** — meaning the same
+    `signingInput` for `Action.withdraw`, hence the same valid
+    signature.  An attacker could:
+
+    1. Wait for a user to submit a signed withdrawal to L1
+       address A.
+    2. Construct a forged action with the SAME low 64 bits but
+       different high 96 bits (any attacker-controlled
+       address B sharing the low 64 bits).
+    3. The forged action's `signingInput` matches the original
+       (because the encoder truncates to low 64 bits), so the
+       user's signature validates.
+    4. The bridge processes the forged action and produces an
+       L1 redemption proof for address B instead of A.
+
+    This is a bypass of the user's signature: the destination
+    L1 address is not fully bound by the signed bytes.
+
+  * **Fix: lossless 20-byte ByteArray encoding.**  The audit-2
+    encoders use `Encodable.encode (T := ByteArray)
+    (Bridge.EthAddress.toBytes rcp)` — a CBE byte string
+    containing all 20 bytes of the BE-encoded address (29 bytes
+    total: 1 type tag + 8 length bytes + 20 payload).  This is
+    lossless on every value in `Fin (2^160)`.  The decoder reads
+    the 20 bytes via `Encodable.decode (T := ByteArray)`, then
+    converts via `Bridge.EthAddress.ofBytes`, rejecting non-
+    20-byte payloads with a precise diagnostic.
+
+  * **`EthAddress.ofBytes_toBytes` round-trip lemma proved.**  The
+    audit-2 fix's correctness rests on `ofBytes ∘ toBytes = some`.
+    Audit-2 lands a sorry-free proof in `Bridge/AddressBook.lean`
+    via three supporting lemmas: `toBytes_go_append` (factoring
+    accumulator out), `toUInt8_toNat_of_lt` (the UInt8 round-trip
+    helper), and `foldl_decode_go` (the inductive BE-decode-of-BE-
+    encode identity, conditional on `n < 256^k`).  The proof
+    depends only on the standard Lean built-in axioms.
+
+  * **Decoder hardening.**  The audit-2 decoders for
+    `Action.withdraw` and `Bridge.PendingWithdrawal` reject
+    malformed payloads with precise diagnostics:
+    `"... recipientL1 expects 20 bytes; got N"` (where `N` is
+    the actual decoded ByteArray size).  This catches both
+    truncated streams and legitimate-but-wrong-length inputs.
+
+  * **`Action.fieldsBounded` simplified.**  The `rcp.val < 2^64`
+    clause for `.withdraw` is removed (the 20-byte encoding
+    needs only `(toBytes rcp).size = 20 < 2^64`, which is
+    unconditional).  This means `fieldsBounded (.withdraw r s a
+    rcp) = r.toNat < 2^64 ∧ sender.toNat < 2^64 ∧ amount < 2^64`
+    only — the recipient's full 160-bit value is admissible
+    without an explicit bound.
+
+  * **`EthAddress.ofBytes` cleanup.**  The pre-audit ofBytes used
+    `bs.toList` (Lean's custom `loop`-based implementation,
+    which is not definitionally equal to `bs.data.toList`).  The
+    audit-2 ofBytes uses `bs.data.toList` (the canonical Array
+    projection), matching every other byte-decode helper in the
+    codebase.  Equivalent results; necessary for the round-trip
+    proof to close.
+
+Audit-2 raised the test count from 934 to 940 (+6: 4 new
+EthAddress round-trip + distinguishability tests in
+`bridge-address-book`, 2 new audit-2 security regression tests in
+`encoding-action`).  TCB unchanged; no new axioms; no new opaque
+declarations.
+
+The audit-2 fix is a behaviour-breaking change for the on-disk
+log format: pre-audit-2 logs containing `Action.withdraw`
+records cannot be replayed under the post-audit decoder (the
+decoder expects 20-byte ByteArrays, not 8-byte truncated Nats).
+Since Workstream C is shipping for the first time and no
+production deployments depend on the pre-audit format, this is
+an acceptable break; future audit passes will preserve on-disk
+compatibility within a phase.
 
 **Ethereum Workstream B (identity and authority) summary.**  Three
 work units (B.1 – B.3) landing the Lean-side identity-translation

@@ -175,6 +175,69 @@ def tests : List TestCase :=
           bridgePolicy_authorizes_registerIdentity
         pure ()
     }
+  , -- ## Workstream C.4 (audit-1): deposit admitted, withdraw rejected
+    { name := "bridgePolicy authorises deposit by bridge actor"
+    , body := do
+        if ¬ (decide (bridgePolicy.authorized 0 (.deposit 1 10 100 42))) then
+          throw <| IO.userError "expected bridge to authorise deposit"
+    }
+  , { name := "bridgePolicy rejects withdraw by bridge actor (§12.9 #33)"
+    , body := do
+        -- Workstream-C audit-1: withdrawals are user-initiated; the
+        -- bridge actor must NOT be authorised to withdraw on a user's
+        -- behalf.  This closes a coordinated-attack vector where a
+        -- compromised bridge actor could drain L2 balances and then
+        -- forge an L1 redemption proof.
+        if (decide (bridgePolicy.authorized 0
+                     (.withdraw 1 10 50 LegalKernel.Bridge.EthAddress.zero))) then
+          throw <| IO.userError "bridge unexpectedly authorised withdraw"
+    }
+  , { name := "bridgePolicy_authorizes_deposit: term-level API"
+    , body := do
+        let _f : (r : ResourceId) → (recipient : ActorId) → (amount : Amount) →
+                 (depositId : LegalKernel.Bridge.DepositId) →
+                 bridgePolicy.authorized bridgeActor
+                   (.deposit r recipient amount depositId) :=
+          bridgePolicy_authorizes_deposit
+        pure ()
+    }
+  , { name := "bridgePolicy_rejects_withdraw: term-level API"
+    , body := do
+        let _f : (r : ResourceId) → (sender : ActorId) → (amount : Amount) →
+                 (recipientL1 : LegalKernel.Bridge.EthAddress) →
+                 ¬ bridgePolicy.authorized bridgeActor
+                   (.withdraw r sender amount recipientL1) :=
+          bridgePolicy_rejects_withdraw
+        pure ()
+    }
+  , { name := "bridgePolicy rejects deposit by non-bridge signer"
+    , body := do
+        if (decide (bridgePolicy.authorized 5 (.deposit 1 10 100 42))) then
+          throw <| IO.userError "non-bridge signer should be rejected"
+    }
+  , { name := "bridgePolicy rejects withdraw by non-bridge signer too"
+    , body := do
+        -- Withdrawals are not under bridgePolicy at all; this just
+        -- confirms the policy uniformly rejects withdraw regardless
+        -- of signer.  User-signed withdrawals go through a different
+        -- (per-actor) policy.
+        if (decide (bridgePolicy.authorized 5
+                     (.withdraw 1 10 50 LegalKernel.Bridge.EthAddress.zero))) then
+          throw <| IO.userError "non-bridge signer should be rejected"
+    }
+  , { name := "bridgeAuthorizedAction returns false for withdraw"
+    , body := do
+        assertEq (expected := false)
+          (actual := bridgeAuthorizedAction
+                       (.withdraw 1 10 50 LegalKernel.Bridge.EthAddress.zero))
+          "withdraw not in bridge's set"
+    }
+  , { name := "bridgeAuthorizedAction returns true for deposit"
+    , body := do
+        assertEq (expected := true)
+          (actual := bridgeAuthorizedAction (.deposit 1 10 100 42))
+          "deposit in bridge's set"
+    }
   , { name := "bridgePolicy_rejects_non_bridge_signer: term-level API"
     , body := do
         let _f : (signer : ActorId) → (action : Action) → signer ≠ bridgeActor →

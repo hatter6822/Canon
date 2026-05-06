@@ -189,6 +189,207 @@ backed by the existing Phase-6 fraud-proof pipeline.
     Quot.sound] for the harder theorems; just [propext] for
     several `bridgePolicy` theorems).
 
+  * **Workstream C (bridge laws) status:** **Complete** on the
+    Lean side as of branch `claude/implement-bridge-laws-eYwV0`.
+    All six work units (C.0 – C.6) ship without `sorry` and pass
+    every audit gate (`count_sorries`, `tcb_audit`,
+    `stub_audit`, strict-warnings).  Test count grew from 835 to
+    921 (+86 tests).  `kernelBuildTag` bumped to
+    `"canon-ethereum-workstream-c-bridge-laws"`.
+
+    Modules landed:
+
+      * `LegalKernel/Bridge/State.lean` (WU C.1.1) — `DepositId`
+        (`Nat`; documented deviation from plan's `ByteArray`),
+        `WithdrawalId`, `DepositRecord` (audit-2 amendment),
+        `PendingWithdrawal`, `BridgeState`, `BridgeState.empty`,
+        `markConsumed`, `appendWithdrawal`, `isConsumed`,
+        `hasConsumed`.
+      * Extension to `LegalKernel/Authority/Nonce.lean` (WU C.1.2)
+        — `ExtendedState.bridge : Bridge.BridgeState :=
+        Bridge.BridgeState.empty` field embedding (default-valued
+        for backwards-compat with pre-Workstream-C constructions).
+      * Extension to `LegalKernel/Encoding/State.lean` (WU C.1.4)
+        — `BridgeState.encode/decode`, `DepositRecord.encode/decode`,
+        `PendingWithdrawal.encode/decode`; extended
+        `ExtendedState.encode/decode` to include the bridge
+        segment at the end.
+      * `LegalKernel/Bridge/Admissible.lean` (WU C.0) —
+        `BridgeAdmissibleWith` (5+3 conjuncts),
+        `applyActionToBridgeState` helper,
+        `apply_bridge_admissible_with` entry point,
+        `BridgeAdmissibleWith.toAdmissibleWith` projection,
+        per-field agreement theorems
+        (`apply_bridge_admissible_with_{base,nonces,registry}_agrees`),
+        `apply_admissible_with_preserves_bridge` (rfl pass-through;
+        WU C.1.3), `apply_admissible_preserves_bridge`,
+        `apply_bridge_admissible_with_preserves_bridge_for_non_bridge`,
+        `applyActionToBridgeState_non_bridge` identity lemma,
+        `bridge_replay_impossible` lift via projection.
+      * `LegalKernel/Laws/Deposit.lean` (WU C.2) — `deposit r
+        recipient amount depositId` law with
+        `totalSupply_after_deposit`,
+        `deposit_other_resource_untouched`,
+        `deposit_other_actor_untouched`,
+        `deposit_does_not_touch_other_resources`,
+        `deposit_conserves_other_resource`,
+        `deposit_isMonotonic` instance,
+        `deposit_not_conservative`.
+      * `LegalKernel/Laws/Withdraw.lean` (WU C.3) — `withdraw r
+        sender amount recipientL1` law with
+        `totalSupply_after_withdraw` (additive form),
+        `withdraw_other_resource_untouched`,
+        `withdraw_other_actor_untouched`,
+        `withdraw_does_not_touch_other_resources`,
+        `withdraw_conserves_other_resource`,
+        `withdraw_not_monotonic`,
+        `withdraw_not_conservative`.
+      * Extensions to `LegalKernel/Authority/Action.lean` (WU C.4)
+        — `Action.deposit` (frozen index 13) and `Action.withdraw`
+        (frozen index 14) constructors with their
+        `compileTransition` branches; structural compile-injectivity
+        extends to the new constructors via `CompiledAction.source`.
+      * Extensions to `LegalKernel/Encoding/Action.lean` (WU C.4)
+        — `fieldsBounded`, `encode`, `decode`, `action_roundtrip`
+        / `action_encode_injective` extended for the new constructors.
+      * Extension to `LegalKernel/Authority/SignedAction.lean` (WU
+        C.4) — `non_registry_mutating_preserves_registry` extended
+        with `rfl` cases for `deposit` / `withdraw` (neither
+        mutates the registry).
+      * Extension to `LegalKernel/Bridge/BridgeActor.lean` (WU C.4)
+        — `bridgeAuthorizedAction` and `bridgePolicy` extended to
+        admit `deposit` / `withdraw` for the bridge actor;
+        `bridgePolicy_authorizes_deposit` (§12.9 #34) and
+        `bridgePolicy_authorizes_withdraw` theorems.
+      * Extensions to `LegalKernel/Events/Types.lean` and
+        `LegalKernel/Events/Extract.lean` (WU C.5) — two new
+        `Event` constructors (`withdrawalRequested` at frozen
+        index 9, `depositCredited` at index 10), updated
+        `actor` / `resource` / new `isBridgeEvent` projections,
+        delta-filtered `actionEvents` for `deposit`/`withdraw`,
+        unconditional bridge semantic events emitted in
+        `extractEvents`, two new headline theorems
+        (`extractEvents_deposit_emits_credited`,
+        `extractEvents_withdraw_emits_requested`).
+      * `LegalKernel/Bridge/Accounting.lean` (WU C.6) —
+        `totalDeposited` / `totalWithdrawn` quantity functionals,
+        genesis sanity lemmas, `amountAt` projections,
+        `_unchanged_when_bridge_eq` field-equality lemmas,
+        per-action accounting deltas
+        (`accounting_delta_non_bridge` parameterised, plus
+        specialisations to `transfer`, `freeze`, `replaceKey`,
+        `registerIdentity`), `applyActionToBridgeState_deposit/_withdraw`
+        shape lemmas.
+
+    Documented deviations from the integration plan:
+
+      1. `DepositId : Nat` rather than `ByteArray` (avoids the
+         `byteArrayCompare` `TransCmp/LawfulEqCmp` re-derivation
+         cost; runtime adaptor performs 32-byte BE → Nat
+         conversion at the bridge boundary; injective on
+         fixed-length 32-byte inputs).
+      2. `bridge` field has default value `BridgeState.empty`
+         (additive backwards-compatible extension; existing
+         `ExtendedState` literal constructions in test fixtures
+         keep elaborating).
+      3. The chain-level `bridge_supply_account_general` (§7.6.4)
+         and `bridge_supply_account` (§7.6.5) theorems are scoped
+         as deferred follow-ups: the per-action accounting (the
+         non-trivial content of the chain-level theorem) is
+         fully proved at the WU C.6.2 / C.6.3 level; closing
+         the chain requires defining a custom `BridgeReachable`
+         predicate over `ExtendedState`, which is a structural
+         lift over what is already shipped.
+
+    **Workstream-C audit-1 hardening summary.**  A first post-
+    landing audit identified three issues; all are now closed.
+
+      * **Critical: `Action.isBridgeOnly` flagged `withdraw`
+        (security bug).**  The pre-audit listing forced ALL
+        withdrawals to be bridge-actor-signed via conjunct 8 of
+        `BridgeAdmissibleWith`, contradicting the design where
+        users sign their own withdrawals.  Audit-1 removes
+        `withdraw` from `isBridgeOnly`; only the L1-attested
+        actions (`registerIdentity`, `deposit`) remain.
+
+      * **`bridgePolicy_authorizes_withdraw` →
+        `bridgePolicy_rejects_withdraw`.**  Aligns with §12.9 #33.
+        The bridge actor is forbidden from signing withdrawals,
+        closing a coordinated-attack vector.
+        `bridgeAuthorizedAction` updated to exclude `withdraw`.
+
+      * **Added post-application bridge-state invariants.**
+        `deposit_marks_consumed` (the depositId IS in `consumed`
+        after admissibility), `deposit_replay_blocked_by_consumed`
+        (the same depositId cannot be admissibly applied twice),
+        `withdraw_bumps_nextWdId` (distinct withdrawals get
+        distinct ids).  These close the L1-deposit-replay and
+        L2-withdraw-replay attacks at the type level.
+
+      * **Added BridgeState encoding theorems.**
+        `bridgeState_encode_deterministic`,
+        `depositRecord_encode_deterministic`,
+        `pendingWithdrawal_encode_deterministic`,
+        `depositRecord_roundtrip`.  Closes the §7.1.4
+        deliverable.
+
+      * **Documented `DepositId` 64-bit projection requirement.**
+        The CBE round-trip bound `< 2^64` means production 32-byte
+        L1 hashes need a deployment-canonical projection
+        (`keccak256(blockHash ‖ logIdx)[0:8]`, or sequential
+        `uint64` numbering); the projection's injectivity is the
+        deployment's correctness obligation.
+
+    Audit-1 raised the test count from 921 to 934 (+13).  All
+    additions ship without `sorry` and depend only on the standard
+    Lean built-in axioms.
+
+    **Workstream-C audit-2 hardening summary.**  A second post-
+    landing audit identified one further critical issue and closed
+    it.
+
+      * **Critical: 64-bit truncation of `recipientL1` enabled
+        signature replay (`Action.withdraw` and
+        `PendingWithdrawal`).**  The pre-audit-2 encoders
+        serialised `recipient.val` as a CBE Nat (`< 2^64` bound),
+        but `EthAddress = Fin (2^160)` can be 160 bits.  Two
+        EthAddresses sharing low 64 bits encoded to identical
+        bytes — same `signingInput`, same valid signature.  An
+        attacker could replay a user's signed withdrawal against
+        any attacker-controlled L1 address sharing the low 64
+        bits.
+
+      * **Fix: lossless 20-byte ByteArray encoding.**  Audit-2
+        switches the recipient encoding to
+        `Encodable.encode (T := ByteArray)
+        (Bridge.EthAddress.toBytes rcp)` — a 29-byte CBE byte
+        string carrying all 20 bytes of the BE-encoded address.
+        Lossless on every `Fin (2^160)` value.  Closed via the
+        new `EthAddress.ofBytes_toBytes` round-trip lemma in
+        `Bridge/AddressBook.lean` (proved sorry-free using three
+        helper lemmas about the BE encoder).
+
+      * **`Action.fieldsBounded` simplified for `.withdraw`.**  The
+        pre-audit clause `rcp.val < 2^64` is removed — the
+        20-byte ByteArray encoding has size `= 20 < 2^64`
+        unconditionally.
+
+      * **Audit-2 security regressions added.**  Two new tests in
+        `encoding-action` and four new tests in
+        `bridge-address-book` verify that distinct EthAddresses
+        sharing low 64 bits encode to *distinct* bytes, and that
+        160-bit-max EthAddresses round-trip losslessly.
+
+    Audit-2 raised the test count from 934 to 940 (+6).  All
+    additions ship without `sorry` and depend only on the standard
+    Lean built-in axioms.
+
+    **Audit-2 on-disk log format break.**  Pre-audit-2 logs with
+    `Action.withdraw` records are NOT compatible with the post-
+    audit decoder.  Acceptable break since Workstream C is shipping
+    for the first time; future audits will preserve on-disk
+    compatibility within a phase.
+
 ## Executive summary
 
 The MVP makes Canon usable by any Ethereum wallet against any

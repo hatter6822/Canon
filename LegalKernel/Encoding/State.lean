@@ -75,6 +75,7 @@ invariant.
 -/
 
 import LegalKernel.Authority.Nonce
+import LegalKernel.Bridge.State
 import LegalKernel.Encoding.Encodable
 import LegalKernel.Encoding.SignedAction
 
@@ -271,11 +272,181 @@ def NonceState.encode (ns : NonceState) : Stream :=
 def KeyRegistry.encodeMap (kr : KeyRegistry) : Stream :=
   encodeSortedPairs (kr.toList.map (fun (a, pk) => (a.toNat, pk)))
 
-/-- Encode an `ExtendedState` as `[base ++ nonces ++ registry]`. -/
+/-! ## BridgeState encoding (Workstream C.1.4)
+
+`BridgeState` carries three fields: a `consumed : TreeMap DepositId
+DepositRecord compare` (DepositId is `Nat`; DepositRecord is
+`(resource, amount)`), a `pending : TreeMap WithdrawalId
+PendingWithdrawal compare` (WithdrawalId is `Nat`;
+PendingWithdrawal is `(resource, recipient, amount, l2LogIndex)`),
+and `nextWdId : Nat`.
+
+Encoded canonically as the concatenation of three sorted-pair-list
+maps + a CBE uint:
+
+```
+BridgeState  → consumed-map ++ pending-map ++ nextWdId
+```
+
+Each inner record is encoded as a fixed-order field concatenation. -/
+
+/-- Encode a single `DepositRecord` (resource + amount) as the
+    concatenation of two CBE uints. -/
+def Bridge.DepositRecord.encode (rec : Bridge.DepositRecord) : Stream :=
+  Encodable.encode (T := Nat) rec.resource.toNat ++
+  Encodable.encode (T := Nat) rec.amount
+
+/-- Decode a `DepositRecord`. -/
+def Bridge.DepositRecord.decode (s : Stream) :
+    Except DecodeError (Bridge.DepositRecord × Stream) :=
+  match Encodable.decode (T := Nat) s with
+  | .ok (resN, s₁) =>
+    if h : resN < 18446744073709551616 then
+      match Encodable.decode (T := Nat) s₁ with
+      | .ok (amount, s₂) =>
+        .ok ({ resource := resN.toUInt64, amount := amount }, s₂)
+      | .error e => .error e
+    else
+      let _ := h
+      .error (.invalidLength s!"DepositRecord.resource {resN} ≥ 2^64")
+  | .error e => .error e
+
+/-- Wrap a `DepositRecord` payload as a length-prefixed CBE byte
+    string for placement in the outer `consumed` map's value slot.
+    Mirrors the inner-map framing pattern in `BalanceMap.encodeAsBytes`. -/
+private def Bridge.DepositRecord.encodeAsBytes (rec : Bridge.DepositRecord) :
+    ByteArray :=
+  ByteArray.mk (Bridge.DepositRecord.encode rec).toArray
+
+/-- Encode the `consumed` field of a `BridgeState`. -/
+def Bridge.BridgeState.encodeConsumed (bs : Bridge.BridgeState) : Stream :=
+  encodeSortedPairs (bs.consumed.toList.map (fun (d, rec) =>
+    (d, Bridge.DepositRecord.encodeAsBytes rec)))
+
+/-- Encode a single `PendingWithdrawal`.
+
+    Audit-2: the L1 recipient is encoded as a 20-byte BE ByteArray
+    (lossless via `EthAddress.toBytes`).  The pre-audit Nat
+    encoding truncated to 64 bits, which would have caused two
+    distinct EthAddresses sharing low 64 bits to encode
+    identically — corrupting the bridge's pending-withdrawal
+    bookkeeping. -/
+def Bridge.PendingWithdrawal.encode (wd : Bridge.PendingWithdrawal) : Stream :=
+  Encodable.encode (T := Nat) wd.resource.toNat ++
+  Encodable.encode (T := ByteArray) (Bridge.EthAddress.toBytes wd.recipient) ++
+  Encodable.encode (T := Nat) wd.amount ++
+  Encodable.encode (T := Nat) wd.l2LogIndex
+
+/-- Wrap a `PendingWithdrawal` as a length-prefixed CBE byte string
+    for placement in the outer `pending` map's value slot. -/
+private def Bridge.PendingWithdrawal.encodeAsBytes
+    (wd : Bridge.PendingWithdrawal) : ByteArray :=
+  ByteArray.mk (Bridge.PendingWithdrawal.encode wd).toArray
+
+/-- Decode a `PendingWithdrawal`. -/
+def Bridge.PendingWithdrawal.decode (s : Stream) :
+    Except DecodeError (Bridge.PendingWithdrawal × Stream) :=
+  match Encodable.decode (T := Nat) s with
+  | .ok (resN, s₁) =>
+    if h₁ : resN < 18446744073709551616 then
+      match Encodable.decode (T := ByteArray) s₁ with
+      | .ok (recBytes, s₂) =>
+        match Bridge.EthAddress.ofBytes recBytes with
+        | some rcp =>
+          match Encodable.decode (T := Nat) s₂ with
+          | .ok (amount, s₃) =>
+            match Encodable.decode (T := Nat) s₃ with
+            | .ok (idx, s₄) =>
+              .ok ({ resource    := resN.toUInt64
+                     recipient   := rcp
+                     amount      := amount
+                     l2LogIndex  := idx }, s₄)
+            | .error e => .error e
+          | .error e => .error e
+        | none =>
+          .error (.invalidLength
+            s!"PendingWithdrawal.recipient expects 20 bytes; got {recBytes.size}")
+      | .error e => .error e
+    else
+      let _ := h₁
+      .error (.invalidLength s!"PendingWithdrawal.resource {resN} ≥ 2^64")
+  | .error e => .error e
+
+/-- Encode the `pending` field. -/
+def Bridge.BridgeState.encodePending (bs : Bridge.BridgeState) : Stream :=
+  encodeSortedPairs (bs.pending.toList.map (fun (wid, wd) =>
+    (wid, Bridge.PendingWithdrawal.encodeAsBytes wd)))
+
+/-- Encode a `BridgeState`: `[consumed; pending; nextWdId]`. -/
+def Bridge.BridgeState.encode (bs : Bridge.BridgeState) : Stream :=
+  Bridge.BridgeState.encodeConsumed bs ++
+  Bridge.BridgeState.encodePending bs ++
+  Encodable.encode (T := Nat) bs.nextWdId
+
+/-- Decode the `consumed` map, rebuilding each inner `DepositRecord`
+    from the framed inner bytes. -/
+def Bridge.BridgeState.decodeConsumed (s : Stream) :
+    Except DecodeError (TreeMap Bridge.DepositId Bridge.DepositRecord compare × Stream) :=
+  match decodeMap (K := Nat) (V := ByteArray) s with
+  | .ok (pairs, rest) =>
+    let inner : Except DecodeError (List (Bridge.DepositId × Bridge.DepositRecord)) :=
+      pairs.foldlM
+        (fun (acc : List (Bridge.DepositId × Bridge.DepositRecord))
+             (p : Nat × ByteArray) =>
+          match Bridge.DepositRecord.decode p.2.data.toList with
+          | .ok (rec, []) => .ok (acc ++ [(p.1, rec)])
+          | .ok (_, _ :: _) => .error (.trailingBytes 1)
+          | .error e => .error e)
+        []
+    match inner with
+    | .ok entries => .ok (TreeMap.ofList entries compare, rest)
+    | .error e => .error e
+  | .error e => .error e
+
+/-- Decode the `pending` map. -/
+def Bridge.BridgeState.decodePending (s : Stream) :
+    Except DecodeError (TreeMap Bridge.WithdrawalId Bridge.PendingWithdrawal compare × Stream) :=
+  match decodeMap (K := Nat) (V := ByteArray) s with
+  | .ok (pairs, rest) =>
+    let inner : Except DecodeError (List (Bridge.WithdrawalId × Bridge.PendingWithdrawal)) :=
+      pairs.foldlM
+        (fun (acc : List (Bridge.WithdrawalId × Bridge.PendingWithdrawal))
+             (p : Nat × ByteArray) =>
+          match Bridge.PendingWithdrawal.decode p.2.data.toList with
+          | .ok (wd, []) => .ok (acc ++ [(p.1, wd)])
+          | .ok (_, _ :: _) => .error (.trailingBytes 1)
+          | .error e => .error e)
+        []
+    match inner with
+    | .ok entries => .ok (TreeMap.ofList entries compare, rest)
+    | .error e => .error e
+  | .error e => .error e
+
+/-- Decode a `BridgeState`. -/
+def Bridge.BridgeState.decode (s : Stream) :
+    Except DecodeError (Bridge.BridgeState × Stream) :=
+  match Bridge.BridgeState.decodeConsumed s with
+  | .ok (consumed, s₁) =>
+    match Bridge.BridgeState.decodePending s₁ with
+    | .ok (pending, s₂) =>
+      match Encodable.decode (T := Nat) s₂ with
+      | .ok (nextWdId, s₃) =>
+        .ok ({ consumed, pending, nextWdId }, s₃)
+      | .error e => .error e
+    | .error e => .error e
+  | .error e => .error e
+
+instance instEncodableBridgeState : Encodable Bridge.BridgeState where
+  encode := Bridge.BridgeState.encode
+  decode := Bridge.BridgeState.decode
+
+/-- Encode an `ExtendedState` as
+    `[base ++ nonces ++ registry ++ bridge]`. -/
 def ExtendedState.encode (es : ExtendedState) : Stream :=
   State.encode es.base ++
   NonceState.encode es.nonces ++
-  KeyRegistry.encodeMap es.registry
+  KeyRegistry.encodeMap es.registry ++
+  Bridge.BridgeState.encode es.bridge
 
 /-- Decode a `NonceState`.  Each key is a CBE-decoded `Nat` in
     `[0, 2^64)` and converts to `UInt64` exactly. -/
@@ -304,7 +475,11 @@ def ExtendedState.decode (s : Stream) : Except DecodeError (ExtendedState × Str
     match NonceState.decode s₁ with
     | .ok (nonces, s₂) =>
       match KeyRegistry.decodeMap s₂ with
-      | .ok (registry, s₃) => .ok ({ base, nonces, registry }, s₃)
+      | .ok (registry, s₃) =>
+        match Bridge.BridgeState.decode s₃ with
+        | .ok (bridge, s₄) =>
+          .ok ({ base, nonces, registry, bridge }, s₄)
+        | .error e => .error e
       | .error e => .error e
     | .error e => .error e
   | .error e => .error e
@@ -356,6 +531,63 @@ theorem extendedState_encode_deterministic
     (es₁ es₂ : ExtendedState) (h : es₁ = es₂) :
     Encodable.encode (T := ExtendedState) es₁ = Encodable.encode (T := ExtendedState) es₂ :=
   h ▸ rfl
+
+/-! ## BridgeState encoding determinism (§7.1.4) -/
+
+/-- Determinism (structural) for `BridgeState`: equal inputs
+    produce equal bytes.  Trivially true (encode is a function);
+    stated explicitly so the Workstream-C §7.1.4 deliverable is
+    documented. -/
+theorem bridgeState_encode_deterministic
+    (bs₁ bs₂ : Bridge.BridgeState) (h : bs₁ = bs₂) :
+    Encodable.encode (T := Bridge.BridgeState) bs₁ =
+    Encodable.encode (T := Bridge.BridgeState) bs₂ :=
+  h ▸ rfl
+
+/-- Determinism for `DepositRecord`: equal inputs produce equal
+    bytes. -/
+theorem depositRecord_encode_deterministic
+    (rec₁ rec₂ : Bridge.DepositRecord) (h : rec₁ = rec₂) :
+    Bridge.DepositRecord.encode rec₁ = Bridge.DepositRecord.encode rec₂ :=
+  h ▸ rfl
+
+/-- Determinism for `PendingWithdrawal`. -/
+theorem pendingWithdrawal_encode_deterministic
+    (wd₁ wd₂ : Bridge.PendingWithdrawal) (h : wd₁ = wd₂) :
+    Bridge.PendingWithdrawal.encode wd₁ = Bridge.PendingWithdrawal.encode wd₂ :=
+  h ▸ rfl
+
+/-- Round-trip for `DepositRecord`: under the canonical-encoding
+    bound on the resource, encode-then-decode is the identity. -/
+theorem depositRecord_roundtrip
+    (rec : Bridge.DepositRecord) (rest : Stream)
+    (h : rec.resource.toNat < 256 ^ 8 ∧ rec.amount < 256 ^ 8) :
+    Bridge.DepositRecord.decode (Bridge.DepositRecord.encode rec ++ rest) =
+    .ok (rec, rest) := by
+  unfold Bridge.DepositRecord.encode Bridge.DepositRecord.decode
+  obtain ⟨h1, h2⟩ := h
+  rw [show Encodable.encode (T := Nat) rec.resource.toNat ++
+            Encodable.encode (T := Nat) rec.amount ++ rest =
+          Encodable.encode (T := Nat) rec.resource.toNat ++
+            (Encodable.encode (T := Nat) rec.amount ++ rest)
+      from by simp [List.append_assoc]]
+  rw [nat_roundtrip rec.resource.toNat _ h1]
+  dsimp only
+  have hp : rec.resource.toNat < 18446744073709551616 := by
+    have h_eq : (256 : Nat) ^ 8 = 18446744073709551616 := by decide
+    omega
+  rw [dif_pos hp]
+  rw [nat_roundtrip rec.amount rest h2]
+  show Except.ok ({ resource := rec.resource.toNat.toUInt64, amount := rec.amount }, rest)
+       = .ok (rec, rest)
+  congr 1
+  congr 1
+  show Bridge.DepositRecord.mk rec.resource.toNat.toUInt64 rec.amount = rec
+  cases rec with
+  | mk resource amount =>
+    show Bridge.DepositRecord.mk resource.toNat.toUInt64 amount = ⟨resource, amount⟩
+    have : resource.toNat.toUInt64 = resource := UInt64.ofNat_toNat
+    rw [this]
 
 end Encoding
 end LegalKernel

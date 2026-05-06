@@ -58,17 +58,23 @@ Coverage map:
   * §6.3 (WU B.3) — `bridgeActor`, `bridgePolicy`, the
     decidable-policy theorems (#32, #35, #36 from §12.9), plus a
     `bridgePolicy_rejects_*` family for the other action
-    constructors.  `bridgePolicy_rejects_withdraw` (#33) and
-    `bridgePolicy_authorizes_deposit` (#34) are reserved for
-    Workstream C.4 when the `withdraw` and `deposit` Action
-    constructors land at frozen indices 13 and 14 (post-
-    Workstream B's `registerIdentity` at index 12).
-  * §12.9 — three theorems implemented here from the plan
+    constructors.
+  * Workstream C.4 (audit-1) — extends the policy with §12.9 #33
+    (`bridgePolicy_rejects_withdraw`) and #34
+    (`bridgePolicy_authorizes_deposit`).  Withdrawals are user-
+    initiated; the bridge actor is forbidden from signing them
+    (the `bridgeAuthorizedAction` lookup returns `false` for
+    `withdraw`, so the bridge cannot withdraw on any user's
+    behalf — closes a coordinated-attack vector where a
+    compromised bridge actor could drain user balances and then
+    forge an L1 redemption proof).
+  * §12.9 — five theorems implemented here from the plan
     (`bridgePolicy_rejects_transfer`,
     `bridgePolicy_authorizes_replaceKey`,
-    `bridgePolicy_authorizes_registerIdentity`), plus the wider
-    rejection family for completeness.  Two theorems (#33, #34)
-    deferred to Workstream C.4 as noted above.
+    `bridgePolicy_authorizes_registerIdentity`,
+    `bridgePolicy_authorizes_deposit`,
+    `bridgePolicy_rejects_withdraw`), plus the wider rejection
+    family for completeness.
 -/
 
 import LegalKernel.Authority.Action
@@ -113,6 +119,13 @@ each branch is a finite conjunction of decidable equalities, so
 def bridgeAuthorizedAction : Action → Bool
   | .replaceKey _ _      => true
   | .registerIdentity _ _ => true
+  | .deposit _ _ _ _      => true
+  -- Note: `withdraw` is intentionally NOT admitted by the bridge
+  -- actor (Workstream-C audit-1).  Withdrawals are user-initiated:
+  -- the L2 sender signs their own withdrawal under their own
+  -- per-actor authority policy.  The bridge actor's role is
+  -- attesting L1 deposits + identity events, not initiating L2
+  -- withdrawals.  See `bridgePolicy_rejects_withdraw` (§12.9 #33).
   | _                     => false
 
 /-- The bridge actor's authorisation policy.  Authorises an action
@@ -241,6 +254,42 @@ theorem bridgePolicy_authorizes_registerIdentity (actor : ActorId) (pk : PublicK
     bridgePolicy.authorized bridgeActor (.registerIdentity actor pk) := by
   unfold bridgePolicy bridgeAuthorizedAction
   exact ⟨rfl, rfl⟩
+
+/-- §12.9 #34 — the bridge policy authorises `deposit` actions by
+    the bridge actor (Workstream C.4).  Bridge-attested L1 → L2
+    deposit credits are signed by the bridge, never by the
+    L2-recipient. -/
+theorem bridgePolicy_authorizes_deposit
+    (r : ResourceId) (recipient : ActorId) (amount : Amount)
+    (depositId : Bridge.DepositId) :
+    bridgePolicy.authorized bridgeActor (.deposit r recipient amount depositId) := by
+  unfold bridgePolicy bridgeAuthorizedAction
+  exact ⟨rfl, rfl⟩
+
+/-- §12.9 #33 — the bridge policy *rejects* `withdraw` actions
+    even when the signer is the bridge actor (Workstream-C
+    audit-1).  Withdrawals are user-initiated: the L2 sender signs
+    their own withdrawal under their own per-actor authority
+    policy.  The bridge's role is attesting L1 deposits + identity
+    events, not initiating L2 withdrawals.
+
+    A user-signed withdrawal goes through whatever per-actor
+    policy the deployment configures (`AuthorityPolicy.singleton`
+    for a single-user deployment, `AuthorityPolicy.union` of
+    per-user policies for a multi-user deployment, or
+    `AuthorityPolicy.unrestricted` for a development sandbox).
+    `bridgePolicy` is intersected with such per-user policies; the
+    rejection here ensures the bridge actor itself never has the
+    ability to drain a user's L2 balance via a coordinated
+    withdrawal it could later forge an L1 redemption proof for. -/
+theorem bridgePolicy_rejects_withdraw
+    (r : ResourceId) (sender : ActorId) (amount : Amount)
+    (recipientL1 : Bridge.EthAddress) :
+    ¬ bridgePolicy.authorized bridgeActor
+        (.withdraw r sender amount recipientL1) := by
+  unfold bridgePolicy
+  intro ⟨_, h⟩
+  exact absurd h (by simp [bridgeAuthorizedAction])
 
 /-! ## Cross-actor rejection
 

@@ -191,12 +191,129 @@ def actionInjectiveAPI : TestCase := {
     pure ()
 }
 
+/-! ## Workstream C.4 — deposit / withdraw round-trip tests -/
+
+def depositRT : TestCase := {
+  name := "Action.deposit roundtrip"
+  body := do
+    let a : Action := .deposit 1 10 100 42
+    match Encodable.decode (T := Action) (Encodable.encode a) with
+    | .ok (a', _) =>
+      match a' with
+      | .deposit r recipient amount d =>
+        assertEq (1 : UInt64) r "decoded resource"
+        assertEq (10 : UInt64) recipient "decoded recipient"
+        assertEq (100 : Nat) amount "decoded amount"
+        assertEq (42 : Nat) d "decoded depositId"
+      | _ => throw <| IO.userError "wrong constructor"
+    | .error _ => throw <| IO.userError "decode failed"
+}
+
+def withdrawRT : TestCase := {
+  name := "Action.withdraw roundtrip"
+  body := do
+    let rcp : LegalKernel.Bridge.EthAddress := ⟨123, by decide⟩
+    let a : Action := .withdraw 1 10 50 rcp
+    match Encodable.decode (T := Action) (Encodable.encode a) with
+    | .ok (a', _) =>
+      match a' with
+      | .withdraw r sender amount rcp' =>
+        assertEq (1 : UInt64) r "decoded resource"
+        assertEq (10 : UInt64) sender "decoded sender"
+        assertEq (50 : Nat) amount "decoded amount"
+        assertEq (123 : Nat) rcp'.val "decoded recipient L1"
+      | _ => throw <| IO.userError "wrong constructor"
+    | .error _ => throw <| IO.userError "decode failed"
+}
+
+/-- `Action.deposit` and `Action.mint` (same shape r/to/amount) produce
+    different encoded bytes thanks to distinct constructor tags. -/
+def depositVsMintBytes : TestCase := {
+  name := "deposit vs mint produce different bytes"
+  body := do
+    let bytes_dep := Encodable.encode (T := Action) (.deposit 1 10 100 0)
+    let bytes_mint := Encodable.encode (T := Action) (.mint 1 10 100)
+    if bytes_dep == bytes_mint then
+      throw <| IO.userError "deposit / mint encodings collided"
+    else pure ()
+}
+
+/-- `Action.withdraw` and `Action.burn` produce different encoded bytes. -/
+def withdrawVsBurnBytes : TestCase := {
+  name := "withdraw vs burn produce different bytes"
+  body := do
+    let bytes_wd := Encodable.encode (T := Action)
+      (.withdraw 1 10 50 LegalKernel.Bridge.EthAddress.zero)
+    let bytes_burn := Encodable.encode (T := Action) (.burn 1 10 50)
+    if bytes_wd == bytes_burn then
+      throw <| IO.userError "withdraw / burn encodings collided"
+    else pure ()
+}
+
+/-! ### Audit-2 security regressions
+
+Two distinct `EthAddress` values sharing low 64 bits MUST encode to
+distinct bytes.  The pre-audit `Action.withdraw` encoder truncated
+to 64 bits, allowing signature replay between addresses sharing
+low 64 bits.  The audit-2 fix encodes `recipientL1` as a 20-byte
+ByteArray (lossless).  These regressions catch any future revert. -/
+
+/-- High-bit EthAddresses are NOT collapsed by the encoder. -/
+def withdrawHighBitDistinguishability : TestCase := {
+  name := "withdraw recipient: high-bit EthAddresses encode distinctly (audit-2)"
+  body := do
+    -- Two EthAddresses that share low 64 bits but differ in high bits.
+    let lowMask : Nat := 18446744073709551615  -- 2^64 - 1
+    -- Address A: high bits = 1, low bits = 42.
+    let addrA : LegalKernel.Bridge.EthAddress :=
+      ⟨18446744073709551616 + 42, by decide⟩
+    -- Address B: high bits = 2, low bits = 42.
+    let addrB : LegalKernel.Bridge.EthAddress :=
+      ⟨2 * 18446744073709551616 + 42, by decide⟩
+    -- They share the low 64 bits.
+    assertEq (expected := addrA.val % 18446744073709551616)
+             (actual := addrB.val % 18446744073709551616)
+             "low 64 bits match"
+    let _ := lowMask
+    -- The encoded bytes MUST differ.
+    let bytesA := Encodable.encode (T := Action)
+                    (.withdraw 1 10 50 addrA)
+    let bytesB := Encodable.encode (T := Action)
+                    (.withdraw 1 10 50 addrB)
+    if bytesA == bytesB then
+      throw <| IO.userError
+        "audit-2 regression: withdraw encodings collided on shared low 64 bits"
+    else pure ()
+}
+
+/-- Round-trip for a high-bit EthAddress recipient. -/
+def withdrawHighBitRoundtrip : TestCase := {
+  name := "withdraw with 160-bit recipient round-trips (audit-2)"
+  body := do
+    -- An EthAddress that requires more than 64 bits (high bits non-zero).
+    let addr : LegalKernel.Bridge.EthAddress :=
+      ⟨18446744073709551616 + 1, by decide⟩
+    let action : Action := .withdraw 1 10 50 addr
+    match Encodable.decode (T := Action) (Encodable.encode action) with
+    | .ok (a', _) =>
+      match a' with
+      | .withdraw r' sender' amount' rcp' =>
+        assertEq (expected := (1 : UInt64)) (actual := r') "resource"
+        assertEq (expected := (10 : UInt64)) (actual := sender') "sender"
+        assertEq (expected := (50 : Nat)) (actual := amount') "amount"
+        assertEq (expected := addr.val) (actual := rcp'.val) "rcp value"
+      | _ => throw <| IO.userError "wrong constructor"
+    | .error _ => throw <| IO.userError "decode failed"
+}
+
 /-- All tests. -/
 def tests : List TestCase :=
   [transferRT, mintRT, burnRT, freezeRT, replaceKeyRT, rewardRT,
    distributeOthersRT, proportionalDiluteRT, registerIdentityRT,
    registerIdentityVsReplaceKeyBytes, transferVsMintBytes,
-   transferByteLength, actionRoundtripAPI, actionInjectiveAPI]
+   transferByteLength, actionRoundtripAPI, actionInjectiveAPI,
+   depositRT, withdrawRT, depositVsMintBytes, withdrawVsBurnBytes,
+   withdrawHighBitDistinguishability, withdrawHighBitRoundtrip]
 
 end ActionTests
 end LegalKernel.Test.Encoding
