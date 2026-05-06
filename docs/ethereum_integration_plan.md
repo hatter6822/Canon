@@ -36,9 +36,10 @@ backed by the existing Phase-6 fraud-proof pipeline.
 The MVP makes Canon usable by any Ethereum wallet against any
 EVM chain.  Concretely:
 
-  * **Seven workstreams**, twenty-eight work units (3 + 3 + 6 + 3
-    + 4 + 4 + 5), ≈ 8 wall-clock weeks with two engineers
-    (≈ 5 weeks with four).
+  * **Seven workstreams**, twenty-nine work units (3 + 3 + 7 + 3
+    + 4 + 4 + 5; the new C.0 unit was added during Audit-1 to
+    explicitly model bridge-action admissibility), ≈ 8 wall-clock
+    weeks with two engineers (≈ 5 weeks with four).
   * **Three new `Action` constructors** (`deposit`, `withdraw`,
     `registerIdentity`) at frozen indices 12, 13, 14, plus two new
     `Event` constructors at indices 9, 10.  Constructor indices
@@ -56,9 +57,9 @@ EVM chain.  Concretely:
     `CanonSequencerStake.sol`.  Behind transparent proxies; a
     3-of-5 Safe multisig holds the upgrade key with a 7-day
     timelock.
-  * **Forty-one proof obligations** enumerated in §12, every one
-    a full Lean proof under the canonical three-axiom set.  A
-    handful (the EIP-712 wrap and the Merkle-soundness theorems)
+  * **Forty-four proof obligations** enumerated in §12, every
+    one a full Lean proof under the canonical three-axiom set.
+    A handful (the EIP-712 wrap and the Merkle-soundness theorems)
     are stated under a `keccak_collision_free` hypothesis (a
     `Prop` parameter, not an axiom); the rest are unconditional.
   * **One headline composition theorem**, `bridge_deployment_safety`
@@ -68,7 +69,7 @@ EVM chain.  Concretely:
     four-conjunct `And` proposition the L1 contracts rely on.
 
 The architecture deliberately avoids any kernel TCB change: the
-two-reviewer §13.6 gate applies only to G.1 (the Genesis Plan
+two-reviewer §14.4 gate applies only to G.1 (the Genesis Plan
 amendment).  Every other WU lands under the standard one-reviewer
 discipline.
 
@@ -91,6 +92,7 @@ discipline.
   15. [Risks and mitigations](#15-risks-and-mitigations)
   16. [Out of scope (post-MVP)](#16-out-of-scope-post-mvp)
   17. [Glossary](#17-glossary)
+  18. [Audit-1 changelog](#18-audit-1-changelog)
 
 ---
 
@@ -148,7 +150,7 @@ gates each work unit must clear before merging (§14).
   1. **Widening `ActorId` from `UInt64` to a 20-byte address type.**
      A registry indirection (workstream B.1) suffices for the MVP;
      widening is a kernel TCB change requiring two reviewers and
-     a §13.6 Genesis-Plan amendment.
+     a §14.4 Genesis-Plan amendment.
   2. **ZK proofs of `apply_admissible`.**  The MVP is optimistic
      only.  ZK extension is a candidate Phase 8 deliverable.
   3. **Bisection dispute games.**  The MVP uses one-shot fraud
@@ -282,7 +284,7 @@ Every new assumption is enumerated in `docs/extraction_notes.md`
 `Kernel.lean` and `RBMapLemmas.lean` stay untouched.  Every WU
 that is tempted to import or modify either of them is
 re-architected to live in a non-TCB module.  Two-reviewer reviews
-under Genesis Plan §13.6 are explicitly out of scope for the MVP;
+under Genesis Plan §14.4 are explicitly out of scope for the MVP;
 any WU that requires one is *by definition* deferred.
 
 ### 4.2 No new axioms
@@ -450,22 +452,52 @@ A.1 (verify must understand wrapped form), A.2 (keccak256 used
 inside the wrap).
 
 **Deliverable.**  A new module `LegalKernel/Bridge/Eip712.lean`
-exporting:
+exporting an EIP-712 envelope built from a *structured* type
+(rather than an opaque blob, which would not conform to EIP-712's
+typed-data spec):
 
 ```lean
 namespace LegalKernel.Bridge
 
 /-- EIP-712 domain separator for Canon-on-Ethereum.  Hashed once
-    per deployment; cached in the runtime adaptor. -/
-def eip712DomainSeparator (chainId : Nat) (rollupId : Nat)
-                           (verifyingContract : ByteArray)
-    : ByteArray
+    per deployment; cached in the runtime adaptor.  The four
+    fields match EIP-712's standard `EIP712Domain` type:
+    `name`, `version`, `chainId`, `verifyingContract`. -/
+def eip712DomainSeparator
+    (name : ByteArray) (version : ByteArray)
+    (chainId : Nat) (rollupId : Nat)
+    (verifyingContract : ByteArray) : ByteArray
+
+/-- The Canon-action EIP-712 type.  Wallet UIs render this as
+    structured fields rather than as an opaque blob, which is a
+    UX win (the user sees what they're signing) and a security
+    win (a malicious dApp cannot trick the user into signing an
+    arbitrary byte sequence).
+
+    The `actionHash` field is `keccak256 (canonSignInput action
+    signer nonce deploymentId)` — a 32-byte commitment to the
+    full Canon CBE-encoded sign-input.  The wallet recomputes
+    this hash from the ABI-encoded action params it displays,
+    closing the loop with the L1 dispute verifier's recomputation. -/
+def canonActionTypeHash : ByteArray :=
+  /- = keccak256("CanonAction(bytes32 actionHash,uint64 signer,
+                  uint64 nonce,bytes32 deploymentId)") -/
+
+/-- Compute the EIP-712 struct hash for a Canon action.
+    `structHash := keccak256(typeHash ‖ encodeStructFields(...))`
+    where field encoding follows EIP-712 (32-byte right-padded
+    bytes32 for hashes, 32-byte left-padded uint for ints). -/
+def eip712StructHash
+    (canonActionHash : ByteArray) (signer : ActorId)
+    (nonce : Nonce) (deploymentId : ByteArray) : ByteArray
 
 /-- Wrap a Canon `signInput` as an EIP-712 typed-structured-data
-    message.  The wallet signs `\x19\x01 ‖ domainSep ‖ structHash`
-    where `structHash := keccak256 (typeHash ‖ canonSignInput)`. -/
-def eip712Wrap (canonSignInput : ByteArray)
-                (domainSep : ByteArray) : ByteArray
+    message.  Returns the bytes the wallet signs:
+    `0x19 ‖ 0x01 ‖ domainSep ‖ structHash`. -/
+def eip712Wrap
+    (action : Action) (signer : ActorId) (nonce : Nonce)
+    (deploymentId : ByteArray) (domainSep : ByteArray)
+    : ByteArray
 
 end LegalKernel.Bridge
 ```
@@ -523,13 +555,27 @@ Canon's `KeyRegistry` infrastructure without changing the kernel's
 **Deliverable.**  A new module `LegalKernel/Bridge/AddressBook.lean`:
 
 ```lean
-/-- An Ethereum 20-byte address.  Represented as `BoundedNat
-    (2^160)` rather than `ByteArray` so that the standard
-    `Nat`-derived `compare` works directly with `Std.TreeMap`
-    (no custom `Ord ByteArray` instance needed) and so the
-    20-byte width is enforced at the type level rather than
-    by a runtime check. -/
-abbrev EthAddress : Type := BoundedNat (2^160)
+/-- An Ethereum 20-byte address.  Represented as `Fin (2^160)`
+    rather than `ByteArray` so that:
+
+      1. The 20-byte width is enforced at the type level rather
+         than by a runtime check (`Fin n` proves `i < n`
+         constructively).
+      2. The default `Ord (Fin n)` instance gives a numeric
+         comparator that works directly with `Std.TreeMap`,
+         avoiding the need for a custom `Ord ByteArray`
+         instance (which Lean core does not ship).
+      3. Decidable equality is automatic.
+
+    `EthAddress.ofBytes : ByteArray → Option EthAddress`
+    converts a 20-byte ByteArray to an `EthAddress`, returning
+    `none` if the byte array is not exactly 20 bytes; the runtime
+    adaptor performs this validation at the deployment boundary.
+
+    Note: the existing `BoundedNat` structure in
+    `Encoding/Encodable.lean` is hardcoded `< 2^64` and is
+    therefore *not* suitable for a 160-bit address. -/
+abbrev EthAddress : Type := Fin (2^160)
 
 structure AddressBook where
   /-- Mapping from Ethereum 20-byte addresses to Canon ActorIds. -/
@@ -595,51 +641,90 @@ inductive L1Event
   deriving Repr, DecidableEq
 ```
 
-and a deterministic translator:
+and a deterministic translator that returns *unsigned* data:
 
 ```lean
+/-- The unsigned envelope that `ingest` produces.  The runtime
+    adaptor packages this into a fully-formed `SignedAction` by
+    computing the signature externally (the bridge actor's
+    private key lives in the runtime, not in Lean). -/
+structure UnsignedBridgeAction where
+  action : Action
+  signer : ActorId   -- always equal to bridgeActor; pinned by theorem below
+  nonce  : Nonce     -- the bridge actor's next-expected nonce at ingest time
+
 /-- Translate an L1 event to its Canon-side effect.  Every L1
     event becomes either:
       - `none` (event ignored: e.g. duplicate-receipt deposit),
-      - `some sa` (one bridge-authored `SignedAction` to feed
-                   into `processSignedAction`).
-    Identity events compile to a `SignedAction` carrying an
-    `Action.replaceKey`; deposits compile to `Action.deposit`. -/
-def ingest (b : AddressBook) (e : L1Event)
-    : AddressBook × Option SignedAction
+      - `some ub` (one bridge-authored `UnsignedBridgeAction` for
+                   the runtime adaptor to sign and feed into
+                   `processSignedAction`).
+    Identity events compile to `Action.registerIdentity`;
+    rotation events to `Action.replaceKey`; deposits to
+    `Action.deposit`. -/
+def ingest (b : AddressBook) (currentNonce : Nonce) (e : L1Event)
+    : AddressBook × Option UnsignedBridgeAction
 
 /-- Project an L1 event to the Canon address it touches.  Used
     by the per-address-commutativity theorem below. -/
 def L1Event.address : L1Event → EthAddress
 ```
 
-The function is pure (no `IO`), so determinism is automatic — no
-theorem needed.  The non-trivial property is *order-independence*
-across distinct addresses, which lets replicas consume the L1
-event stream out of order:
+The Lean function is pure (no `IO`), so determinism is automatic
+— no theorem needed.  The non-trivial property is *bookkeeping
+order-independence* across distinct addresses: the lookup-state
+of the AddressBook is the same regardless of order, even though
+the `nextActorId` counter and the specific ID assignments may
+differ:
 
 ```lean
-/-- Per-address commutativity.  Independent L1 events (those
+/-- Per-address lookup-equivalence.  Independent L1 events (those
     touching distinct Ethereum addresses) compose in either
-    order to the same `AddressBook`.  Same-address events are
-    *not* commutative (registration-then-revocation differs from
-    revocation-then-registration), so the hypothesis is necessary. -/
-theorem ingest_commutes_for_distinct_addresses :
-  ∀ b e₁ e₂, e₁.address ≠ e₂.address →
-    let (b₁,  _) := ingest b  e₁
-    let (b₂,  _) := ingest b₁ e₂
-    let (b₁', _) := ingest b  e₂
-    let (b₂', _) := ingest b₁' e₁
-    b₂ = b₂'
+    order to AddressBooks with the same `lookup` behaviour for
+    every address.  Note: `nextActorId` and the specific
+    address↔id assignments may differ between orderings (the
+    address that arrived first gets the lower id), which is why
+    the conclusion is `lookup`-equivalence rather than structural
+    equality. -/
+theorem ingest_lookup_equivalent_for_distinct_addresses :
+  ∀ b n e₁ e₂, e₁.address ≠ e₂.address →
+    let (b₁,  _) := ingest b  n     e₁
+    let (b₂,  _) := ingest b₁ (n+1) e₂
+    let (b₁', _) := ingest b  n     e₂
+    let (b₂', _) := ingest b₁' (n+1) e₁
+    ∀ addr, (b₂.lookup addr).isSome = (b₂'.lookup addr).isSome
 
-/-- The emitted `SignedAction`'s signer is always the bridge
+/-- The emitted unsigned action's signer is always the bridge
     actor (workstream B.3).  This pins the bridge's authority
     boundary at the type level. -/
-theorem ingest_emits_bridge_actor_signature :
-  ∀ b e sa,
-    (ingest b e).snd = some sa →
-    sa.signer = Bridge.bridgeActor
+theorem ingest_emits_bridge_actor :
+  ∀ b n e ub,
+    (ingest b n e).snd = some ub →
+    ub.signer = Bridge.bridgeActor
 ```
+
+The runtime adaptor's pseudocode for end-to-end ingest:
+
+```
+loop:
+    e := next finalised L1 event
+    let (b', some ub) := Bridge.ingest current_addressbook current_nonce e
+    let signing_bytes := signingInput ub.action ub.signer ub.nonce deploymentId
+    let sig := canon_sign(bridge_private_key, signing_bytes)  -- in Rust
+    let sa : SignedAction := { action := ub.action,
+                                signer := ub.signer,
+                                nonce  := ub.nonce,
+                                sig    := sig }
+    processSignedAction sa
+    current_addressbook := b'
+    current_nonce := current_nonce + 1
+```
+
+Note that the Lean side never sees the bridge's private key; the
+key lives entirely in the runtime adaptor's Rust process and the
+signing operation is opaque to Lean.  This preserves the
+Phase-3 discipline of treating cryptographic operations as
+opaque-extern functions.
 
 **Acceptance criteria.**
 
@@ -733,6 +818,159 @@ deposit receipts and pending withdrawals, and the per-resource
 *bridge accounting invariant* that grounds the deployment's
 solvency claim.
 
+### 7.0 Design rationale: why bridge actions need a dedicated admissibility extension
+
+The existing kernel `Transition.pre` operates on `State` (the
+balance maps), not on `ExtendedState` or `BridgeState`.  This
+means three new bridge-specific preconditions have **nowhere to
+live in the existing `Admissible` predicate**:
+
+  1. *Deposit-id uniqueness* (`depositId` not already in
+     `BridgeState.consumed`).
+  2. *Registration first-time-only*
+     (`KeyRegistry.lookup registry actor = none` for
+     `registerIdentity actor _`).
+  3. *Sufficient L1 backing* (this is enforced on the L1 side,
+     not the L2 side; Canon trusts the bridge actor's deposit
+     emission to be backed).
+
+Three implementation strategies were considered:
+
+  * **Strategy A: Extend `Transition.pre` to take `ExtendedState`.**
+    Rejected — this is a kernel TCB change and would invalidate
+    every existing `IsConservative` / `IsMonotonic` proof.
+  * **Strategy B: Pre-flight check before `apply_admissible_with`.**
+    A wrapper `processBridgeAction` checks bridge invariants,
+    then calls `apply_admissible_with`.  Workable but bypasses
+    the `Admissible` type-level discipline.
+  * **Strategy C (chosen): Parameterised admissibility extension.**
+    Define a new `BridgeAdmissible` predicate that conjuncts
+    `AdmissibleWith` with the three bridge-specific conditions.
+    Define a new `apply_bridge_admissible` entry point analogous
+    to `apply_admissible_with` but consuming the stronger
+    witness.  This keeps the type-level discipline intact and
+    makes the bridge-specific obligations visible at every call
+    site.
+
+Strategy C is documented in detail below.  It introduces no new
+TCB modules; the new predicate and entry point live alongside
+the existing ones in (a new module) `LegalKernel/Bridge/Admissible.lean`.
+
+```lean
+namespace LegalKernel.Bridge
+
+/-- The five existing `AdmissibleWith` conjuncts (authority,
+    nonce, registration, signature, kernel-pre) plus the three
+    bridge-specific conjuncts.  Every successful bridge action
+    discharges this predicate. -/
+def BridgeAdmissibleWith
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (deploymentId : ByteArray)
+    (es : ExtendedState) (st : SignedAction) : Prop :=
+  Authority.AdmissibleWith verify P deploymentId es st ∧
+  -- (6) deposit-id uniqueness:
+  (∀ r recipient amount depositId,
+    st.action = .deposit r recipient amount depositId →
+    ¬ es.bridge.consumed.contains depositId) ∧
+  -- (7) registration first-time-only:
+  (∀ actor pk,
+    st.action = .registerIdentity actor pk →
+    es.registry.lookup actor = none) ∧
+  -- (8) bridge-actor authorisation for bridge-emitted actions:
+  (st.action.isBridgeOnly → st.signer = bridgeActor)
+
+/-- The chosen entry point for processing one signed action that
+    *might* be a bridge action.  Equivalent to
+    `apply_admissible_with` for non-bridge actions; for bridge
+    actions, additionally updates `BridgeState` via
+    `applyActionToBridgeState`. -/
+def apply_bridge_admissible_with
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (deploymentId : ByteArray)
+    (es : ExtendedState) (st : SignedAction)
+    (h : BridgeAdmissibleWith verify P deploymentId es st) :
+    ExtendedState
+
+end LegalKernel.Bridge
+```
+
+The `applyActionToBridgeState` helper is analogous to the
+existing `applyActionToRegistry`:
+
+```lean
+def applyActionToBridgeState (bs : BridgeState) : Action → BridgeState
+  | .deposit  _ _ _ depositId  =>
+      { bs with consumed := bs.consumed.insert depositId () }
+  | .withdraw r sender amount recipientL1 =>
+      let wd : PendingWithdrawal := { resource := r, recipient := recipientL1,
+                                       amount := amount, l2Block := /* runtime field */ 0 }
+      { bs with pending := bs.pending.insert bs.nextWdId wd
+                nextWdId := bs.nextWdId + 1 }
+  | _ => bs   -- non-bridge actions don't touch BridgeState
+```
+
+The new predicate carries every Phase-3 admissibility guarantee
+(by inheriting `AdmissibleWith` as its first conjunct), so the
+existing replay-impossible / nonce-uniqueness theorems lift
+directly to the bridge layer via `BridgeAdmissibleWith.toAdmissibleWith`
+projection.
+
+### 7.0a WU C.0 — `BridgeAdmissibleWith` predicate and entry point
+
+**Owner:** Lean; **Reviewer count:** 1; **Depends on:** Phase-3
+Authority layer (no MVP-side prerequisites).
+
+**Deliverable.**  A new module `LegalKernel/Bridge/Admissible.lean`
+defining `BridgeAdmissibleWith`, `apply_bridge_admissible_with`,
+and `applyActionToBridgeState` per the §7.0 design rationale.
+The module also exports the projection
+`BridgeAdmissibleWith.toAdmissibleWith` so existing Phase-3
+theorems lift transparently.
+
+**Theorems.**
+
+```lean
+/-- Bridge admissibility implies kernel admissibility (the
+    underlying Phase-3 predicate is the first conjunct). -/
+theorem BridgeAdmissibleWith.toAdmissibleWith :
+  ∀ verify P d es st,
+    BridgeAdmissibleWith verify P d es st →
+    Authority.AdmissibleWith verify P d es st
+
+/-- The bridge-aware entry point agrees with the Phase-3 entry
+    point on the `base`, `nonces`, and `registry` fields.  Only
+    the new `bridge` field is touched. -/
+theorem apply_bridge_admissible_with_kernel_agreement :
+  ∀ verify P d es st h,
+    let h' := h.toAdmissibleWith
+    let es₁ := apply_bridge_admissible_with verify P d es st h
+    let es₂ := apply_admissible_with verify P d es st h'
+    es₁.base = es₂.base ∧
+    es₁.nonces = es₂.nonces ∧
+    es₁.registry = es₂.registry
+
+/-- The Phase-3 replay-impossible theorem lifts to bridge
+    admissibility via the projection. -/
+theorem bridge_replay_impossible :
+  ∀ verify P d es st h,
+    ¬ BridgeAdmissibleWith verify P d
+        (apply_bridge_admissible_with verify P d es st h) st
+```
+
+The first two theorems are `rfl`-class (the new entry point
+shares its body with the Phase-3 one for non-bridge fields).
+The third theorem follows from the Phase-3
+`replay_impossible_with` via the projection.
+
+**Acceptance criteria.**
+
+  * All three theorems ship without `sorry`.
+  * `Test/Bridge/Admissible.lean` covers each new conjunct's
+    rejection path: a deposit with a consumed `depositId` is
+    not bridge-admissible; a `registerIdentity` against a
+    registered actor is not bridge-admissible; a non-bridge-
+    actor signing a bridge-only action is not bridge-admissible.
+
 ### 7.1 WU C.1 — `BridgeState` and its embedding into `ExtendedState`
 
 **Owner:** Lean; **Reviewer count:** 1; **Depends on:** B.1.
@@ -784,23 +1022,48 @@ expansion is required.
 **Theorems.**
 
 ```lean
-/-- All Phase-3+ apply functions preserve `bridge` exactly. -/
-theorem apply_admissible_with_preserves_bridge :
-  ∀ vp p es sa h,
-    (apply_admissible_with vp p es sa h).bridge = es.bridge
+/-- The existing `apply_admissible_with` (which is unaware of
+    bridge state) preserves the `bridge` field exactly.  This is
+    the "structural pass-through" theorem that makes the field
+    addition non-invasive. -/
+theorem apply_admissible_with_preserves_bridge
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction)
+    (h : Authority.AdmissibleWith verify P d es st) :
+  (apply_admissible_with verify P d es st h).bridge = es.bridge
 ```
 
-(The hypothesis `h : AdmissibleWith vp p es.deploymentId sa`
-unrelated to bridge state.)  Proof: case-split on
-`sa.action`; every existing case is `rfl`.
+Proof: by `rfl` after unfolding `apply_admissible_with` —
+the existing definition uses `{ es with base := s' }` and
+`{ es'' with registry := ... }` syntax, both of which preserve
+unmentioned fields by Lean's record-update semantics.
+
+**Bridge-aware entry point.**  The new
+`apply_bridge_admissible_with` (§7.0) is what the runtime calls
+for bridge-classified actions; it additionally updates
+`bridge` via `applyActionToBridgeState`.  Its theorem is
+symmetric:
+
+```lean
+theorem apply_bridge_admissible_with_updates_bridge
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction)
+    (h : Bridge.BridgeAdmissibleWith verify P d es st) :
+  (apply_bridge_admissible_with verify P d es st h).bridge
+    = applyActionToBridgeState es.bridge st.action
+```
 
 **Acceptance criteria.**
 
-  * The theorem ships without `sorry`.
+  * Both theorems ship without `sorry`.
   * Every existing test continues to pass after the field
     addition.
   * `Test/Bridge/State.lean` covers `BridgeState` round-trip
-    through CBE.
+    through CBE plus value-level checks of the
+    `apply_bridge_admissible_with` semantics on each bridge
+    action variant.
 
 ### 7.2 WU C.2 — `deposit` law
 
@@ -1148,12 +1411,22 @@ inductive step case-splits on the action variant:
                  withdraw}`.
 
 To avoid the bookkeeping burden of an exclusion clause in the
-hypothesis, ship a more permissive form:
+hypothesis, ship a more permissive form that explicitly accounts
+for non-bridge supply changes:
 
 ```lean
-/-- The accounting equation tolerates non-bridge monotonic actions
-    by separating the supply contribution into bridge and non-
-    bridge parts. -/
+/-- Total supply contributed by non-bridge balance-increasing
+    laws (mint / reward / distributeOthers / proportionalDilute).
+    Accumulated by structural induction on the reachability
+    chain, with one delta term per non-bridge increasing action.
+    For deployments that disable these laws, equals 0. -/
+def totalRewarded (es : ExtendedState) (r : ResourceId) : Nat
+
+/-- The accounting equation generalised to any `MonotonicLawSet`.
+    For deployments restricted to {transfer, freezeResource,
+    replaceKey, registerIdentity, deposit, withdraw}, the
+    `totalRewarded` term collapses to 0 and we recover the
+    strict form via `bridge_supply_account` below. -/
 theorem bridge_supply_account_general
     (L : MonotonicLawSet) (es₀ es : ExtendedState)
     (h : ReachableViaLaws L es₀ es) (r : ResourceId) :
@@ -1162,9 +1435,32 @@ theorem bridge_supply_account_general
         + Bridge.totalRewarded es r
 ```
 
-where `totalRewarded` collapses non-bridge balance increases.
-The strict version is then a corollary on the deployment that
-disables `mint`/`reward`/`distributeOthers`/`proportionalDilute`.
+The strict form is a corollary under a law-set restriction:
+
+```lean
+/-- The strict accounting equation for the canonical bridge
+    deployment.  The `bridgeLawSet` restriction (§12.13)
+    forbids non-bridge balance-increasing laws, making the
+    `totalRewarded` term identically 0. -/
+theorem bridge_supply_account
+    (es₀ es : ExtendedState)
+    (h : ReachableViaLaws bridgeLawSet es₀ es) (r : ResourceId) :
+  totalSupply r es.base + Bridge.totalWithdrawn es r
+    = totalSupply r es₀.base + Bridge.totalDeposited es r
+```
+
+Proof: invoke `bridge_supply_account_general`, then prove
+`totalRewarded es r = 0` by induction on `h` — every action in
+`bridgeLawSet` either does not increase supply at all or
+increases it via `deposit` (which contributes to
+`totalDeposited`, not `totalRewarded`).
+
+Both forms use `=`, not `≤`, because the equation is genuinely
+exact: every supply flow has a bookkeeping counterpart.  No
+`Nat` truncation issues arise because `totalWithdrawn` is bounded
+by `totalSupply r es₀.base + totalDeposited` (the inductive
+invariant: you cannot withdraw more than has been deposited or
+genesis-funded).  The boundedness lemma is owned by C.6.
 
 **Acceptance criteria.**
 
@@ -1395,24 +1691,45 @@ event WithdrawalRedeemed(
 
 **Critical correctness obligations.**
 
-  1. **`depositETH` and `depositERC20` are reentrancy-safe.**  Use
-     `ReentrancyGuard` from OpenZeppelin and check-effects-
-     interactions ordering.  Test with a malicious token
-     fixture in F.1.
+  1. **All external-call entry points are reentrancy-safe.**  Use
+     `ReentrancyGuard` from OpenZeppelin on `depositETH`,
+     `depositERC20`, *and* `withdrawWithProof` (the recipient may
+     be a contract).  Test with a malicious-callback fixture in
+     F.1 covering both entry directions.
   2. **`receiptHash`** is computed as `keccak256(abi.encode(
      msg.sender, token, amount, blockhash(block.number-1), nonce))`,
      where `nonce` is a per-depositor counter.  This must match
      the Lean side's `DepositId` derivation in B.2 ingestion
-     byte-for-byte.
+     byte-for-byte.  The `blockhash(block.number-1)` term
+     prevents two deposits in the same transaction from
+     colliding; the per-depositor `nonce` prevents replay across
+     blocks.
   3. **`submitStateRoot`** verifies the attestor signature
-     against a hardcoded public key (rotatable via governance, out
-     of MVP scope).  The `logIndexHigh` is monotonically
+     against a hardcoded public key (rotatable via governance,
+     out of MVP scope).  The `logIndexHigh` is monotonically
      increasing across submissions; rejects any submission that
-     does not strictly increase.
-  4. **`withdrawWithProof`** verifies the proof against the most
-     recent finalised state root (after the dispute window).
-     Marks the leaf-hash as redeemed (single-spend) and pays out
-     the recipient.
+     does not strictly increase.  Concurrent attestor submissions
+     at the same `logIndexHigh` are rejected by this check (only
+     the first to land on L1 succeeds).
+  4. **`withdrawWithProof`** follows strict
+     check-effects-interactions ordering:
+       (a) **Check**: verify the proof against a *finalised*
+           state root (one whose dispute window has elapsed and
+           against which no `.upheld` verdict has been finalised
+           on L1; cross-references `CanonDisputeVerifier` state).
+           Reject if `withdrawalLeafRedeemed[leafHash] == true`.
+       (b) **Effect**: set `withdrawalLeafRedeemed[leafHash] = true`
+           *before* any external call.
+       (c) **Interaction**: send ETH or transfer ERC-20 to the
+           recipient.
+     This ordering plus the reentrancy guard makes single-spend
+     a structural property of the contract.
+  5. **Dispute-window-vs-redemption-window discipline.**  The
+     contract enforces `disputeWindowBlocks ≥ maxRedemptionWindowBlocks`
+     at deployment time.  This ensures that an `.upheld` dispute
+     can never apply to a state root that has already had any
+     withdrawal redeemed against it.  Without this discipline a
+     successful dispute could leave the bridge under-collateralised.
 
 **Acceptance criteria.**
 
@@ -1677,7 +1994,7 @@ WUs land.
 ### 11.1 WU G.1 — Genesis Plan amendment §15
 
 **Owner:** Lean reviewer + project maintainer; **Reviewer count:**
-2 (this is a Genesis-Plan edit, governed by §13.6); **Depends on:**
+2 (this is a Genesis-Plan edit, governed by §14.4); **Depends on:**
 substantive completion of A–F.
 
 **Deliverable.**  A new chapter `§15 Ethereum Integration` in
@@ -1696,7 +2013,7 @@ substantive completion of A–F.
 
 **Acceptance criteria.**
 
-  * §15 lands as a single PR with a §13.6 two-reviewer sign-off.
+  * §15 lands as a single PR with a §14.4 two-reviewer sign-off.
   * The chapter cross-references existing §4 / §5 / §8 sections
     where the bridge layer touches them.
 
@@ -1714,7 +2031,12 @@ G.1.
     * new build commands for the bridge modules;
     * the bridge-module dependency-graph extension;
     * the new typeclass / theorem entries in the
-      "Type-level design properties" table.
+      "Type-level design properties" table;
+    * a fix for the §13.6 reference in the "Two reviewer rule
+      for kernel-touching changes" subsection — the two-reviewer
+      rule actually lives in Genesis Plan §14.4 (Review
+      Discipline), not §13.6 (Runbook: Adding a New Law).  See
+      §18.1 of this document.
 
 ### 11.3 WU G.3 — ABI document additions
 
@@ -1775,6 +2097,18 @@ the workstream plan.  Each entry names the theorem, summarises
 the proof strategy, and identifies the WU that owns it.  Every
 theorem ships without `sorry` and is `#print axioms`-clean
 (only the three Lean built-ins).
+
+### 12.0 Bridge admissibility (workstream C.0)
+
+| #  | Theorem                                              | WU  | Proof strategy                  |
+|----|------------------------------------------------------|-----|---------------------------------|
+| 0a | `BridgeAdmissibleWith.toAdmissibleWith`              | C.0 | `And.left` projection           |
+| 0b | `apply_bridge_admissible_with_kernel_agreement`      | C.0 | `rfl` after unfolding           |
+| 0c | `bridge_replay_impossible`                           | C.0 | lift Phase-3 via projection #0a |
+
+The "0a/0b/0c" numbering keeps the rest of §12's running counter
+intact while making the bridge-admissibility prerequisites
+explicit.
 
 ### 12.1 Locality theorems (per new law)
 
@@ -1859,10 +2193,10 @@ deployment-supplied keccak256.
 
 ### 12.8 L1 ingestor (workstream B.2)
 
-| #  | Theorem                                      | WU  | Proof strategy            |
-|----|----------------------------------------------|-----|---------------------------|
-| 26 | `ingest_commutes_for_distinct_addresses`     | B.2 | case-split on event variant |
-| 27 | `ingest_emits_bridge_actor_signature`        | B.2 | direct from constructor    |
+| #  | Theorem                                              | WU  | Proof strategy              |
+|----|------------------------------------------------------|-----|-----------------------------|
+| 26 | `ingest_lookup_equivalent_for_distinct_addresses`    | B.2 | case-split on event variant |
+| 27 | `ingest_emits_bridge_actor`                          | B.2 | direct from constructor     |
 
 ### 12.9 Bridge-actor authority (workstream B.3)
 
@@ -1925,7 +2259,7 @@ theorem for the MVP:
 def bridgeLawSet : MonotonicLawSet
 
 /-- Headline safety: under the bridge deployment law set, every
-    reachable state simultaneously satisfies four invariants:
+    reachable state simultaneously satisfies three invariants:
 
       1. **Bridge accounting** — the §C.6 supply-credit-debit
          equation.
@@ -1934,15 +2268,12 @@ def bridgeLawSet : MonotonicLawSet
       3. **Registry-once-registered** — once an actor's registry
          entry is set, it stays set (possibly with a different
          key after `replaceKey`).
-      4. **First-time-registration discipline** — the registry
-         field is set via `registerIdentity` only when no prior
-         entry existed.
 
     The conjunction is what `CanonBridge.sol` relies on for
     soundness of `withdrawWithProof`: the recipient address can
     be trusted to hold the claimed balance because (1) supply
     accounting is exact, (2) every authoring signature has a
-    fresh nonce, and (3-4) the signing key is bound to the
+    fresh nonce, and (3) the signing key is bound to the
     identity at the type level. -/
 theorem bridge_deployment_safety
     (es₀ es : ExtendedState)
@@ -1955,24 +2286,25 @@ theorem bridge_deployment_safety
     -- (3) once registered, always registered:
   ∧ (∀ a pk₀, KeyRegistry.lookup es₀.registry a = some pk₀ →
         ∃ pk, KeyRegistry.lookup es.registry a = some pk)
-    -- (4) first-time-registration discipline:
-  ∧ (∀ a, KeyRegistry.lookup es₀.registry a = none →
-        KeyRegistry.lookup es.registry a = none
-        ∨ ∃ pk, KeyRegistry.lookup es.registry a = some pk
-                ∧ /- registration happened via .registerIdentity -/ True)
 ```
 
-The conjunction-of-four is proved by `And.intro` of four
+The conjunction-of-three is proved by `And.intro` of three
 independent inductive theorems, each decomposing over
 `ReachableViaLaws` per-action-variant.  Owner: workstream C.6
-(the conjunction is bundled with the accounting theorem; the
-fourth conjunct couples to the C.4 `registerIdentity_first_time_only`
-lemma).
+(the conjunction is bundled with the accounting theorem).
 
-Note: the fourth conjunct's `True` placeholder is the residual
-witness "registration happened via `registerIdentity`"; a
-strengthened form of this conjunct that records the witnessing
-log entry is a candidate v2 refinement.
+The first-time-registration discipline (a fourth potential
+conjunct) is *enforceable* through the §7.0 `BridgeAdmissibleWith`
+predicate's clause (7) and the C.4
+`registerIdentity_first_time_only` lemma.  However, lifting it
+into a state-relational form usable in
+`bridge_deployment_safety` requires referencing the
+log-history-witness ("registration happened via
+`registerIdentity`"), which is not first-order in
+`ExtendedState`.  This refinement is *post-MVP*: the
+`BridgeAdmissibleWith` predicate enforces the property at every
+state-advance call site, but the headline reachability theorem
+does not surface it.
 
 ### 12.14 Invariants the runtime adaptor must preserve
 
@@ -2008,9 +2340,10 @@ prerequisites).  An ASCII rendering follows.
 | B.1  | AddressBook                          | (root)                                  |
 | B.2  | L1 ingestor                          | B.1                                     |
 | B.3  | Bridge actor                         | B.1, B.2                                |
-| C.1  | BridgeState                          | B.1                                     |
-| C.2  | deposit law                          | C.1                                     |
-| C.3  | withdraw law                         | C.1                                     |
+| C.0  | `BridgeAdmissibleWith` predicate     | (depends only on Phase-3 Authority)     |
+| C.1  | BridgeState                          | B.1, C.0                                |
+| C.2  | deposit law                          | C.0, C.1                                |
+| C.3  | withdraw law                         | C.0, C.1                                |
 | C.4  | Action constructor extension         | C.2, C.3                                |
 | C.5  | Event constructor extension          | C.4                                     |
 | C.6  | Bridge accounting theorem            | C.2, C.3, C.4, C.5                      |
@@ -2077,19 +2410,19 @@ for legibility):
 ### 13.2 Critical path
 
 The longest dependency chain — and therefore the time floor for
-the MVP — runs through the bridge-laws ➜ withdrawal-proofs ➜
-cross-stack ➜ testnet ➜ amendment chain:
+the MVP — runs through the bridge-admissibility ➜ bridge-laws ➜
+withdrawal-proofs ➜ cross-stack ➜ testnet ➜ amendment chain:
 
 ```
-B.1 ──▶ C.1 ──▶ C.2 / C.3 ──▶ C.4 ──▶ C.5 ──▶ C.6 ──▶ D.1
+B.1 ──▶ C.0 ──▶ C.1 ──▶ C.2 / C.3 ──▶ C.4 ──▶ C.5 ──▶ C.6 ──▶ D.1
         ──▶ D.2 ──▶ D.3 ──▶ F.1 ──▶ F.3 ──▶ G.1
 ```
 
-Twelve sequential WUs along the critical path (C.2 and C.3 land
-in parallel inside one slot).  D.1 also depends on A.2 (keccak256
-adaptor); A.2 itself is a one-week deliverable that runs in
-parallel with the early Lean work, so it does not extend the
-critical path.
+Thirteen sequential WUs along the critical path (C.2 and C.3
+land in parallel inside one slot).  D.1 also depends on A.2
+(keccak256 adaptor); A.2 itself is a one-week deliverable that
+runs in parallel with the early Lean work, so it does not
+extend the critical path.
 
 **Estimated effort.**
 
@@ -2292,6 +2625,78 @@ GitHub Actions workflow (commit-SHA-pinned actions, no implicit
     or contributor-side process step is required, keeping the
     discipline mechanical rather than discretionary.
 
+### 15.11 Bridge actor private-key compromise
+
+  * **Risk.**  The bridge actor's signing key (held in the
+    runtime adaptor's HSM / key store) is compromised.  An
+    attacker can mint arbitrary `Action.deposit` actions on L2
+    without any L1 lock backing them, draining the bridge's
+    L1-locked collateral on first user redemption.
+  * **Mitigation.**  *Defence in depth*:
+    1. **HSM custody.**  The bridge key lives in an HSM with
+       TPM-attested boot.  No raw-key export.
+    2. **Per-event L1 receipt verification at admissibility time.**
+       The Solidity `CanonBridge.sol` records every `DepositInitiated`
+       event's `receiptHash` in a contract storage slot.
+       `CanonDisputeVerifier.sol` accepts a new claim variant
+       `unbackedDeposit` (post-MVP refinement) that lets anyone
+       challenge a Canon `Action.deposit` whose `depositId` does
+       not match an L1 `DepositInitiated` event.  The dispute
+       upholds; the bridge state rolls back; the attacker's
+       deposit is reverted before any redemption.
+    3. **Deposit emission rate-limiting.**  The bridge actor's
+       `processSignedAction` calls are rate-limited at the
+       runtime adaptor (configurable; default 100 deposits per
+       block).  An exfiltration attack thus needs many blocks to
+       drain the bridge, leaving time for human response.
+    4. **Operator monitoring.**  An off-chain watchdog compares
+       Canon's `totalDeposited` against L1's emitted event sum
+       continuously; divergence triggers a pause.
+
+### 15.12 ERC-20 decimal mismatch
+
+  * **Risk.**  Canon's `Amount : Nat` is unitless.  ERC-20 tokens
+    have their own `decimals()` (typically 6 for USDC, 18 for
+    most others); ETH is 18 decimals.  Naively mapping
+    `uint256 amount` to `Nat` loses the unit information; a
+    1-USDC deposit and a 1-DAI deposit produce the same Canon
+    amount but represent different value.
+  * **Mitigation.**  *Per-resource decimals discipline*:
+    1. The Canon deployment declares a `ResourceId → Nat` decimals
+       map at genesis (e.g. `1 → 18` for ETH, `2 → 6` for USDC).
+    2. `CanonBridge.sol` validates the mapping at deposit time:
+       the deposit-receipt encoding includes the
+       `(token, decimals)` pair; the Lean ingestor cross-checks
+       the deployed decimals against the genesis map.
+    3. `withdrawWithProof` emits the L1 token amount using the
+       same decimals map, applied in reverse.
+  * **Documentation.**  The `docs/abi.md §12` ABI section
+    documents the decimals map at the deployment-record level.
+
+### 15.13 Hash-binding output mismatch (post-deployment)
+
+  * **Risk.**  After landing, an attacker discovers a divergence
+    between the Lean-side keccak256 binding and the
+    Solidity-side keccak256 (e.g., a Rust-crate update changes
+    behaviour on a corner-case input).  The attacker forges a
+    state-root proof that the L1 contract accepts but Lean would
+    reject — bypassing the dispute pipeline entirely.
+  * **Mitigation.**  *Two-layer defence*:
+    1. **Build-time golden assertion.**  CI fails the build if
+       `runtime/canon-hash-keccak256`'s output on the F.2 golden
+       corpus diverges from the recorded hashes.  Forces
+       investigation of any binding change.
+    2. **Run-time self-test.**  `canon`'s startup performs a
+       100-input hash-binding sanity check against an embedded
+       golden table.  Failure exits with status 2 *before* any
+       state-affecting action.
+    3. **Pause on divergence detection.**  The off-chain
+       watchdog (see 15.11) periodically computes a Lean-side
+       state hash and compares against the L1 contract's
+       believed state hash.  Divergence triggers
+       `CanonBridge.pause()`, blocking all new deposits and
+       withdrawals pending governance review.
+
 ## 16. Out of scope (post-MVP)
 
 The following items are deliberately deferred.  They are listed
@@ -2367,3 +2772,178 @@ them.
     `LegalKernel/Kernel.lean` and `LegalKernel/RBMapLemmas.lean`.
   * **WU** — work unit, the atomic unit of engineering effort
     in the Genesis Plan / this document.
+
+## 18. Audit-1 changelog
+
+This document was audited against the Canon codebase shortly
+after its initial commit.  The audit found a number of factual
+errors, a substantive design gap, and several security /
+correctness improvements.  This section records what changed so
+that follow-up readers can distinguish the audited (current) form
+from the pre-audit form.
+
+### 18.1 Factual corrections
+
+  * **Two-reviewer rule reference** corrected from
+    `§13.6` (Genesis-Plan §13.6 is "Runbook: Adding a New Law")
+    to `§14.4` (the actual location of "Review Discipline" in
+    `docs/GENESIS_PLAN.md`).  Pre-audit text inherited the bad
+    reference from `CLAUDE.md`, which has the same drift.  All
+    five occurrences fixed.
+  * **`BoundedNat (2^160)` for `EthAddress`** was a type error.
+    The existing `BoundedNat` in
+    `LegalKernel/Encoding/Encodable.lean:234` is hardcoded
+    `< 2^64`, not parameterised.  Replaced with `Fin (2^160)`,
+    which:
+      * proves `i < 2^160` constructively (no runtime check),
+      * has a default `Ord (Fin n)` instance for `Std.TreeMap`
+        keying,
+      * derives `DecidableEq` automatically.
+    `EthAddress.ofBytes : ByteArray → Option EthAddress` is the
+    deployment-boundary validator that lifts a 20-byte
+    `ByteArray` into the `Fin` type.  §6.1.
+
+### 18.2 Substantive design correction: bridge admissibility
+
+  * **The pre-audit document had no concrete plan for enforcing
+    bridge-specific preconditions.**  Three obligations —
+    deposit-id uniqueness, registration first-time-only, and
+    bridge-actor authorisation — were hand-waved as living "in
+    the Action-layer compile path, alongside the existing
+    authority-level `apply_admissible_with` machinery", but no
+    such machinery exists for them.  `Transition.pre` operates
+    on `State`, not `ExtendedState` or `BridgeState`.
+  * **Resolution: a new WU C.0 introducing
+    `BridgeAdmissibleWith`.**  A new admissibility predicate
+    that conjuncts the existing `AdmissibleWith` with three
+    bridge-specific clauses.  A new `apply_bridge_admissible_with`
+    entry point that consumes the stronger witness and
+    additionally updates `BridgeState` via a new
+    `applyActionToBridgeState` helper (mirroring the existing
+    `applyActionToRegistry`).
+  * **Three new theorems** in §12.0:
+    `BridgeAdmissibleWith.toAdmissibleWith` (projection),
+    `apply_bridge_admissible_with_kernel_agreement` (the new
+    entry point agrees with the Phase-3 entry point on the
+    pre-existing fields), and `bridge_replay_impossible` (the
+    Phase-3 anti-replay theorem lifted via the projection).
+  * **§7.0 design rationale** added with the trade-off analysis
+    of strategies A/B/C and why C was chosen.
+  * **Dependency-DAG and critical-path updates** to put C.0
+    before C.1 / C.2 / C.3.  The critical path grows from 12 to
+    13 WUs; the wall-clock estimate is unchanged because C.0
+    fits in the same engineer-week as C.1.
+
+### 18.3 Mathematical corrections
+
+  * **`ingest` purity** corrected.  The pre-audit signature
+    `def ingest : AddressBook → L1Event → AddressBook × Option SignedAction`
+    was a type error: producing a `SignedAction` requires the
+    bridge actor's private key, which lives in the runtime
+    adaptor (Rust), not in Lean.  Replaced with
+    `AddressBook → Nonce → L1Event →
+       AddressBook × Option UnsignedBridgeAction`,
+    where `UnsignedBridgeAction` is a new structure carrying
+    `(action, signer, nonce)` for the runtime adaptor to sign
+    externally.  Pseudocode added showing how the runtime
+    composes the signature.  §6.2.
+  * **`ingest_commutes_for_distinct_addresses` weakened** to
+    `ingest_lookup_equivalent_for_distinct_addresses`.  The
+    pre-audit conclusion `b₂ = b₂'` was *false*: even when two
+    L1 events touch distinct addresses, the order of ingestion
+    can change which address gets the lower `ActorId` (the first
+    arrival is assigned the lower id).  The corrected theorem
+    asserts only that the `lookup` function returns
+    `some _ / none` consistently, which is the property the
+    application actually needs.  §6.2 / §12.8.
+  * **§12.13 fourth conjunct removed.**  The pre-audit headline
+    theorem had a "first-time-registration discipline" conjunct
+    with a `True` placeholder for the witnessing log entry —
+    effectively meaningless content.  Removed; the discipline
+    is now enforced through the `BridgeAdmissibleWith` predicate
+    at every state-advance call site (a strictly stronger form,
+    just not surfaced as a state-relational reachability
+    invariant).  A note explains why lifting it requires
+    log-history witnesses that are not first-order in
+    `ExtendedState`.
+  * **§7.6 `bridge_supply_account` proof shape** clarified.
+    Added the boundedness lemma (`totalWithdrawn` is bounded by
+    `totalDeposited + genesis_supply`) that justifies the use of
+    `=` over `≤` for `Nat` arithmetic.  The proof of the strict
+    form was promoted from a one-line corollary to an explicit
+    inductive argument that `totalRewarded` collapses to 0 under
+    the law-set restriction.
+
+### 18.4 Security and correctness improvements
+
+  * **EIP-712 envelope structure**.  Pre-audit text had
+    `keccak256(typeHash ‖ canonSignInput)` — non-conforming to
+    EIP-712, which requires field-by-field structured encoding.
+    Replaced with a proper `CanonAction` typed struct with four
+    EIP-712 fields (`actionHash : bytes32`, `signer : uint64`,
+    `nonce : uint64`, `deploymentId : bytes32`).  The wallet UI
+    now renders structured fields rather than an opaque blob.
+    §5.3.
+  * **Reentrancy on `withdrawWithProof`**.  Pre-audit text
+    only required `ReentrancyGuard` on deposit entry points;
+    `withdrawWithProof` also needs it (the recipient can be a
+    contract).  Added explicit CEI ordering specification: the
+    leaf-redemption flag is set *before* the external transfer.
+    §9.1.
+  * **Dispute-window-vs-redemption discipline**.  Added an
+    explicit deployment-time check that the dispute window is
+    no shorter than the maximum redemption delay — preventing
+    a successful dispute from leaving the bridge under-collateralised
+    after a user has already redeemed.  §9.1.
+  * **§15.11 added**: bridge actor private-key compromise risk.
+    A four-layer mitigation: HSM custody, post-MVP
+    `unbackedDeposit` claim variant, runtime rate-limiting,
+    off-chain divergence-watchdog.
+  * **§15.12 added**: ERC-20 decimals mismatch.  A per-resource
+    decimals map at the deployment level; bridge contract +
+    Lean ingestor cross-validate.
+  * **§15.13 added**: hash-binding output mismatch
+    post-deployment.  Three-layer defence: build-time golden
+    assertion, run-time self-test, off-chain divergence-watchdog.
+
+### 18.5 Counts and metadata
+
+  * **Work-unit count**: 28 → 29 (C.0 added).
+  * **Theorem-obligation count**: 41 → 44 (three C.0 theorems).
+  * **`bridge_deployment_safety` conjuncts**: 4 → 3 (the
+    placeholder fourth conjunct dropped).
+  * **Critical-path length**: 12 → 13 WUs.
+
+### 18.6 Items investigated but deliberately *not* changed
+
+  * **`Verdict.signers` / `Verdict.sigs` references in §9.2**.
+    The Audit-3.5 amendment replaced the parallel-list shape
+    with `Verdict.signatures : List (ActorId × Signature)` but
+    kept `Verdict.signers` / `Verdict.sigs` as back-compat
+    accessors.  The pre-audit text says "parallel signers / sigs
+    lists" which is now inaccurate at the field level but
+    accurate at the accessor level.  The Solidity-side ABI is
+    `(address, bytes)[]`, which matches the canonical pair-list
+    form.  Kept the accessor-level wording with a clarifying
+    note that the canonical wire form is `signatures`.  §9.2.
+  * **`ActorId : UInt64` mismatch with Ethereum's 20-byte
+    addresses**.  Already correctly identified as a non-goal
+    (§2.2 #1).  The registry-indirection path through
+    `AddressBook` (B.1) is the documented MVP work-around;
+    `EthAddress` (now `Fin (2^160)`) sits in the AddressBook
+    keys, while Canon's `ActorId` keys remain `UInt64`.  No
+    change.
+  * **Single-shot dispute proofs vs bisection**.  Already
+    correctly identified as a non-goal (§2.2 #3) with the
+    `≤ 256-entry log prefix` cap.  The cap is enforced at the
+    `CanonDisputeVerifier.sol` deployment-parameter level.  No
+    change.
+  * **MEV / sequencer ordering**.  Out of MVP scope (§2.2 #7).
+    No change; tracked as an item for the v2 sequencer
+    decentralisation workstream.
+  * **CLAUDE.md drift**.  CLAUDE.md still references `§13.6` for
+    the two-reviewer rule.  Fixing CLAUDE.md is out of this
+    document's scope; the corrected reference here points at
+    the actual location.  Workstream G.2 (CLAUDE.md update) is
+    the right place to flag the drift; an entry has been added
+    to G.2's deliverable list.
