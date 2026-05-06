@@ -1782,34 +1782,50 @@ structure Verdict where
   disputeId  : LogIndex   -- pointer to the dispute log entry
   outcome    : EvidenceVerdict
   rationale  : ByteArray  -- free-form, e.g. canonical evidence summary
-  signatures : Std.TreeMap ActorId Signature compare
+  signatures : List (ActorId × Signature)
+  -- with propositional invariant Verdict.canonical:
+  --   signatures.Pairwise (fun p q => p.fst < q.fst)
 ```
 
 **Audit-3.5 amendment.**  The earlier `signers : List ActorId` /
 `sigs : List Signature` parallel-list shape is replaced by a
-single `signatures : Std.TreeMap ActorId Signature` field.  This
+single `signatures : List (ActorId × Signature)` field plus a
+`Verdict.canonical` propositional invariant requiring the
+signatures list to be strictly ascending by `ActorId`.  This
 makes structural the three invariants that the parallel-list
 shape required value-level enforcement of:
 
-  * **Per-signer uniqueness.**  A TreeMap key is unique by
-    construction; no `(adjudicator, sig)` pair can appear more
-    than once.  The audit-1 `countVerifiedSignatures`
-    deduplication hack (which closed a trivial-quorum-forgery
-    bug) becomes unnecessary — uniqueness is now a type-level
-    guarantee.
-  * **Length agreement.**  No separate `signers` and `sigs` lists
-    means no possibility of unequal lengths or
+  * **Per-signer uniqueness.**  Strict-less-than sort ⇒ no
+    duplicate ActorIds, eliminating the trivial-quorum-forgery
+    bug class structurally for canonical verdicts.  The audit-1
+    `countVerifiedSignatures` per-signer dedup becomes
+    defense-in-depth (handles non-canonical inputs); for
+    canonical verdicts the dedup is a no-op.
+  * **Length agreement.**  No separate `signers` and `sigs`
+    lists means no possibility of unequal lengths or
     sig[i]-doesn't-match-signer[i] confusions.
-  * **Canonical encoding.**  TreeMap's `toList` produces a
-    `compare`-sorted pair list; the on-disk encoding is the
-    sorted-pair-list (mirroring `BalanceMap`'s pattern in
-    `Encoding/State.lean`).  The decoder enforces the
-    `keysStrictlyAscending` canonicality predicate, rejecting
-    `nonCanonical` inputs.
+  * **Canonical encoding.**  The encoder unzips `signatures`
+    into the parallel-list view `(signers, sigs)` (preserving
+    the pre-Audit-3.5 wire format byte-for-byte); the decoder
+    enforces canonicality on the input bytes via
+    `actorsStrictlyAscending` (decidable Bool check) and rejects
+    unsorted / duplicate-key inputs as `nonCanonical`.  Round-
+    trip is provable unconditionally on canonical inputs via
+    Lean core's `List.zip_unzip` identity — no missing Std lemma
+    is needed (an earlier TreeMap-based design was abandoned
+    because Lean core's `Std.Data.TreeMap.Lemmas` does not ship
+    a `(ofList compare m.toList).toList = m.toList` lemma).
 
-This is an ABI-breaking change: pre-amendment verdict-bearing log
-files do not parse under post-amendment binaries.  Acceptable for
-research-stage software.
+The wire format is unchanged.  Pre-Audit-3.5 verdicts whose
+serialised `signers` list is strictly ascending (the typical
+case for honest senders) continue to decode under the
+post-amendment binary.  Pre-Audit-3.5 verdicts with non-
+canonical orderings now decode to `.error nonCanonical`.
+
+Back-compat accessors `Verdict.signers : List ActorId` and
+`Verdict.sigs : List Signature` derive the parallel-list views
+from `signatures` so existing code (e.g.
+`Disputes/Rewards.lean`) keeps working unchanged.
 
 **Stage 4 — Verdict Application (`applyVerdict`).** If the verdict is
 `upheld`, the kernel applies a *rollback transition* whose effect is

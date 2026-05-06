@@ -179,7 +179,7 @@ lake build LegalKernel.Disputes.Rewards              # Phase-6 incentive amendme
 lake build LegalKernel.Disputes.Staking              # Phase-6 incentive amendment (WU 6.19)
 lake build canon                              # Phase-5 `canon` runtime CLI
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (659 tests post-Audit-3)
+lake test                           # run Tests.lean driver (664 tests post-Audit-3)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
@@ -1180,8 +1180,8 @@ but is open-ended and per-WU chartered.
 pass closing the residual deployment-readiness items identified
 by the project-feedback review.  Bumped `kernelBuildTag` to
 `"canon-phase-6-audit-3-hardening"`.  Test count grew from 614 to
-659 (+45 tests across new happy-path, attestation, coherence-API,
-and property-based suites).  TCB unchanged; no new axioms.
+664 (+50 tests across new happy-path, attestation, coherence-API,
+property-based, and Audit-3.5 canonicality suites).  TCB unchanged; no new axioms.
 
   * **Audit-3.1** — Fixed 32-byte hash output (eliminates the
     previous 8/32-byte variable-width chain); documented C ABI
@@ -1215,14 +1215,26 @@ and property-based suites).  TCB unchanged; no new axioms.
     signature against a known attestor public key.  Closes the
     self-attesting bootstrap gap.  11 attestation tests in the
     new `runtime-attested-snapshot` suite.
-  * **Audit-3.5** — Deferred.  The TreeMap refactor of `Verdict`
-    signatures was attempted but reverted because the round-trip
-    proof requires a `(Std.TreeMap.ofList compare m.toList).toList
-    = m.toList` lemma that Lean core's
-    `Std.Data.TreeMap.Lemmas` does not ship.  The audit-1 per-
-    signer dedup in `countVerifiedSignatures` continues to provide
-    the value-level defense.  See `Disputes/Types.lean::Verdict`'s
-    docstring for the deferral note.
+  * **Audit-3.5** — `Verdict.signers` / `Verdict.sigs` parallel-
+    list shape replaced with a single `signatures : List (ActorId
+    × Signature)` field plus a `Verdict.canonical` propositional
+    invariant requiring strict-ascending order on the keys.
+    Per-signer uniqueness is structural under canonicality
+    (strict-less-than implies no duplicates); encoding
+    malleability is eliminated for canonical verdicts (the
+    decoder enforces canonicality on input bytes via
+    `actorsStrictlyAscending` and rejects unsorted /
+    duplicate-key input as `nonCanonical`).  An initial attempt
+    using `Std.TreeMap` was abandoned because Lean core's
+    `Std.Data.TreeMap.Lemmas` does not ship a `(ofList compare
+    m.toList).toList = m.toList` lemma; the chosen
+    list-of-pairs+canonicality-invariant design avoids that
+    problem (round-trip closes via the standard `List.zip_unzip`
+    identity).  Back-compat accessors `Verdict.signers` and
+    `Verdict.sigs` derive the parallel-list views from
+    `signatures` so downstream consumers (e.g.
+    `Disputes/Rewards.lean`) keep working unchanged.  5 new
+    canonicality tests in `encoding-disputes`.
   * **Audit-3.6** — `apply_admissible_with_eq_kernelOnlyApply`
     coherence theorem: under admissibility, the dispute pipeline's
     `kernelOnlyApply` and the runtime's `apply_admissible_with`
