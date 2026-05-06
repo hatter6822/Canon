@@ -389,14 +389,16 @@ digest to `Verify`.  The Phase-5 stub passes the bytes themselves
 
 ## 8. The Runtime CLI (`canon`) ABI
 
-The `canon` binary exposes five subcommands plus a `help` alias:
+The `canon` binary exposes six subcommands plus a `help` alias
+(Workstream D added the sixth):
 
 ```
 canon [GLOBAL_FLAGS] info
-canon [GLOBAL_FLAGS] process     LOG IN [OUT]
-canon [GLOBAL_FLAGS] replay      LOG
-canon [GLOBAL_FLAGS] bootstrap   LOG
-canon [GLOBAL_FLAGS] snapshot    LOG SNAP_PATH
+canon [GLOBAL_FLAGS] process          LOG IN [OUT]
+canon [GLOBAL_FLAGS] replay           LOG
+canon [GLOBAL_FLAGS] bootstrap        LOG
+canon [GLOBAL_FLAGS] snapshot         LOG SNAP_PATH
+canon [GLOBAL_FLAGS] withdrawal-proof SNAP_PATH ID
 canon help
 ```
 
@@ -417,7 +419,9 @@ Argument semantics:
                    at the next record's start).
   * `OUT`        — optional; path to write the final 32-byte
                    `ContentHash` (Audit-3.1 fixed-width).
-  * `SNAP_PATH`  — path to write the `Snapshot` encoding.
+  * `SNAP_PATH`  — path to write or read the `Snapshot` encoding.
+  * `ID`         — a `WithdrawalId` (Nat) to look up in the
+                   snapshot's `bridge.pending` map (Workstream D.2).
 
 Exit codes:
 
@@ -443,8 +447,39 @@ Output format (stdout):
     partial tail` line on stderr when the log was torn.
   * `canon snapshot` — diagnostic block including state hash, log
     index, and confirmation of the snapshot file write.
+  * `canon withdrawal-proof` (Workstream D.2) — `leaf : <hex>`,
+    `index : <decimal>`, `siblings:` followed by 64 indented
+    hex lines (root-to-leaf order), then `root : <hex>`
+    (the snapshot's `bridgeWithdrawalRoot` against which the
+    L1 verifier hashes the path).  Exit 1 if the snapshot file
+    fails to load or the id is not in the snapshot's pending
+    set; exit 2 if the `ID` argument is not a valid Nat.
 
-## 9. The Replay CLI (`canon-replay`) ABI
+### 8.1 Workstream-D `WithdrawalProof` On-Wire Format
+
+The `WithdrawalProof` is the data the user submits to L1 for
+withdrawal redemption.  Its structure (per
+`Bridge/WithdrawalRoot.lean`):
+
+```lean
+structure WithdrawalProof where
+  leaf     : ByteArray                 -- canonical CBE encoding of PendingWithdrawal
+  index    : WithdrawalId              -- Nat
+  siblings : Vector ByteArray smtHeight  -- exactly 64 32-byte hashes
+```
+
+Convention: `siblings[0]` is the **root-adjacent** sibling (depth
+1), `siblings[63]` is the **leaf-adjacent** sibling (depth 64).
+The verifier walks leaf-to-root: at iteration `level` (0..63), it
+combines the current value with `siblings[63 - level]` via
+`hashUp H bit current sibling` where `bit = (idx >>> level) & 1`
+(LSB-up).
+
+The hex output of `canon withdrawal-proof` is a human-readable
+representation; production deployments serialise the proof to
+the wire format expected by `CanonBridge.sol` (Workstream E.1.3),
+which is a concatenation of `leaf || siblings[0] || siblings[1]
+|| ... || siblings[63]` plus a fixed-width index encoding.
 
 ```
 canon-replay [--allow-fallback-hash] LOG [SNAPSHOT]

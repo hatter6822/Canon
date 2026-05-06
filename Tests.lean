@@ -95,6 +95,10 @@ import LegalKernel.Test.Bridge.Ingest
 import LegalKernel.Test.Bridge.State
 import LegalKernel.Test.Bridge.Admissible
 import LegalKernel.Test.Bridge.Accounting
+import LegalKernel.Test.Bridge.WithdrawalRoot
+import LegalKernel.Test.Bridge.WithdrawalProof
+import LegalKernel.Test.Bridge.Finalisation
+import LegalKernel.Test.Bridge.WithdrawalRootGoldens
 
 open LegalKernel.Test
 
@@ -172,6 +176,14 @@ def main : IO UInt32 := do
                                     Bridge.AdmissibleTests.tests)
   failed := failed + (← runAll "bridge-accounting"
                                     Bridge.AccountingTests.tests)
+  failed := failed + (← runAll "bridge-withdrawal-root"
+                                    Bridge.WithdrawalRootTests.tests)
+  failed := failed + (← runAll "bridge-withdrawal-proof"
+                                    Bridge.WithdrawalProofTests.tests)
+  failed := failed + (← runAll "bridge-finalisation"
+                                    Bridge.FinalisationTests.tests)
+  failed := failed + (← runAll "bridge-withdrawal-goldens"
+                                    Bridge.WithdrawalRootGoldens.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0

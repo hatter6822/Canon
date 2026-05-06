@@ -1,0 +1,272 @@
+/-
+  Canon  - A Societal Kernel
+  Copyright (C) 2026  Adam Hall
+  This program comes with ABSOLUTELY NO WARRANTY.
+  This is free software, and you are welcome to redistribute it
+  under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+-/
+
+/-
+LegalKernel.Test.Bridge.WithdrawalRoot — Workstream D.1 acceptance tests.
+
+Drives the `WithdrawalRoot` module's data structures, verifier,
+constructor, completeness theorem, and soundness theorem at the
+value level.
+
+Test fixtures use a deterministic toy hash function (the FNV-1a-64
+fallback wrapped via `Runtime.Hash.hashBytes`) to drive the
+proofs to concrete byte sequences.  Production deployments
+substitute the keccak256 binding via `@[extern]`.
+-/
+
+import LegalKernel.Bridge.WithdrawalRoot
+import LegalKernel.Bridge.State
+import LegalKernel.Bridge.AddressBook
+import LegalKernel.Test.Framework
+
+open LegalKernel
+open LegalKernel.Bridge
+open LegalKernel.Runtime
+open LegalKernel.Encoding
+open LegalKernel.Test
+
+namespace LegalKernel.Test.Bridge.WithdrawalRootTests
+
+/-- A toy deterministic hash for tests: applies `hashBytes` (the
+    Phase-5 FNV-1a-64 fallback) directly.  Outputs are 32 bytes. -/
+def H : ByteArray → ByteArray := hashBytes
+
+/-- Single-leaf test fixture: one `PendingWithdrawal` at id 7. -/
+def fixtureOne : BridgeState :=
+  let wd : PendingWithdrawal :=
+    { resource := 1, recipient := EthAddress.zero, amount := 100, l2LogIndex := 5 }
+  BridgeState.empty.appendWithdrawal wd
+
+/-- Two-leaf test fixture: ids 0 and 1. -/
+def fixtureTwo : BridgeState :=
+  let wd1 : PendingWithdrawal :=
+    { resource := 1, recipient := EthAddress.zero, amount := 100, l2LogIndex := 0 }
+  let wd2 : PendingWithdrawal :=
+    { resource := 1, recipient := EthAddress.zero, amount := 200, l2LogIndex := 1 }
+  (BridgeState.empty.appendWithdrawal wd1).appendWithdrawal wd2
+
+/-- Eight-leaf test fixture: ids 0..7. -/
+def fixtureEight : BridgeState :=
+  let mkWd (i : Nat) : PendingWithdrawal :=
+    { resource := 1, recipient := EthAddress.zero,
+      amount := 10 + i, l2LogIndex := i }
+  let st0 := BridgeState.empty
+  let st1 := st0.appendWithdrawal (mkWd 0)
+  let st2 := st1.appendWithdrawal (mkWd 1)
+  let st3 := st2.appendWithdrawal (mkWd 2)
+  let st4 := st3.appendWithdrawal (mkWd 3)
+  let st5 := st4.appendWithdrawal (mkWd 4)
+  let st6 := st5.appendWithdrawal (mkWd 5)
+  let st7 := st6.appendWithdrawal (mkWd 6)
+  let st8 := st7.appendWithdrawal (mkWd 7)
+  st8
+
+/-- The tests for `WithdrawalRoot`. -/
+def tests : List TestCase :=
+  [ -- §8.1.1 — SMT shape constants
+    { name := "smtHeight = 64"
+    , body := assertEq (expected := (64 : Nat)) (actual := smtHeight) "shape"
+    }
+  , { name := "emptyLeafHash is 32 bytes"
+    , body := assertEq (expected := (32 : Nat)) (actual := emptyLeafHash.size)
+                       "size"
+    }
+  , { name := "defaultHash 0 = emptyLeafHash"
+    , body := do
+        let _t := @defaultHash_zero
+        assert ((defaultHash H 0).toList == emptyLeafHash.toList) "level 0"
+    }
+  , { name := "defaultHash 1 = H (emptyLeafHash ++ emptyLeafHash)"
+    , body := do
+        let _t := @defaultHash_succ
+        let lhs := (defaultHash H 1).toList
+        let rhs := (H (emptyLeafHash ++ emptyLeafHash)).toList
+        if lhs == rhs then pure () else throw <| IO.userError "level 1 mismatch"
+    }
+  , { name := "defaultHash_well_defined: term-level API"
+    , body := do
+        let _t := @defaultHash_well_defined
+        pure ()
+    }
+  -- §8.1.1 — withdrawalRoot
+  , { name := "withdrawalRoot of empty bridge state = defaultHash smtHeight"
+    , body := do
+        let _t := @withdrawalRoot_empty_eq_defaultHash_top
+        let lhs := (withdrawalRoot H BridgeState.empty).toList
+        let rhs := (defaultHash H smtHeight).toList
+        if lhs == rhs then pure () else throw <| IO.userError "empty mismatch"
+    }
+  , { name := "withdrawalRoot is deterministic"
+    , body := do
+        let r1 := (withdrawalRoot H fixtureOne).toList
+        let r2 := (withdrawalRoot H fixtureOne).toList
+        if r1 == r2 then pure () else throw <| IO.userError "non-deterministic"
+    }
+  , { name := "withdrawalRoot distinguishes empty from one-leaf"
+    , body := do
+        let r_empty := (withdrawalRoot H BridgeState.empty).toList
+        let r_one := (withdrawalRoot H fixtureOne).toList
+        if r_empty == r_one then
+          throw <| IO.userError "non-empty collided with empty root"
+        else pure ()
+    }
+  , { name := "withdrawalRoot distinguishes one-leaf from two-leaf"
+    , body := do
+        let r_one := (withdrawalRoot H fixtureOne).toList
+        let r_two := (withdrawalRoot H fixtureTwo).toList
+        if r_one == r_two then
+          throw <| IO.userError "two-leaf collided with one-leaf"
+        else pure ()
+    }
+  , { name := "withdrawalRoot_extensional: term-level API"
+    , body := do
+        let _t := @withdrawalRoot_extensional
+        pure ()
+    }
+  -- §8.1.2 — verifyProof / constructProof
+  , { name := "constructProof has siblings of length smtHeight"
+    , body := do
+        let proof := constructProof H fixtureOne 0
+        assertEq (expected := smtHeight) (actual := proof.siblings.size) "len"
+    }
+  , { name := "constructProof_deterministic: same input → same output"
+    , body := do
+        let p1 := constructProof H fixtureOne 0
+        let p2 := constructProof H fixtureOne 0
+        if p1 == p2 then pure () else throw <| IO.userError "non-deterministic"
+    }
+  , { name := "constructProof on absent index has empty-leaf"
+    , body := do
+        let proof := constructProof H BridgeState.empty 42
+        assertEq (expected := emptyLeafHash.toList) (actual := proof.leaf.toList)
+                 "empty-leaf"
+    }
+  , { name := "constructProof on present index has populated leaf"
+    , body := do
+        let proof := constructProof H fixtureOne 0
+        if proof.leaf.toList == emptyLeafHash.toList then
+          throw <| IO.userError "populated leaf collided with sentinel"
+        else pure ()
+    }
+  , { name := "constructProof_siblings_length: term-level API"
+    , body := do
+        let _t := @constructProof_siblings_length
+        pure ()
+    }
+  , { name := "verifyProof_total: term-level API"
+    , body := do
+        let _t := @verifyProof_total
+        pure ()
+    }
+  -- §8.1.3 — completeness
+  , { name := "verifyProof_complete: term-level API"
+    , body := do
+        let _t := @verifyProof_complete
+        pure ()
+    }
+  , { name := "fixtureOne: canonical proof verifies (single leaf)"
+    , body := do
+        let proof := constructProof H fixtureOne 0
+        let root := withdrawalRoot H fixtureOne
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "canonical proof for fixtureOne failed"
+    }
+  , { name := "fixtureTwo: canonical proof for id 0 verifies"
+    , body := do
+        let proof := constructProof H fixtureTwo 0
+        let root := withdrawalRoot H fixtureTwo
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "canonical proof at id 0 failed"
+    }
+  , { name := "fixtureTwo: canonical proof for id 1 verifies"
+    , body := do
+        let proof := constructProof H fixtureTwo 1
+        let root := withdrawalRoot H fixtureTwo
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "canonical proof at id 1 failed"
+    }
+  , { name := "fixtureEight: canonical proof for id 0 verifies"
+    , body := do
+        let proof := constructProof H fixtureEight 0
+        let root := withdrawalRoot H fixtureEight
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "fixtureEight id 0 failed"
+    }
+  , { name := "fixtureEight: canonical proof for id 4 verifies"
+    , body := do
+        let proof := constructProof H fixtureEight 4
+        let root := withdrawalRoot H fixtureEight
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "fixtureEight id 4 failed"
+    }
+  , { name := "fixtureEight: canonical proof for id 7 verifies"
+    , body := do
+        let proof := constructProof H fixtureEight 7
+        let root := withdrawalRoot H fixtureEight
+        if verifyProof H proof root then pure ()
+        else throw <| IO.userError "fixtureEight id 7 failed"
+    }
+  -- §8.1.4 — soundness (negative cases — verifier rejects bogus proofs)
+  , { name := "verifier rejects proof against wrong root"
+    , body := do
+        let proof := constructProof H fixtureOne 0
+        let bogus := H (ByteArray.mk (Array.replicate 32 (0xFF : UInt8)))
+        if verifyProof H proof bogus then
+          throw <| IO.userError "verifier accepted bogus root"
+        else pure ()
+    }
+  , { name := "verifier rejects proof with tampered leaf"
+    , body := do
+        let proof := constructProof H fixtureOne 0
+        let tampered : WithdrawalProof :=
+          { leaf := ByteArray.mk (Array.replicate 56 (0xFF : UInt8))
+            index := proof.index
+            siblings := proof.siblings }
+        let root := withdrawalRoot H fixtureOne
+        if verifyProof H tampered root then
+          throw <| IO.userError "verifier accepted tampered leaf"
+        else pure ()
+    }
+  , { name := "verifier rejects proof with tampered first sibling"
+    , body := do
+        let proof := constructProof H fixtureTwo 0
+        let bogusSib := ByteArray.mk (Array.replicate 32 (0xAA : UInt8))
+        let tamperedSibs := proof.siblings.set 0 bogusSib
+        let tampered : WithdrawalProof :=
+          { leaf := proof.leaf
+            index := proof.index
+            siblings := tamperedSibs }
+        let root := withdrawalRoot H fixtureTwo
+        if verifyProof H tampered root then
+          throw <| IO.userError "verifier accepted tampered sibling"
+        else pure ()
+    }
+  , { name := "verifyProof_sound: term-level API"
+    , body := do
+        let _t := @verifyProof_sound
+        pure ()
+    }
+  -- §8.1.4 — verifyProofRec_inj (verifier injectivity)
+  , { name := "verifyProofRec_inj: term-level API"
+    , body := do
+        let _t := @verifyProofRec_inj
+        pure ()
+    }
+  , { name := "CollisionFree: definition shape"
+    , body := do
+        let _t := @CollisionFree
+        pure ()
+    }
+  , { name := "UniformOutputSize: definition shape"
+    , body := do
+        let _t := @UniformOutputSize
+        pure ()
+    }
+  ]
+
+end LegalKernel.Test.Bridge.WithdrawalRootTests
