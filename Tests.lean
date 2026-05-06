@@ -69,6 +69,7 @@ import LegalKernel.Test.Runtime.Hash
 import LegalKernel.Test.Runtime.LogFile
 import LegalKernel.Test.Runtime.Replay
 import LegalKernel.Test.Runtime.Snapshot
+import LegalKernel.Test.Runtime.AttestedSnapshot
 import LegalKernel.Test.Runtime.Loop
 import LegalKernel.Test.Runtime.LoopHappyPath
 import LegalKernel.Test.Disputes.Filing
@@ -118,6 +119,8 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "runtime-logfile"   Runtime.LogFileTests.tests)
   failed := failed + (← runAll "runtime-replay"    Runtime.ReplayTests.tests)
   failed := failed + (← runAll "runtime-snapshot"  Runtime.SnapshotTests.tests)
+  failed := failed + (← runAll "runtime-attested-snapshot"
+                                    Runtime.AttestedSnapshotTests.tests)
   failed := failed + (← runAll "runtime-loop"      Runtime.LoopTests.tests)
   failed := failed + (← runAll "runtime-loop-happy-path"
                                     Runtime.LoopHappyPath.tests)

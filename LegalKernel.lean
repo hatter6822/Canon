@@ -132,6 +132,7 @@ import LegalKernel.Runtime.Hash
 import LegalKernel.Runtime.LogFile
 import LegalKernel.Runtime.Replay
 import LegalKernel.Runtime.Snapshot
+import LegalKernel.Runtime.AttestedSnapshot
 import LegalKernel.Runtime.Loop
 
 namespace LegalKernel
