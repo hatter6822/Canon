@@ -151,18 +151,7 @@ acceptance test.
 | 5           | Runtime and extraction (Lean side)   | Complete     |
 | 6           | Disputes and adjudication            | Complete     |
 | 6-amend     | Phase-6 incentive integration        | Complete     |
-| Audit-3     | Post-Phase-6 hardening pass          | Complete     |
 | 7           | Advanced capabilities                | Not started  |
-
-The Audit-3 hardening pass (post-Phase-6) closes nine residual
-deployment-readiness items: fixed-32-byte hash output with documented
-swap-point ABI, `--allow-fallback-hash` CLI fail-fast, parameterized
-admissibility predicate (`AdmissibleWith verify P deploymentId`)
-with happy-path test coverage, snapshot-attestation envelope, the
-`kernelOnlyReplay ↔ apply_admissible_with` coherence theorem, CI
-strict-warnings gate, stub-detection audit binary, and a property-
-based testing harness.  See CLAUDE.md's "Audit-3 hardening summary"
-section for per-track detail.
 
 A full per-WU changelog (Phase 0.1 onward) lives in [CLAUDE.md](CLAUDE.md);
 the canonical phase scoping lives in
