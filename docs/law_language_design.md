@@ -50,6 +50,7 @@ through the existing kernel typing rules; the trusted core
   13. [Roadmap](#13-roadmap)
   14. [Open questions](#14-open-questions)
   15. [Worked examples](#15-worked-examples)
+  16. [Audit-1 changelog](#16-audit-1-changelog)
 
 ---
 
@@ -153,10 +154,11 @@ with its own parser and elaborator.  This choice closes three risks:
 
   1. **TCB hygiene.**  A standalone elaborator becomes trusted by
      virtue of producing the kernel's input.  The current TCB
-     (`Kernel.lean` + `RBMapLemmas.lean`) is ~1100 lines of Std-only
-     Lean.  An external parser / elaborator would either need a
-     comparable correctness audit or would expand the TCB by an
-     unbounded amount.  Embedded macros run *before* type-checking,
+     (`Kernel.lean` + `RBMapLemmas.lean`) is ~700 lines of Std-only
+     Lean (`Kernel.lean` 392 + `RBMapLemmas.lean` 297 = 689 at the
+     time of writing).  An external parser / elaborator would either
+     need a comparable correctness audit or would expand the TCB by
+     an unbounded amount.  Embedded macros run *before* type-checking,
      produce ordinary Lean declarations, and the kernel's existing
      `lake exe count_sorries` / `lake exe tcb_audit` gates apply
      unchanged.
@@ -165,11 +167,15 @@ with its own parser and elaborator.  This choice closes three risks:
      works because Lean's instance-resolution sees the precondition
      in its native form.  A standalone language would have to
      re-implement decidability inference and the typeclass database.
-  3. **Property dispatch.**  `IsConservative` / `IsMonotonic` /
-     `FreezePreserving` (Phase-4-prelude WUs R.1–R.4) are typeclasses
+  3. **Property dispatch.**  `IsConservative` and `IsMonotonic`
+     (Phase-2 / Phase-4-prelude WUs R.1–R.4) are typeclasses
      dispatched by Lean's instance synthesizer.  Generating instance
      declarations from outside Lean is feasible but requires
      reproducing a non-trivial fragment of the Lean elaborator.
+     Lex additionally proposes new typeclasses
+     (`FreezePreserving`, `LocalTo`, `RegistryPreserving`; see §6.4)
+     that landing the synthesizer library introduces; these are
+     non-TCB additions to `Conservation.lean` and the Laws modules.
 
 The cost of embedding is that Lex inherits Lean 4's macro syntax
 constraints and Lean's error messages.  Section 10 specifies the
@@ -199,7 +205,7 @@ stated tersely; the justification follows.
      buried 60 lines into the macro expansion.
 
   2. **Flows are first-class; everything else is suspect.**  A
-     primitive `flow r: amt from a to b` desugars to the §4.11
+     primitive `flow r amt from a to b` desugars to the §4.11
      transfer pattern verbatim, including the self-transfer fix
      (post-debit re-read of the receiver), and emits
      `IsConservative` and `IsMonotonic` mechanically.  Operations
@@ -267,48 +273,60 @@ header_clause   ::= "identifier"   ident_path
                   | "action_index" nat_lit
                   | "intent"       md_block
 
-body_clause     ::= "signed_by"    actor_expr
-                  | "authorized_by" policy_expr
-                  | "pre"          ":=" pre_expr
-                  | "impl"         ":=" impl_block
-                  | "satisfies"    ":=" property_list
-                  | "events"       ":=" event_block
-                  | "proof"        ident ":=" tactic_block
+body_clause     ::= "signed_by"     actor_expr           -- no `:=`; takes a single expression
+                  | "authorized_by"  policy_expr          -- no `:=`; takes a single expression
+                  | "pre"           ":=" pre_expr
+                  | "impl"          ":=" impl_block
+                  | "satisfies"     ":=" property_list
+                  | "events"        ":=" event_block
+                  | "proof"          ident ":=" tactic_block
 
 ident_path      ::= ident ("." ident)*
 md_block        ::= "{" raw_text_until_balanced_close "}"
 pre_expr        ::= <restricted, see §6.1>
-impl_block      ::= "do" do_stmt+
-do_stmt         ::= "flow"   resource_expr ":" amount_expr
-                          "from" actor_expr "to" actor_expr
-                  | "mint"   resource_expr ":" amount_expr "to"   actor_expr
-                  | "burn"   resource_expr ":" amount_expr "from" actor_expr
-                  | "reward" resource_expr ":" amount_expr "to"   actor_expr
-                  | "for"    ident "in" bounded_iter ":" do_stmt
+impl_block      ::= "do" do_stmt (";" do_stmt)*       -- statement-separated; semicolons explicit
+                  | "[]"                              -- empty (no-op kernel-impl, no authority effect)
+do_stmt         ::= "flow"   resource_expr amount_expr "from" actor_expr "to" actor_expr
+                  | "mint"   resource_expr amount_expr "to"   actor_expr
+                  | "burn"   resource_expr amount_expr "from" actor_expr
+                  | "reward" resource_expr amount_expr "to"   actor_expr
+                  | "for"    ident "in" bounded_iter "do" do_stmt
                   | "if"     pre_expr "then" do_stmt ("else" do_stmt)?
                   | "let"    ident ":=" term
                   | "register_key"   actor_expr "as" key_expr
-                  | "revoke_key"     actor_expr
                   | "freeze_resource" resource_expr
                   | <bare term, must have type State → State>
+-- Note: `revoke_key` is intentionally omitted; the kernel ships
+-- `KeyRegistry.revoke` but no corresponding `Action` constructor
+-- (see §6.2 callout box).  Diagnostic L022 catches use.
+-- Note: the `flow / mint / burn / reward` statements use *space-
+-- separated* arguments (no colon mid-statement).  The earlier
+-- proposal `flow r: amt from a to b` was rejected because a colon
+-- between `r` and `amt` collides with Lean's type-ascription
+-- syntax.
 
-property_list   ::= "[" property ("," property)* "]"
-property        ::= "conservative"      "[" resource_set "]"
-                  | "monotonic"         "[" resource_set "]"
+property_list   ::= "[" (property ("," property)*)? "]"
+property        ::= "conservative"                          -- universal: claims `IsConservative t`
+                  | "monotonic"                             -- universal: claims `IsMonotonic t`
                   | "local"             "[" resource_set "]"
                   | "freeze_preserving" "[" resource_set "]"
                   | "nonce_advances"    "[" actor_expr   "]"
                   | "registry_preserving"
                   | ident                                   -- user-defined
 
-resource_set    ::= "{" (resource_expr ("," resource_expr)*)? "}"
-                  | "*"                                     -- all resources
-                  | resource_expr                           -- shorthand for {r}
+resource_set    ::= "{" (resource_expr ("," resource_expr)*)? "}"   -- finite, possibly empty
+                  | "*"                                              -- all manifest-declared resources
 
-event_block     ::= "do" emit_stmt+
+event_block     ::= "do" emit_stmt (";" emit_stmt)*
+                  | "[]"                                             -- no events
 emit_stmt       ::= "emit" event_ctor (term)*
-                  | "for" ident "in" bounded_iter ":" emit_stmt
-                  | "if" pre_expr "then" emit_stmt ("else" emit_stmt)?
+                  | "for" ident "in" bounded_iter "do" emit_stmt
+                  | "if" pred_expr "then" emit_stmt ("else" emit_stmt)?
+                  | "let" ident ":=" term
+
+-- `pred_expr` (events-block predicate) is the §6.1 PreExpr grammar
+-- extended with `getBalance postState …` references; events read
+-- both pre- and post-state, while `pre_expr` reads only pre-state.
 ```
 
 `bounded_iter` is any expression of type `List α` produced by
@@ -342,25 +360,25 @@ where
   authorized_by  deployment.transfer_policy sender r
 
   pre := fun s =>
-    amount > 0 ∧ getBalance s r sender ≥ amount
+    getBalance s r sender ≥ amount ∧ amount > 0
 
   impl := do
-    flow r: amount from sender to receiver
+    flow r amount from sender to receiver
 
   satisfies := [
-    conservative      [r],
-    monotonic         [r],
-    local             [r],
+    conservative,
+    monotonic,
+    local             [{r}],
     freeze_preserving [*],
     nonce_advances    [sender],
     registry_preserving
   ]
 
   events := do
-    let pre_sender   := getBalance s r sender
-    let pre_receiver := getBalance s r receiver
-    if amount > 0 then emit BalanceChanged r sender   (pre_sender   - amount) pre_sender
-    if amount > 0 then emit BalanceChanged r receiver (pre_receiver + amount) pre_receiver
+    let pre_sender   := getBalance preState r sender
+    let pre_receiver := getBalance preState r receiver
+    if amount > 0 then emit balanceChanged r sender   pre_sender   (pre_sender   - amount)
+    if amount > 0 then emit balanceChanged r receiver pre_receiver (pre_receiver + amount)
 ```
 
 This declaration is the *complete* source of truth for the
@@ -390,25 +408,25 @@ where
   signed_by      minter
   authorized_by  deployment.mint_policy minter r
 
-  pre := fun s => amount > 0
+  pre := fun _s => amount > 0
 
   impl := do
-    mint r: amount to receiver
+    mint r amount to receiver
 
   satisfies := [
-    monotonic         [r],
-    local             [r],
-    freeze_preserving [*],   -- minting a frozen resource is rejected by `pre` of `freezeResource`
+    monotonic,
+    local             [{r}],
+    freeze_preserving [{r}],   -- minting on a frozen `r` is rejected by the deployment's freeze invariant
     nonce_advances    [minter],
     registry_preserving
   ]
   -- conservative is *not* claimed; mint is not IsConservative.
-  -- Adding `conservative [r]` to the list above would fail
+  -- Adding `conservative` to the list above would fail
   -- elaboration with diagnostic L004.
 
   events := do
-    let pre_balance := getBalance s r receiver
-    if amount > 0 then emit BalanceChanged r receiver (pre_balance + amount) pre_balance
+    let pre_balance := getBalance preState r receiver
+    if amount > 0 then emit balanceChanged r receiver pre_balance (pre_balance + amount)
 ```
 
 ### 5.4. Worked example: `replaceKey` in Lex
@@ -433,18 +451,24 @@ where
 
   impl := do
     register_key actor as newKey
+    -- `register_key` is an *authority-layer* effect: it routes to
+    -- `applyActionToRegistry`, not to `apply_impl`.  The kernel-level
+    -- `apply_impl` is the identity here, matching the existing
+    -- `Action.replaceKey` compiles-to-`Laws.freezeResource 0` design
+    -- (see `LegalKernel/Authority/Action.lean` line 215).  The
+    -- authority-layer effect is what the §6.5 elaboration generates.
 
   satisfies := [
-    conservative      [*],
-    monotonic         [*],
-    local             [],         -- touches no resource
+    conservative,
+    monotonic,
+    local             [{}],       -- touches no resource at the kernel level
     freeze_preserving [*],
     nonce_advances    [actor]
     -- registry_preserving is *not* claimed; this law mutates the registry.
   ]
 
   events := do
-    emit IdentityRegistered actor newKey
+    emit identityRegistered actor newKey
 ```
 
 ### 5.5. Lexical conventions
@@ -570,46 +594,73 @@ that a deployment can audit by `grep '^@\[lex_pre\]'`.
 
 ### 6.2. The flow calculus (`impl`)
 
-`impl` is a `do`-block whose every statement is a `State → State`
-function.  The macro composes them left-to-right:
+`impl` is a `do`-block whose every statement is either a *kernel-
+impl* mutator (a `State → State` function elaborated into the
+generated `Transition.apply_impl`) or an *authority-layer* effect
+(a `KeyRegistry → KeyRegistry` function elaborated into the
+generated `applyActionToRegistry` branch).  The macro statically
+classifies each statement and routes it accordingly; mixing both
+kinds in one `impl` is supported (the `replaceKey` law is the
+canonical example — its `apply_impl` is the identity, while its
+authority-layer effect rotates the key).
+
+The macro composes kernel-impl statements left-to-right via state
+threading:
 
 ```text
-impl := do f₁; f₂; …; fₙ        ↦       fun s => fₙ (… (f₂ (f₁ s)))
+impl := do f₁; f₂; …; fₙ        ↦       apply_impl s := fₙ (… (f₂ (f₁ s)))
 ```
 
-The kernel-allowed mutators (`setBalance`, `KeyRegistry.register`,
-`KeyRegistry.revoke`, no-op for `freezeResource`) are exposed as
-five primitives:
+Authority-layer statements thread analogously through the
+registry.  At least one of the two effect kinds must be present for
+every law (a law with no effects whatsoever is rejected with
+diagnostic L021).
 
-| Primitive                                       | Desugars to                                                                     |
-|-------------------------------------------------|---------------------------------------------------------------------------------|
-| `flow r: amt from a to b`                       | post-debit re-read pattern (§4.11 self-transfer fix preserved verbatim)         |
-| `mint r: amt to b`                              | `setBalance b r ((getBalance s r b) + amt) s`                                   |
-| `burn r: amt from a`                            | `setBalance a r ((getBalance s r a) - amt) s`                                   |
-| `reward r: amt to b`                            | identical to `mint` at the kernel level (definitionally equal); separate Action |
-| `register_key a as k`                           | updates `es.registry` only; `es.base` and `es.nonces` unchanged                 |
-| `revoke_key a`                                  | same module, removal                                                            |
-| `freeze_resource r`                             | identity on `es` (semantic marker; freeze invariant is consumed by other laws)  |
-| `for x in <list>: <stmt>`                       | `(<list>).foldl (fun s' x => <stmt-as-fn> s') s`                                |
-| `if <pre> then <stmt₁> else <stmt₂>`            | `if <pre> then <stmt₁-as-fn> s else <stmt₂-as-fn> s` (decidable branch)         |
-| `let x := e`                                    | shadows the local; does **not** advance state                                   |
+Using the actual kernel signatures (`getBalance s r a`,
+`setBalance s r a v`), the primitives are:
 
-The `flow` desugaring is fixed to the §4.11 pattern:
+| Primitive                                       | Effect kind   | Desugars to                                                                                  |
+|-------------------------------------------------|---------------|----------------------------------------------------------------------------------------------|
+| `flow r amt from a to b`                        | kernel-impl   | post-debit re-read pattern (§4.11 self-transfer fix preserved verbatim; see code block below) |
+| `mint r amt to b`                               | kernel-impl   | `fun s => setBalance s r b (getBalance s r b + amt)`                                          |
+| `burn r amt from a`                             | kernel-impl   | `fun s => setBalance s r a (getBalance s r a - amt)` (truncated `Nat` subtraction)            |
+| `reward r amt to b`                             | kernel-impl   | identical to `mint` at the kernel level (definitionally equal); separate Action constructor   |
+| `freeze_resource r`                             | kernel-impl   | `fun s => s` (identity; the freeze marker's effect is observed by other laws' `pre`)          |
+| `register_key a as k`                           | authority     | `fun reg => KeyRegistry.register reg a k` (kernel-impl is identity for this branch)           |
+| `for x in <list>: <stmt>`                       | host          | `(<list>).foldl (fun s' x => <stmt-as-fn> s') s`                                              |
+| `if <pre> then <stmt₁> else <stmt₂>`            | host          | `if <decidable-pre> then <stmt₁-as-fn> s else <stmt₂-as-fn> s` (precondition decidable per §6.1) |
+| `let x := e`                                    | host          | local binding; no state advance                                                               |
+
+The `flow r amt from sender to receiver` desugaring is fixed to
+the verbatim §4.11 pattern from `LegalKernel/Laws/Transfer.lean`
+(lines 63–70):
 
 ```lean
 fun s =>
-  let bSender   := getBalance s r sender
-  let s₁        := setBalance sender r (bSender - amount) s
-  let bReceiver := getBalance s₁ r receiver           -- post-debit re-read
-  setBalance receiver r (bReceiver + amount) s₁
+  let fromBal := getBalance s r sender
+  let s₁      := setBalance s r sender (fromBal - amt)
+  -- Crucial: read receiver from s₁ (post-debit), not s.
+  -- Self-transfer (sender = receiver) preserves the actor's balance.
+  let toBal   := getBalance s₁ r receiver
+  setBalance s₁ r receiver (toBal + amt)
 ```
 
 This is the **one** place in the language where a user could choose
 to deviate (by writing the raw `setBalance` calls themselves).  Lex
 forbids that: a `do` block whose statements are bare `setBalance`
-calls is rejected by diagnostic L010.  The reasoning is that the
+calls is rejected with diagnostic L010.  The reasoning is that the
 self-transfer fix is subtle, has bitten the project before, and
 should be enforced by macro rather than by review-time alertness.
+
+> **Why no `revoke_key` primitive?**  The kernel ships
+> `KeyRegistry.revoke` as a function but ships no corresponding
+> `Action` constructor (`Authority/Action.lean` has only
+> `replaceKey`; `Event.identityRevoked` is documented as "reserved
+> for a future `revokeKey` Action constructor").  Adding `revoke_key`
+> to Lex would require simultaneously adding the `Action`
+> constructor and an `Event` constructor; that is a kernel
+> amendment, not a Lex feature.  V3 admits it (§13.3); v1 forbids
+> it (diagnostic L022).
 
 For laws that need shapes outside the calculus (e.g. a per-resource
 fold like `proportionalDilute`'s share computation), the law author
@@ -618,7 +669,7 @@ writes a *helper function* outside the `law` block, tags it
 
 ```lean
 @[lex_impl]
-def proportionalShare (totalReward : Nat) (myStake : Nat) (totalStake : Nat) : Nat :=
+def proportionalShare (totalReward myStake totalStake : Nat) : Nat :=
   totalReward * myStake / totalStake
 ```
 
@@ -626,7 +677,8 @@ The `@[lex_impl]` attribute marks the function as part of the
 deployment-trusted impl surface.  It carries no theorem obligation
 (the obligation lives in the calling law's `satisfies` block); the
 attribute exists so tooling can list every term that contributes to
-state mutation.
+state mutation, and so `lex_lint` can refuse calls into untagged
+helpers (diagnostic L023).
 
 The bare-term escape hatch (`<bare term, must have type State →
 State>` in §5.1's grammar) is the v1 escape hatch for laws not
@@ -634,21 +686,52 @@ expressible in the calculus.  V2 plans to remove it; see §13.
 
 ### 6.3. Authority binding (`signed_by` / `authorized_by`)
 
-`signed_by <actor>` is **mandatory**.  It binds the law's signer
-identity for nonce advancement and signature verification.  The
-elaborator wires it into the §8.2 `Admissible` predicate as the
-`actor = st.signer` constraint and emits a corresponding nonce-
-advance call after the `apply_impl` body:
+`signed_by <actor-expr>` is **mandatory**.  Its semantics are
+two-fold:
+
+  1. **Nonce-advance binding.**  The elaborator emits the `nonces :=
+     advanceNonce es.nonces st.signer` step after `apply_impl`,
+     wiring the per-actor monotonic-nonce guarantee
+     (`expectsNonce_strict_mono` in `Authority/Nonce.lean`) without
+     manual book-keeping.
+  2. **Signer-identity strengthening.**  Lex *strengthens* the §8.2
+     `Admissible` predicate beyond what the kernel currently
+     enforces.  The kernel's existing `AdmissibleWith` checks the
+     authorization policy and signature-under-registered-key but
+     does not by itself enforce that `st.signer` equals any
+     particular field of the action (that constraint lives in the
+     deployment's `AuthorityPolicy`).  Lex's `signed_by sender`
+     emits an additional propositional conjunct
+     `st.signer = sender` that the elaborator inserts into the
+     generated admissibility-check shim (the `myLaw_apply` wrapper
+     below).  This closes a class of "actor X signs a transfer FROM
+     actor Y" attacks that would otherwise depend on review-time
+     diligence in the `AuthorityPolicy`.  The added constraint is
+     decidable (via `DecidableEq ActorId`).
+
+The generated apply wrapper has the shape (kernel-impl branch
+only; the authority-layer branch threads the registry analogously
+when `register_key` appears):
 
 ```lean
 -- generated, elided from the user's view
-def myLaw_apply (st : SignedAction) (es : ExtendedState) (h : Admissible … es st) :
-    ExtendedState :=
+def myLaw_apply
+    (st : SignedAction) (es : ExtendedState)
+    (h : Admissible … es st)
+    (h_signer : st.signer = sender)            -- from `signed_by sender`
+    : ExtendedState :=
   { es with
-    base     := myLaw_impl …
+    base     := myLaw_impl es.base                -- from `impl := do …`
     nonces   := advanceNonce es.nonces st.signer
-    registry := … }
+    registry := applyActionToRegistry st.action es.registry }   -- identity unless `register_key` appears
 ```
+
+The `h_signer` hypothesis is supplied at the call site by the
+deployment's authority policy (when the policy permits this signer
+to issue this action with this `sender` field, the policy must
+also imply `st.signer = sender`).  V2 lifts this from a side
+condition into a kernel-level conjunct of `AdmissibleWith` so the
+implication is structural, not policy-dependent.
 
 `authorized_by <policy-expr>` is **mandatory** for any law that
 mutates state observable to a third party (the kernel's `transfer`,
@@ -684,56 +767,140 @@ the property and the law.  The user can override by supplying a
 in which case the synthesizer is skipped and the user's tactic is
 used as the instance body.
 
-The v1 synthesizer library is:
+#### 6.4.1. Property vocabulary
 
-| Property                         | Synthesizer                                              |
-|----------------------------------|----------------------------------------------------------|
-| `conservative [r]`               | structural induction on the `impl` `do`-block; succeeds  |
-|                                  | iff every statement is `flow … r …`, `freeze_resource`,  |
-|                                  | `register_key`, `revoke_key`, or `for x in …` whose body |
-|                                  | discharges; **fails** on any `mint`, `burn`, `reward`,   |
-|                                  | or `flow` on a different resource at the same `r`.       |
-| `conservative [{r₁, …, rₙ}]`     | conjunction of `conservative [rᵢ]` for each `rᵢ`         |
-| `conservative [*]`               | matches conservatives whose `impl` does not touch any    |
-|                                  | balance (e.g. `replaceKey`, `freezeResource`, `dispute`) |
-| `monotonic [r]`                  | structural induction; succeeds on `flow … r …`,          |
-|                                  | `mint r …`, `reward r …`, `register_key`, `revoke_key`,  |
-|                                  | `freeze_resource`; **fails** on `burn r …`.              |
-| `monotonic [*]`                  | conjunction over every resource the `impl` touches plus  |
-|                                  | a no-op witness for resources untouched.                 |
-| `local [{r₁, …, rₙ}]`            | static analysis of `impl` computes the set of touched    |
-|                                  | resources; succeeds iff it is a subset of `{r₁, …, rₙ}`. |
-| `local []`                       | the `impl` touches no resource (registry-only laws).     |
-| `freeze_preserving [r]`          | reduces to: every balance-touching statement is on a     |
-|                                  | resource ≠ r OR the law's precondition forbids it.       |
-| `freeze_preserving [*]`          | conjunction of all per-resource freeze-preservation.     |
-| `nonce_advances [a]`             | derived: holds iff `signed_by a` is the law's binding.   |
-| `registry_preserving`            | succeeds iff `impl` contains no `register_key` /         |
-|                                  | `revoke_key` statement.                                  |
-| user-defined property `P`        | requires `proof P := by …` clause.                       |
+The kernel's existing typeclasses
+(`Conservation.lean`) are *universal over `ResourceId`*: an
+`IsConservative t` instance asserts conservation at *every*
+resource simultaneously, with the per-resource case-split handled
+inside the synthesizer (combining a "preserves at `r`" theorem for
+the law's primary resource with a "does not touch other resources"
+theorem for every other `r' ≠ r`).  Lex's surface vocabulary
+mirrors this universal shape:
+
+  * `conservative` — claims `IsConservative t`; valid iff the
+    `impl` is structurally non-supply-changing at every resource.
+  * `monotonic` — claims `IsMonotonic t`; valid iff the `impl` is
+    structurally non-supply-decreasing at every resource.
+
+For properties whose natural shape is per-resource (locality,
+freeze-preservation), Lex uses an *explicit set parameter*:
+
+  * `local [{r₁, …, rₙ}]` — claims the `impl` touches no resource
+    outside the named set.  Empty set `{}` is a registry-only law.
+    The wildcard form `local [*]` is rejected (always trivially
+    true; carries no information; diagnostic L024).
+  * `freeze_preserving [{r₁, …, rₙ}]` — claims the law preserves
+    the `FrozenForResource` invariant at each `rᵢ`.  Wildcard
+    `freeze_preserving [*]` is shorthand for "every resource the
+    deployment knows about" and is the common case.
+
+For authority-layer properties:
+
+  * `nonce_advances [a]` — derived from `signed_by a`; the
+    synthesizer succeeds by definition.
+  * `registry_preserving` — claims the `impl` contains no
+    authority-layer effect.
+
+The grammar consequently supports two property shapes (§5.1's
+`property_list` is updated to match): unparameterised property
+names (`conservative`, `monotonic`, `registry_preserving`) and
+property-with-resource-set forms (`local [{…}]`,
+`freeze_preserving [{…}]`).  An attempt to write `conservative
+[r]` (with a per-resource argument) is rejected with diagnostic
+L025 and the hint "the kernel's `IsConservative t` is universal
+over `ResourceId`; drop the `[r]`".
+
+#### 6.4.2. Underlying typeclasses
+
+Lex's synthesizer uses the existing `IsConservative` and
+`IsMonotonic` typeclasses unchanged.  Three new non-TCB
+typeclasses are introduced as part of the v1 landing (§12.1's M1
+checkpoint):
+
+```lean
+/-- `LocalTo S t` — applying `t` mutates only resources in `S`.  The
+    structural analogue of the existing `*_does_not_touch_other_resources`
+    family of lemmas (`Laws/Transfer.lean`, etc.). -/
+class LocalTo (S : Std.TreeSet ResourceId compare) (t : Transition) : Prop where
+  local_to : ∀ (r : ResourceId) (a : ActorId) (s : State),
+             r ∉ S → t.pre s →
+             getBalance (step_impl s t) r a = getBalance s r a
+
+/-- `FreezePreserving S t` — `t` preserves `FrozenForResource` at every
+    `r ∈ S`.  Wraps the existing `*_preserves_freeze` lemma family
+    (`Laws/Freeze.lean`) into a typeclass. -/
+class FreezePreserving (S : Std.TreeSet ResourceId compare) (t : Transition) : Prop where
+  preserves : ∀ (r : ResourceId), r ∈ S →
+              ∀ (snap : Option BalanceMap) (s : State),
+              FrozenForResource r snap s → t.pre s →
+              FrozenForResource r snap (step_impl s t)
+
+/-- `RegistryPreserving t` — `t`'s authority-layer effect is the
+    identity on `KeyRegistry`.  Trivial for every `Action`
+    constructor except `replaceKey`. -/
+class RegistryPreserving (t : Transition) : Prop where
+  preserves : ∀ (es : ExtendedState) (st : SignedAction),
+              -- (precise statement deferred; placeholder shape)
+              True
+```
+
+These are *additions* to `Conservation.lean` and `Laws/Freeze.lean`,
+not modifications of the kernel TCB.  The `tcb_audit` allowlist is
+unchanged because the new typeclasses live in non-TCB modules.
+
+#### 6.4.3. Synthesizer table
+
+The v1 synthesizer library:
+
+| Property                        | Discharge strategy                                                                                                                                                                  |
+|---------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `conservative`                  | succeeds iff every kernel-impl statement of `impl` is `flow` / `freeze_resource` / `register_key`-as-no-op-on-balances OR `for` body that itself discharges; **fails** on any `mint`, `burn`, `reward`, or fold-of-non-conservative. |
+| `monotonic`                     | succeeds on `flow` / `mint` / `reward` / `freeze_resource` / `register_key`; **fails** on `burn` (witnessed by `burn_not_monotonic`).                                              |
+| `local [{r₁, …, rₙ}]`           | static analysis of `impl` collects the set of resources mentioned in `flow` / `mint` / `burn` / `reward` statements; succeeds iff this set is a subset of `{r₁, …, rₙ}`.            |
+| `freeze_preserving [{r₁, …, rₙ}]` | succeeds iff every kernel-impl statement is on a resource ∉ `{r₁, …, rₙ}`, OR the precondition `pre` is decidable-incompatible with `FrozenForResource r snap s` for each `rᵢ`.   |
+| `freeze_preserving [*]`         | shorthand for `freeze_preserving [{r}]` where `r` ranges over every resource the deployment manifest declares.  Resolved at manifest-elaboration time.                              |
+| `nonce_advances [a]`            | derived: succeeds iff `signed_by a` is the law's binding.                                                                                                                           |
+| `registry_preserving`           | succeeds iff the `impl` contains no `register_key` (or any other authority-layer mutator).                                                                                          |
+| user-defined property `P`       | requires `proof P := by …` clause.  See §6.4.5.                                                                                                                                     |
 
 Each synthesizer emits a Lean `instance` declaration whose body is
 either a direct call to a known kernel theorem (e.g. for
-`conservative [r]` on a single-flow `impl`, the body is
-`exact transfer_conserves r sender receiver amount`) or a small
-tactic block constructing the witness from the kernel-shipped
-lemmas (`getBalance_setBalance_other`, `transfer_does_not_touch_other_resources`,
-etc.).
+`conservative` on a single-flow `impl`, the body is built from
+`transfer_conserves` + `transfer_does_not_touch_other_resources`)
+or a tactic block constructing the witness from the kernel-shipped
+lemmas (`getBalance_setBalance_other`,
+`transfer_does_not_touch_other_resources`, etc.).
+
+#### 6.4.4. Synthesizer limitations
 
 The synthesizers are **deliberately conservative**.  A law shaped
-as `flow r₁: a₁ from x to y; flow r₁: a₂ from y to x` (a round
+as `flow r amt₁ from x to y; flow r amt₂ from y to x` (a round
 trip) is *informally* conservative but the structural-induction
 synthesizer will not detect that.  A user who wants to claim
-conservation in such a case provides a `proof conservative [r₁] := by …`
-override.  The point of the conservative synthesizer is not to be
-clever — it is to be *predictable* so reviewers can trust automatic
-discharge without reading the proof.
+conservation in such a case provides a `proof conservative := by …`
+override.  Similarly, fold-of-flow shapes
+(`for x in <list>: flow …`) are not handled by the v1 monotonicity
+synthesizer because the structural induction does not commute with
+list folding without case-splitting on list emptiness;
+`distributeOthers` is the canonical example
+(see open question §14.4 and the worked example in §15.3 which
+demonstrates the `proof monotonic := by exact distributeOthers_isMonotonic …`
+override).
+
+The point of the synthesizer is not to be clever — it is to be
+*predictable* so reviewers can trust automatic discharge without
+reading the proof.  V2 will extend the synthesizer to handle
+fold-of-flow via the `List.foldl`-induction lemma already used in
+`Laws/DistributeOthers.lean`.
+
+#### 6.4.5. User-defined properties
 
 User-defined properties are admissible:
 
 ```
 satisfies := [
-  conservative [r],
+  conservative,
   KYC_compliant
 ]
 
@@ -743,10 +910,13 @@ proof KYC_compliant := by
   exact ⟨…⟩
 ```
 
-The user-defined property must be a `Prop`-valued predicate over the
-generated `def` (the `Transition` value).  Concretely:
+The user-defined property must be a `Prop`-valued predicate over
+the generated `def` (the `Transition` value), tagged with the
+`@[lex_property]` attribute so that `lex_lint` can refuse references
+to untagged identifiers (diagnostic L020):
 
 ```lean
+@[lex_property]
 def KYC_compliant (t : Transition) : Prop := …
 ```
 
@@ -790,12 +960,28 @@ build fails.  Adding a new law adds a registry entry in the same
 PR; removing a law removes the entry but leaves the index reserved
 forever (a tombstone) so historical replay is unaffected.
 
-The closed-inductive shape of `Action` is preserved: the elaborator
-accumulates all `law` declarations in the build, sorts them by
-`action_index`, and emits a single `Authority/Action.lean` file (in
-v2 — see §13) or a diff against the existing one (in v1).  The
-constructor names are `Action.<lawName>` per the registry, so wire
-compatibility hinges on the index, not the surface name.
+The closed-inductive shape of `Action` is preserved through a
+two-stage process.  Lean macros run *per-file* — there is no
+global "accumulate all declarations" hook in Lean 4 — so the
+elaborator cannot directly extend the `Action` inductive from a
+sibling module.  Instead:
+
+  1. **Per-file macro pass.**  Each `law` declaration emits its
+     non-cross-module artefacts (the `Transition` `def`, the
+     `satisfies` instance declarations, the `intent` docstring,
+     and a small *codegen-input* file at
+     `LegalKernel/_lex_inputs/<identifier>.json` capturing the
+     declaration's metadata).
+  2. **Build-time codegen pass.**  `lake exe lex_codegen` reads
+     every codegen-input file, sorts them by `action_index`, and
+     emits a single regenerated `Authority/Action.lean` (in v2)
+     or a diff (in v1).  Constructor names are `Action.<lawName>`
+     per the registry, so wire compatibility hinges on the index,
+     not the surface name.
+
+CI runs `lake exe lex_codegen --check` (§9.2) to ensure the
+checked-in `Authority/Action.lean` matches the codegen output;
+divergence fails the build with diagnostic L026.
 
 For laws whose `impl` mutates the registry (currently only
 `replaceKey`), the elaborator omits the auto-generated
@@ -810,33 +996,52 @@ effects is generalised (§13).
 
 The `events` block is a `do`-style sequence of `emit <constructor>
 <args>…` statements that elaborate to a branch of `actionEvents` in
-`LegalKernel/Events/Extract.lean`.  The elaborator threads the pre-
-and post-state through implicitly:
+`LegalKernel/Events/Extract.lean`.  The actual signature is
+
+```lean
+def actionEvents (preState postState : LegalKernel.State) (action : Action) :
+    List Event
+```
+
+— the state arguments are `LegalKernel.State`, not `ExtendedState`,
+because event extraction reads only balance / mutated cells; the
+authority-layer `nonces` and `registry` views are surfaced via the
+auto-emitted `nonceAdvanced` / `identityRegistered` events at the
+top-level `extractEvents` wrapper.  Existing `Event` constructors
+are camelCase per kernel convention (`balanceChanged`,
+`nonceAdvanced`, `identityRegistered`); the argument order for
+`balanceChanged` is `(r, actor, oldV, newV)` — old first, new
+second — matching `Events/Types.lean` line 79.
+
+A typical `events` block:
 
 ```text
 events := do
-  emit BalanceChanged r sender   newBalSender   oldBalSender
-  emit BalanceChanged r receiver newBalReceiver oldBalReceiver
+  emit balanceChanged r sender   pre_sender   (pre_sender   - amount)
+  emit balanceChanged r receiver pre_receiver (pre_receiver + amount)
 ```
 
-elaborates to (roughly)
+elaborates to (roughly):
 
 ```lean
-fun (preState postState : ExtendedState) =>
-  let oldBalSender   := getBalance preState  r sender
-  let newBalSender   := getBalance postState r sender
-  let oldBalReceiver := getBalance preState  r receiver
-  let newBalReceiver := getBalance postState r receiver
-  [Event.balanceChanged r sender   newBalSender   oldBalSender,
-   Event.balanceChanged r receiver newBalReceiver oldBalReceiver]
+fun (preState postState : LegalKernel.State) =>
+  let pre_sender   := getBalance preState r sender
+  let pre_receiver := getBalance preState r receiver
+  let evS := if amount > 0 then
+               [Event.balanceChanged r sender   pre_sender   (pre_sender   - amount)]
+             else []
+  let evR := if amount > 0 then
+               [Event.balanceChanged r receiver pre_receiver (pre_receiver + amount)]
+             else []
+  evS ++ evR
 ```
 
 Lex's event block enforces three invariants:
 
-  1. **Pre / post-state availability.**  The block can refer to both
-     `preState` and `postState` via the `getBalance s r a` shape.
-     Implicit `s` defaults to `preState` for parsing convenience but
-     is rebindable.
+  1. **Pre / post-state availability.**  The block has `preState`
+     and `postState` in scope as `LegalKernel.State`.  References
+     to a bare `s` are an error (diagnostic L027); use the explicit
+     name to make the read site unambiguous.
   2. **Determinism.**  All event-emission expressions must be free
      of `IO` and `Task`.  This is statically checked.
   3. **Event-impl alignment (warning level).**  The elaborator
@@ -844,17 +1049,24 @@ Lex's event block enforces three invariants:
      touches and warns (diagnostic L013) if the `events` block
      either omits an event for a touched cell or emits one for an
      untouched cell.  The warning is *not* an error in v1 because
-     the `extractEvents` machinery already filters zero-deltas
-     (§5.6 of `Events/Extract.lean`); a follow-up release may
-     promote the warning to an error.
+     the existing `actionEvents` machinery already filters
+     zero-deltas (every `balanceChanged` emission is conditional
+     on `oldV != newV`; see `Events/Extract.lean` lines 122–123).
+     A follow-up release may promote the warning to an error.
 
-Events implicit from the authority layer are auto-emitted:
-`Event.nonceAdvanced signer newNonce` is always emitted at the end
-of the generated branch (since `signed_by` is mandatory).
-`Event.identityRegistered` / `Event.identityRevoked` are auto-emitted
-when the `impl` contains `register_key` / `revoke_key`.  A user
-`emit` of these is allowed but produces a warning (L014) recommending
-the auto-emission.
+Events implicit from the authority layer are auto-emitted at the
+top-level `extractEvents` wrapper, *not* in the per-action
+`actionEvents` branch:
+`Event.nonceAdvanced signer oldN newN` is always emitted (since
+`signed_by` is mandatory).  A user `emit nonceAdvanced …` inside
+an `events` block is allowed but produces a warning (L014)
+recommending removal in favor of the wrapper's emission.
+
+For a law with no per-action events (e.g. `freezeResource`), the
+empty form `events := []` is permitted (and is the canonical
+spelling — `events := do pure ()` and `events := do nothing` both
+elaborate to the same empty list, but L013 prefers the explicit
+empty list for clarity).
 
 ### 6.7. Resource roles (deferred to v3)
 
@@ -977,58 +1189,100 @@ A `deployment` declaration elaborates to:
 
   1. a `def deployment_<name> : Deployment` (a record bundling all
      the manifest fields);
-  2. one `instance` per `invariant_claims` item, synthesising
+  2. one `def` per `invariant_claims` item, synthesising
      `MonotonicLawSet` / `ConservativeLawSet` / etc. values;
-  3. a `theorem deployment_<name>_manifest_hash : ByteArray :=
+  3. a `def deployment_<name>_manifest_hash : ByteArray :=
      <CBE-hash of the manifest source bytes>` that the
      attestor signs in v2.
 
 The most important elaboration step is the invariant-claim
-synthesis.  For `monotonic_law_set [L₁, …, Lₙ]`, the elaborator
-emits
+synthesis.  Note that `MonotonicLawSet.laws : List Transition`
+takes *transitions*, not law-name identifiers, so the manifest's
+`laws := [Transfer, Mint, …]` block must first translate each
+local name to its `Transition` value via the law's parameter
+binding.  For a `monotonic_law_set [L₁, …, Lₙ]` claim where each
+`Lᵢ` is a Lex-bound name with parameters `(p_i^1, …, p_i^{kᵢ})`,
+the elaborator emits
 
 ```lean
-def deployment_<name>_monotonic_law_set : MonotonicLawSet :=
-  { laws := [L₁, …, Lₙ]
-  , monotonicity := by
-      intro l hl
-      simp [List.mem_cons] at hl
-      rcases hl with ⟨…⟩
-      all_goals (first | exact L₁_isMonotonic | … | exact Lₙ_isMonotonic) }
+def deployment_<name>_monotonic_law_set
+    (params_for_each_Lᵢ_in_scope) : MonotonicLawSet where
+  laws        := [L₁ p_1^1 … p_1^{k₁}, …, Lₙ p_n^1 … p_n^{kₙ}]
+  isMonotonic := by
+    intro t htL
+    simp [List.mem_cons] at htL
+    rcases htL with ⟨…⟩ | ⟨…⟩ | …
+    all_goals (first | exact (L₁_isMonotonic …) | … | exact (Lₙ_isMonotonic …))
 ```
+
+The `isMonotonic` field name (per `Conservation.lean` line 620)
+matches the existing `MonotonicLawSet` structure exactly.
 
 If any `Lᵢ` lacks the `IsMonotonic` instance, synthesis fails with
 diagnostic L008 naming the offending law.  This is the type-level
 firewall (§2 of `docs/economic_invariants.md`) made *deployment-time*
 rather than per-PR-checklist.
 
+For per-resource laws whose parameter binding is awkward at the
+manifest level (transfer takes `r sender receiver amount`; the
+manifest cannot pre-bind these without knowing the actions a-priori),
+the manifest claims a *family* of monotonicity:
+
+```lean
+def deployment_<name>_monotonic_law_set : ∀ ps, MonotonicLawSet := …
+```
+
+with `ps` ranging over the action parameters.  The runtime adaptor
+selects the appropriate instantiation per processed action.  V1
+elides this complexity by having the manifest claim
+`monotonic_law_set [Transfer, Mint, Freeze, ReplaceKey]` as a
+*declarative* assertion (every constructor of these laws inhabits
+`IsMonotonic`); the actual `MonotonicLawSet` value is constructed
+on demand.
+
 ### 7.4. Cross-deployment-replay protection
 
 The `deployment_id` field is a 32-byte unique identifier that flows
-into Audit-3.3/3.4's `signingInput` parameterisation:
+into Audit-3.3/3.4's `signingInput` parameterisation
+(`Authority/SignedAction.lean` line 169):
 
 ```lean
 def signingInput
-    (a : Action) (signer : ActorId) (n : Nonce)
-    (deploymentId : ByteArray) : ByteArray := …
+    (action : Action) (signer : ActorId) (nonce : Nonce)
+    (deploymentId : ByteArray) : SigningInput := …
 ```
 
 A signature produced for `deployment_id = 0xDEAD…` will not verify
 against any other deployment's `Verify` invocation because the
-deployment-ID bytes are part of the message under signature.
+deployment-ID bytes are part of the message under signature
+(via the length-prefixed concatenation that makes `signingInput`
+injective in `(action, signer, nonce, deploymentId)`).
 
-The manifest elaborator is responsible for ensuring the
-`deployment_id` is propagated wherever `Admissible` is reached:
+Concretely, the manifest elaborator emits two declarations that
+together pin the deployment's admissibility predicate:
 
-  * `processSignedAction` reads the deployment's `deployment_id` and
-    passes it to `signingInput`;
-  * the runtime adaptor (Phase 5) is configured per-deployment with
-    a single `deployment_id` value.
+```lean
+-- Generated from the manifest:
+def deployment_<name>_id : ByteArray := <32-byte literal>
+
+def deployment_<name>_admissible :
+    ExtendedState → SignedAction → Prop :=
+  AdmissibleWith Verify deployment_<name>_authority_policy deployment_<name>_id
+```
+
+The runtime adaptor (Phase 5's `Runtime.Loop.processSignedAction`)
+is configured per-deployment to use `deployment_<name>_admissible`
+in place of the back-compat `Admissible := AdmissibleWith Verify P
+ByteArray.empty` alias.  Replay (`Runtime.Replay`) and snapshot
+(`Runtime.Snapshot`) consumers thread the same identifier.
 
 V1 ships the manifest's `deployment_id` field as a literal
-`ByteArray`; v2 may ship a "deployment-ID derivation" sub-language
-(SHA-256 of (organisation || version || nonce)) for deployments
-that prefer derived IDs.
+`ByteArray` whose 32-byte length is checked at parse time
+(diagnostic L018).  V2 may ship a "deployment-ID derivation"
+sub-language (e.g. `BLAKE3(manifest_source_bytes)`) for deployments
+that prefer derived IDs; whichever scheme is chosen, the canonical
+form must be a pure function of inputs the manifest itself
+records, so a counterparty can recompute it.
 
 ### 7.5. Manifest signing
 
@@ -1228,12 +1482,14 @@ The Audit-3.9 in-tree property harness
 (`LegalKernel/Test/Property.lean`) can auto-generate property tests
 from `satisfies` claims:
 
-  * `conservative [r]` ⇒ a property test that draws random
-    `(state, sender, receiver, amount)` triples, applies the law,
-    and asserts `totalSupply post r = totalSupply pre r`.
-  * `monotonic [r]` ⇒ the same shape with `≥` instead of `=`.
-  * `local [{r}]` ⇒ a test that asserts every resource ≠ r is
-    pointwise-unchanged.
+  * `conservative` ⇒ a property test that draws random
+    `(state, sender, receiver, amount, resource)` tuples, applies
+    the law, and asserts `totalSupply post r = totalSupply pre r`
+    for every resource `r` (the universal-over-`r` shape of the
+    `IsConservative` typeclass).
+  * `monotonic` ⇒ the same shape with `≥` instead of `=`.
+  * `local [{r₁, …, rₙ}]` ⇒ a test that asserts every resource ∉
+    `{r₁, …, rₙ}` is pointwise-unchanged.
 
 `lake exe lex_codegen` emits an auto-generated test file
 (`LegalKernel/Test/Properties/AutoGen.lean`) with one harness call
@@ -1270,20 +1526,27 @@ documentation by code.
 | L018  | Manifest `deployment_id` not 32 bytes                        | error    | Pad to exactly 32 bytes; deployment IDs are fixed-width.                          |
 | L019  | `for x in <iter>:` body's iter is not statically a `List α`  | error    | Convert via `.toList` or use a different bounded iterator.                        |
 | L020  | Unknown property `<P>` referenced in `satisfies`             | error    | Tag a `def <P>` with `@[lex_property]` and provide a `proof <P> := …` clause.     |
+| L021  | Law has no kernel-impl effects and no authority-layer effects | error    | Add at least one statement to `impl`; a no-effect law is not expressible.         |
+| L022  | `revoke_key` used but no `Action.revokeKey` constructor      | error    | Defer to v3; the kernel does not yet ship a `revokeKey` Action constructor.       |
+| L023  | `impl` calls a helper not tagged `@[lex_impl]`               | error    | Tag the helper with `@[lex_impl]` so the deployment-trusted-impl surface is auditable. |
+| L024  | `local [*]` claim (always trivially satisfied)               | error    | Replace with `local [{r₁, …, rₙ}]` naming the touched resources, or drop the claim. |
+| L025  | Per-resource argument `[r]` to `conservative` / `monotonic`  | error    | Drop the `[r]`; the kernel's `IsConservative` / `IsMonotonic` are universal over `ResourceId`. |
+| L026  | `lex_codegen --check` finds checked-in artefact divergence   | error    | Run `lake exe lex_codegen` and commit the regenerated files.                      |
+| L027  | Bare `s` reference inside `events := do …`                   | error    | Use the explicit `preState` or `postState` name; `s` is ambiguous.                |
 
 ### 10.2. Diagnostic format
 
 Each diagnostic prints in a consistent format:
 
 ```text
-<file>:<line>:<col>: error: L004: Property `conservative [r]` not synthesizable for law `myLaw`
+<file>:<line>:<col>: error: L004: Property `conservative` not synthesizable for law `myLaw`
   --> note: structural induction on `impl` failed; offending statement is
-  --> note:   mint r: amount to receiver
+  --> note:   mint r amount to receiver
   --> note: at <file>:<line>:<col>.
   --> hint: `mint` is non-conservative by design.  Consider:
-  --> hint:   - dropping `conservative [r]` from `satisfies`;
+  --> hint:   - dropping `conservative` from `satisfies`;
   --> hint:   - replacing `mint` with `flow`;
-  --> hint:   - supplying `proof conservative [r] := by …` with a manual witness.
+  --> hint:   - supplying `proof conservative := by …` with a manual witness.
 ```
 
 The file/line/col is anchored at the *surface syntax* (the user's
@@ -1467,7 +1730,9 @@ and M3 are independent and remain useful even without M2.
   * `law` macro extended with mandatory `signed_by`,
     `authorized_by`, `satisfies`, `intent`, `action_index`.
   * `flow` / `mint` / `burn` / `reward` / `register_key` /
-    `revoke_key` / `freeze_resource` primitives in `impl`.
+    `freeze_resource` primitives in `impl`.  (`revoke_key` is
+    deferred to v3; the kernel does not yet ship a `revokeKey`
+    Action constructor — see §6.2 callout box.)
   * Property synthesizer library covering `conservative`,
     `monotonic`, `local`, `freeze_preserving`, `nonce_advances`,
     `registry_preserving`.
@@ -1543,15 +1808,20 @@ honest.
      synthesizer library is empty for them in v1.  Open: what is
      the v2 vocabulary for cross-law claims?
 
-  4. **Compositional property dispatch.**  A law whose `impl` is a
-     sequence of `flow`s on different resources should be able to
-     claim `conservative [r₁, r₂]` if each flow is on its own `rᵢ`.
-     V1's structural-induction synthesizer handles this; but it
-     does *not* handle laws whose `impl` is `for x in <list>: flow
-     …`.  Open: how does the synthesizer reason about
-     fold-of-flow?  (The current `Laws/DistributeOthers.lean` has
-     this proof structure; v1 falls back to the user supplying
-     `proof conservative [r] := by …`.)
+  4. **Compositional property dispatch over fold-of-flow.**  A
+     law whose `impl` is a sequence of `flow`s on different
+     resources is `conservative` if each flow individually
+     conserves its own resource (the synthesizer handles this via
+     structural induction).  But a law whose `impl` is `for x in
+     <list>: flow …` is not handled by the v1 synthesizer because
+     the structural induction does not commute with list folding
+     without case-splitting on list emptiness.
+     `Laws/DistributeOthers.lean` has this exact proof structure
+     (a `List.foldl`-induction over `mint` calls); v1 falls back
+     to `proof monotonic := by exact distributeOthers_isMonotonic …`.
+     Open: in v2, can the synthesizer auto-discharge fold-of-flow
+     by emitting a tactic block that performs the same
+     `List.foldl`-induction the existing kernel proofs use?
 
   5. **Property-test seed reproducibility across hosts.**
      Audit-3.9's harness is deterministic given a seed; auto-
@@ -1582,6 +1852,19 @@ honest.
      instance to be present at the *attribute* level (rejected if
      the instance fails to synthesize for any input)?
 
+  9. **Signer-identity-strengthening lift to the kernel.**  §6.3
+     adds an `st.signer = <named-actor>` propositional conjunct
+     at every law's call site, supplied by the deployment's
+     authority policy.  This works but is structurally
+     side-conditional: the constraint depends on the policy
+     implying it, not on the kernel enforcing it.  V2 should
+     consider lifting this into `AdmissibleWith` itself — for
+     example by extending `Action` constructors with an
+     "intended signer" field that the kernel checks against
+     `st.signer` directly.  Open: does this break wire
+     compatibility with existing logs, and if so, is a major
+     bump tolerable for the security gain?
+
 These questions do not block v1.  They are open in the sense of
 "resolve before committing to v2" — none of them require breaking
 the v1 surface.
@@ -1611,30 +1894,30 @@ where
   signed_by      burner
   authorized_by  deployment.burn_policy burner r
 
-  pre := fun s => amount > 0 ∧ getBalance s r burner ≥ amount
+  pre := fun s => getBalance s r burner ≥ amount ∧ amount > 0
 
   impl := do
-    burn r: amount from burner
+    burn r amount from burner
 
   satisfies := [
-    local             [r],
-    freeze_preserving [*],
+    local             [{r}],
+    freeze_preserving [{r}],
     nonce_advances    [burner],
     registry_preserving
   ]
-  -- Neither `conservative [r]` nor `monotonic [r]` is claimed.
+  -- Neither `conservative` nor `monotonic` is claimed.
   -- The kernel ships `burn_not_conservative` and `burn_not_monotonic`
   -- as negative witnesses.
 
   events := do
-    let pre_balance := getBalance s r burner
-    if amount > 0 then emit BalanceChanged r burner (pre_balance - amount) pre_balance
+    let pre_balance := getBalance preState r burner
+    if amount > 0 then emit balanceChanged r burner pre_balance (pre_balance - amount)
 ```
 
 ### 15.2. `freezeResource` — registry- and balance-preserving marker
 
 ```
-law freezeResource (r : ResourceId)
+law freezeResource (governanceActor : ActorId) (r : ResourceId)
 where
   identifier   legalkernel.freezeResource
   version      "1.0.0"
@@ -1647,8 +1930,8 @@ where
     This law itself is a no-op on the underlying `BalanceMap`.
   }
 
-  signed_by      _governanceActor
-  authorized_by  deployment.governance_policy _governanceActor r
+  signed_by      governanceActor
+  authorized_by  deployment.governance_policy governanceActor r
 
   pre := fun _s => True
 
@@ -1656,76 +1939,103 @@ where
     freeze_resource r
 
   satisfies := [
-    conservative      [*],
-    monotonic         [*],
-    local             [],
+    conservative,
+    monotonic,
+    local             [{}],          -- touches no balance cell
     freeze_preserving [*],
-    nonce_advances    [_governanceActor],
+    nonce_advances    [governanceActor],
     registry_preserving
   ]
 
-  events := do
-    -- no balance event; the freeze marker is observable only via
-    -- `disputeStatus`-style reads.
-    pure ()
+  events := []
+  -- No per-action events; the freeze marker is observable only via
+  -- the auto-emitted `nonceAdvanced` from `signed_by` and via
+  -- subsequent laws' `pre` rejections.  The §6.6 canonical empty
+  -- form is `events := []`.
 ```
+
+Note that the actual `Action.freezeResource` constructor takes only
+`(r : ResourceId)` (`Authority/Action.lean` line 134); the
+`governanceActor` parameter above is *Lex-level only* and is bound
+into the `signed_by` constraint via the macro's
+`st.signer = governanceActor` strengthening (§6.3.2).  The
+generated `Action.freezeResource` constructor remains unchanged
+on the wire.
 
 ### 15.3. `distributeOthers` — fold-of-flow
 
 ```
 law distributeOthers
-    (r : ResourceId) (rewarder : ActorId) (excluded : ActorId)
-    (amount : Nat) (recipients : List ActorId)
+    (rewarder : ActorId) (r : ResourceId) (excluded : ActorId) (amount : Nat)
 where
   identifier   legalkernel.distributeOthers
   version      "1.0.0"
   action_index 6
 
   intent {
-    Issue `amount` units of `r` to every recipient in `recipients`
-    except `excluded`.  Each recipient receives the same flat
-    `amount`; this is *not* proportional to existing balance.  The
-    `recipients` list is supplied by the deployment via the
-    `Action.distributeOthers` constructor and is bounded.
+    Issue `amount` units of `r` to every actor with a non-zero
+    balance at `r`, except `excluded`.  Each recipient receives
+    the same flat `amount`; this is *not* proportional to existing
+    balance.  The recipient list is computed from
+    `affectedActors preState r excluded` (which extracts the
+    non-excluded keys of the resource's `BalanceMap`); the kernel
+    bounds the work per action by the size of that map.
   }
 
   signed_by      rewarder
   authorized_by  deployment.reward_policy rewarder r
 
-  pre := fun s => amount > 0
+  pre := fun _s => amount > 0
 
   impl := do
-    for recipient in recipients:
-      if recipient ≠ excluded then mint r: amount to recipient
+    -- `affectedActors preState r excluded` is the bounded
+    -- iterator: the non-excluded keys of `preState.balances[r]?`.
+    -- This matches `Events/Extract.lean`'s `affectedActors` helper.
+    for recipient in affectedActors_at r excluded:
+      mint r amount to recipient
 
   satisfies := [
-    monotonic         [r],
-    local             [r],
-    freeze_preserving [*],
+    monotonic,
+    local             [{r}],
+    freeze_preserving [{r}],
     nonce_advances    [rewarder],
     registry_preserving
   ]
 
-  proof monotonic [r] := by
+  proof monotonic := by
     -- The structural-induction synthesizer does not (in v1) handle
     -- fold-of-mint over a list.  We discharge it manually via
-    -- `Laws.distributeOthers_isMonotonic` from the existing kernel.
-    exact distributeOthers_isMonotonic r rewarder excluded amount recipients
+    -- `Laws.distributeOthers_isMonotonic` (`Laws/DistributeOthers.lean`
+    -- line 254) from the existing kernel.
+    exact distributeOthers_isMonotonic r excluded amount
 
   events := do
-    for recipient in recipients:
-      if recipient ≠ excluded ∧ amount > 0 then
-        let pre_balance := getBalance s r recipient
-        emit BalanceChanged r recipient (pre_balance + amount) pre_balance
+    -- `actionEvents` for `distributeOthers` (Extract.lean line 148–149)
+    -- delegates to `balanceChangeEvents preState postState r
+    -- (affectedActors preState r excluded)`.  Lex's elaborator
+    -- generates the equivalent inline form below.
+    for recipient in affectedActors_at r excluded:
+      let oldV := getBalance preState  r recipient
+      let newV := getBalance postState r recipient
+      if oldV ≠ newV then emit balanceChanged r recipient oldV newV
 ```
+
+The `Action.distributeOthers` constructor itself takes only
+`(r : ResourceId) (excluded : ActorId) (amount : Amount)` per
+`Authority/Action.lean` line 148; the Lex-level `rewarder`
+parameter is bound by `signed_by` into the
+`st.signer = rewarder` constraint as described in §6.3.2.
 
 This example exercises four mechanisms simultaneously:
 
-  * the `for x in <bounded-list>:` loop construct;
-  * the `if <pre>:` guarded statement;
+  * the `for x in <bounded-list>:` loop construct, where the
+    bounded iterator is the deployment-defined helper
+    `affectedActors_at` reading the pre-state's `BalanceMap` keys;
   * a `proof <P> := by …` override for a property the v1 synthesizer
     cannot mechanically discharge (open question §14.4);
-  * conditional event emission.
+  * unconditional event emission inside a loop, with the
+    elaborator-generated zero-delta filter (`if oldV ≠ newV`)
+    matching the existing `actionEvents` semantics.
 
 ### 15.4. `dispute` — claim-bearing administrative law
 
@@ -1754,20 +2064,31 @@ where
     -- All four dispute-pipeline action ctors compile to a no-op at
     -- the kernel level; the dispute's effects are observed via the
     -- `disputeStatus` log walk and the `applyVerdict` flow.
-    freeze_resource 0    -- marker no-op (same definitional shape
-                         --                as the existing dispute compileTransition)
+    freeze_resource 0    -- marker no-op (matches the existing
+                         -- `Action.dispute` compileTransition at
+                         -- `Authority/Action.lean` line 224)
 
   satisfies := [
-    conservative      [*],
-    monotonic         [*],
-    local             [],
+    conservative,
+    monotonic,
+    local             [{}],
     freeze_preserving [*],
     nonce_advances    [d.challenger],
     registry_preserving
   ]
 
   events := do
-    emit DisputeFiled d
+    -- The actual `Event.disputeFiled` (Events/Types.lean line 108)
+    -- carries the challenger plus the *primary* impugned log
+    -- index extracted from the claim variant; matches
+    -- `Events/Extract.lean` lines 152–164.
+    let targetIdx := match d.claim with
+                     | .preconditionFalse i      => i
+                     | .signatureInvalid i       => i
+                     | .nonceMismatch i          => i
+                     | .oracleMisreported i _    => i
+                     | .doubleApply i _          => i
+    emit disputeFiled d.challenger targetIdx
 ```
 
 This example shows how the four §8.4 dispute-pipeline action
@@ -1805,23 +2126,23 @@ where
     ∧ getBalance s r staker ≥ amount
 
   impl := do
-    flow r: amount from staker to deployment.escrow_actor
+    flow r amount from staker to deployment.escrow_actor
 
   satisfies := [
-    conservative      [r],
-    monotonic         [r],
-    local             [r],
-    freeze_preserving [*],
+    conservative,
+    monotonic,
+    local             [{r}],
+    freeze_preserving [{r}],
     nonce_advances    [staker],
     registry_preserving
   ]
 
   events := do
-    let pre_staker := getBalance s r staker
-    let pre_escrow := getBalance s r deployment.escrow_actor
-    emit BalanceChanged r staker                     (pre_staker - amount) pre_staker
-    emit BalanceChanged r deployment.escrow_actor    (pre_escrow + amount) pre_escrow
-    emit StakingLocked  staker amount unlock_height        -- user-defined event
+    let pre_staker := getBalance preState r staker
+    let pre_escrow := getBalance preState r deployment.escrow_actor
+    emit balanceChanged r staker                  pre_staker (pre_staker - amount)
+    emit balanceChanged r deployment.escrow_actor pre_escrow (pre_escrow + amount)
+    emit stakingLocked  staker amount unlock_height        -- user-defined event
 ```
 
 The `unlock_height` field is captured into the event but does not
@@ -1834,12 +2155,209 @@ This example demonstrates two things:
 
   1. The same `flow` calculus that captures `transfer` captures any
      escrow-style law verbatim.  The `satisfies` synthesizers
-     discharge `conservative [r]` mechanically because the underlying
-     `impl` is a single `flow`.
-  2. User-defined events (`StakingLocked`) compose with the
-     auto-emitted `BalanceChanged` and `NonceAdvanced` events; the
-     deployment registers `Event.stakingLocked` as a constructor in
-     its private event vocabulary (a v3 feature; see §13.3).
+     discharge `conservative` mechanically because the underlying
+     `impl` is a single `flow`.  (Recall: `IsConservative` is
+     universal-over-`r`; the synthesizer combines a per-resource
+     proof at `r` with a "does not touch other resources" proof
+     for every `r' ≠ r`.)
+  2. User-defined events (`stakingLocked`) compose with the
+     auto-emitted `balanceChanged` and `nonceAdvanced` events; the
+     deployment registers `Event.stakingLocked` as a constructor
+     in its private event vocabulary (a v3 feature; see §13.3).
+
+---
+
+## 16. Audit-1 changelog
+
+This document was audited against the Canon codebase shortly after
+its initial commit.  The audit found a number of factual errors
+and design inconsistencies that were corrected in-place.  This
+section records what changed so that follow-up readers can
+distinguish the audited (current) form from the pre-audit form.
+
+### 16.1. Factual corrections
+
+  * **TCB size**: corrected from "~1100 lines" to "~700 lines"
+    (`Kernel.lean` 392 + `RBMapLemmas.lean` 297 = 689 at audit
+    time).  §3.
+  * **`getBalance` / `setBalance` argument orders**: pre-audit
+    desugarings used `setBalance b r v s` and `setBalance receiver
+    r (bReceiver + amount) s₁`; the kernel's actual signature is
+    `setBalance (s : State) (r : ResourceId) (a : ActorId) (v :
+    Amount)`.  All `flow` / `mint` / `burn` desugaring code blocks
+    in §6.2, §15 corrected.
+  * **`Event.balanceChanged` argument order**: pre-audit emitted
+    `balanceChanged r actor newV oldV`; actual signature
+    (`Events/Types.lean` line 79) is `balanceChanged (r : ResourceId)
+    (a : ActorId) (oldV newV : Amount)` — old first, new second.
+    All `events` blocks in §5.2, §5.3, §5.4, §6.6, §15 corrected.
+  * **Event constructor casing**: pre-audit used PascalCase
+    (`BalanceChanged`, `IdentityRegistered`, `DisputeFiled`);
+    actual constructors are camelCase
+    (`balanceChanged`, `identityRegistered`, `disputeFiled`).
+    All `emit` statements corrected.
+  * **`actionEvents` state type**: pre-audit said
+    `(preState postState : ExtendedState)`; actual signature is
+    `(preState postState : LegalKernel.State)`.  §6.6 corrected.
+  * **`MonotonicLawSet` field name**: pre-audit said `monotonicity
+    := …`; actual field name is `isMonotonic` (`Conservation.lean`
+    line 620).  §7.3 corrected.
+  * **`Action.distributeOthers` signature**: pre-audit had 5
+    parameters including `rewarder` and `recipients`; actual
+    constructor takes only `(r : ResourceId) (excluded : ActorId)
+    (amount : Amount)`.  §15.3 corrected; the `rewarder` parameter
+    moved to a Lex-level binding consumed by `signed_by`, the
+    recipient list is computed from `affectedActors_at`.
+  * **`Event.disputeFiled` argument shape**: pre-audit emitted the
+    raw `Dispute` record; actual constructor takes
+    `(challenger : ActorId) (targetIdx : Nat)` per `Events/Types.lean`
+    line 108.  §15.4 updated to extract the target index from the
+    claim variant.
+  * **`transfer` precondition order**: pre-audit had `amount > 0 ∧
+    getBalance s r sender ≥ amount`; actual `Laws/Transfer.lean`
+    line 61 has `getBalance s r sender ≥ amount ∧ amount > 0`.
+    Worked examples updated to match.
+  * **`§5.6 of Events/Extract.lean`**: pre-audit reference; actual
+    is "WU 5.6 documented in `Events/Extract.lean`".  §6.6 fixed.
+  * **`Authority/Action.lean` line 215 reference**: §5.4
+    `replaceKey` example now points to the actual line for
+    `Action.replaceKey → Laws.freezeResource 0` mapping.
+  * **`§5.6 of Events/Extract.lean`**: pre-audit reference; actual
+    is "WU 5.6 documented in `Events/Extract.lean`".  §6.6 fixed.
+
+### 16.2. Design corrections
+
+  * **`FreezePreserving` typeclass nonexistence**: pre-audit §3
+    listed `FreezePreserving` alongside `IsConservative` and
+    `IsMonotonic` as a Phase-4-prelude typeclass.  The kernel does
+    not ship `FreezePreserving` as a typeclass; it ships per-law
+    named theorems (`transfer_preserves_freeze` etc.).  §3 now
+    explicitly notes that Lex *proposes* three new non-TCB
+    typeclasses (`FreezePreserving`, `LocalTo`, `RegistryPreserving`)
+    as additions to `Conservation.lean` / `Laws/Freeze.lean`, and
+    §6.4.2 specifies their full Lean signatures.
+
+  * **Per-resource property syntax incoherence**: pre-audit §5
+    examples and §6.4 synthesizer table claimed
+    `conservative [r]`, `monotonic [r]`, etc. as per-resource
+    forms.  The kernel's existing `IsConservative t` and
+    `IsMonotonic t` are *universal over `ResourceId`* — there are
+    no per-resource typeclasses.  Lex syntax now uses
+    unparameterised `conservative` / `monotonic` claims; only
+    `local [{…}]` and `freeze_preserving [{…}]` carry resource-set
+    parameters.  Diagnostic L025 flags the old syntax with a
+    precise hint.  §5.2 / §5.3 / §5.4 / §6.4 / §15 examples
+    updated.
+
+  * **`register_key` effect routing**: pre-audit §6.2 listed
+    `register_key` alongside kernel-impl mutators as if it were
+    `State → State`.  The actual `Action.replaceKey` compiles to
+    `Laws.freezeResource 0` at the kernel-transition level
+    (`Authority/Action.lean` line 215); the registry mutation
+    happens in `applyActionToRegistry` (the *authority-layer*
+    effect).  §6.2 now distinguishes "kernel-impl mutator" from
+    "authority-layer effect" and routes `register_key`
+    accordingly.  The `replaceKey` worked example in §5.4 has an
+    in-line comment explaining the duality.
+
+  * **`signed_by` semantics omission**: pre-audit §6.3 said the
+    elaborator "wires `signed_by` into the §8.2 Admissible
+    predicate" without clarifying that this *strengthens*
+    Admissible beyond the kernel's existing form.  The kernel's
+    `AdmissibleWith` checks the authorization policy and
+    signature-under-registered-key but does not by itself enforce
+    that `st.signer` matches a particular field of the action.
+    §6.3 now explicitly documents that `signed_by sender` adds an
+    `st.signer = sender` propositional conjunct (decidable via
+    `DecidableEq ActorId`), and the generated `myLaw_apply`
+    wrapper carries this hypothesis.  The added constraint closes
+    a class of "actor X signs a transfer FROM actor Y" attacks.
+
+  * **`revoke_key` removal**: pre-audit §6.2 listed `revoke_key` as
+    a primitive.  The kernel ships `KeyRegistry.revoke` but no
+    `Action.revokeKey` constructor; `Event.identityRevoked` is
+    documented as "reserved for a future `revokeKey` Action
+    constructor".  Adding `revoke_key` to Lex would require a
+    kernel amendment.  V1 removes it from the grammar; diagnostic
+    L022 catches use; v3 may admit it (§13.3).
+
+  * **Codegen ordering**: pre-audit §6.5 said the elaborator
+    "accumulates all `law` declarations in the build, sorts them
+    by `action_index`, and emits a single `Authority/Action.lean`
+    file".  Lean 4 macros run *per-file*; there is no global
+    accumulation hook.  §6.5 now describes a two-stage process:
+    per-file macro emits non-cross-module artefacts plus a
+    codegen-input metadata file, and `lake exe lex_codegen` (a
+    separate build pass) reads all such files and regenerates the
+    cross-module artefacts.
+
+  * **Manifest hash declaration kind**: pre-audit §7.3 called the
+    manifest-hash "a `theorem` … : ByteArray := …".  A hash value
+    is a `def`, not a `theorem`.  Corrected.
+
+  * **`Admissible` instantiation wiring**: pre-audit §7.4 said the
+    runtime "is configured per-deployment with a single
+    `deployment_id`" but did not show *how* the deployment_id
+    flows into the kernel's `AdmissibleWith` parameterisation.
+    §7.4 now shows the explicit generated declarations
+    (`deployment_<name>_admissible := AdmissibleWith Verify P
+    deployment_<name>_id`) that the Phase-5 runtime adaptor
+    consumes.
+
+  * **`local [*]` reformulation**: pre-audit grammar admitted
+    `local [*]` as "all resources".  This claim is always
+    trivially satisfied (every kernel-impl `do`-block touches some
+    finite set of resources) and carries no auditable
+    information.  §6.4.1 now rejects `local [*]` (diagnostic
+    L024); `freeze_preserving [*]` remains valid as shorthand for
+    "every manifest-declared resource".
+
+  * **Empty events syntax**: pre-audit §15.2 used `events := do
+    pure ()` for laws with no per-action events.  The grammar did
+    not include `pure ()`.  §6.6 / §5.1 now make `events := []`
+    the canonical empty form; `do pure ()` and `do nothing` are
+    accepted but `lex_format` rewrites to `[]`.
+
+  * **`flow` colon syntax**: pre-audit used `flow r: amt from a to
+    b` with a colon between `r` and `amt`.  In Lean 4 surface
+    syntax, a colon mid-expression collides with type ascription
+    (`r : ResourceId`).  The grammar in §5.1 now uses
+    space-separated arguments (`flow r amt from a to b`).  All
+    examples updated.
+
+### 16.3. Diagnostic catalogue extensions
+
+The audit added seven new diagnostic codes (L021–L027) for the
+new constraints:
+
+  * L021 — law with no effects whatsoever
+  * L022 — `revoke_key` used (deferred to v3)
+  * L023 — `impl` calls a non-`@[lex_impl]`-tagged helper
+  * L024 — `local [*]` claim (always trivially true)
+  * L025 — per-resource `[r]` argument on `conservative` /
+    `monotonic` (kernel typeclasses are universal-over-r)
+  * L026 — `lex_codegen --check` divergence
+  * L027 — bare `s` reference inside `events`
+
+### 16.4. Open questions added
+
+  * §14.4 (compositional property dispatch over fold-of-flow) was
+    pre-audit; the audit clarified that v1 falls back to a `proof`
+    override (the §15.3 worked example demonstrates this) and v2
+    plans a `List.foldl`-induction extension to the synthesizer.
+
+  * **New §14.9 (signer-identity strengthening lift)**: §6.3 now
+    documents that `signed_by sender` adds an `st.signer =
+    sender` constraint at the *call site* (the policy must imply
+    it).  V2 should lift this from a side condition into a
+    kernel-level conjunct of `AdmissibleWith` so the constraint is
+    structural rather than policy-dependent.  Tracked in §14.
+
+This audit changes no kernel artefact; the corrections are
+entirely within this design document.  A v0.2 audit pass — once
+the Lex implementation lands the M1 checkpoint (§12.1) — will
+produce a §17 changelog with whatever further corrections the
+implementation surfaces.
 
 ---
 
