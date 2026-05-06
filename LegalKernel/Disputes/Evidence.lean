@@ -178,10 +178,16 @@ def checkSignatureInvalid
     match currentEs.registry[st.signer]? with
     | none => .inconclusive
     | some pk =>
-      -- Audit-3.4: deploymentId defaults to empty bytes; the dispute
-      -- pipeline doesn't carry the deploymentId and the Stage-2 evidence
-      -- check matches what the runtime would have computed (which uses
-      -- the default empty deploymentId via `Admissible`).
+      -- Audit-3.4 deploymentId: the dispute pipeline currently
+      -- hardcodes `ByteArray.empty` for the deploymentId so the
+      -- evidence check matches what the back-compat `Admissible`
+      -- alias (= `AdmissibleWith Verify ByteArray.empty`) computes.
+      -- Deployments using `processSignedActionWith Verify <non-empty-id>`
+      -- with a non-empty `deploymentId` need a parameterised
+      -- `checkSignatureInvalidWith verify d` variant; this is a
+      -- documented Audit-3.4 follow-up scoped for the next CLI
+      -- integration pass when the runtime carries `deploymentId`
+      -- through `RuntimeState`.
       let msg := signingInput st.action st.signer st.nonce ByteArray.empty
       if Verify pk msg st.sig = true then
         .rejected

@@ -40,8 +40,13 @@ open LegalKernel.Test.MockCrypto
 
 /-! ## Test fixtures -/
 
+/-- Demo authority policy used by every happy-path test in this
+    suite: every signer is authorised for every action. -/
 def policy : AuthorityPolicy := AuthorityPolicy.unrestricted
 
+/-- Deployment id used by every happy-path test in this suite.
+    Non-empty so cross-deployment-replay rejection tests are
+    meaningful. -/
 def testDeploymentId : ByteArray :=
   ByteArray.mk #[0xCA, 0xFE, 0xBA, 0xBE]
 

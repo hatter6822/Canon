@@ -13,6 +13,15 @@ runtime depends on.  An external implementer (e.g. a Rust network
 adaptor for WU 5.4) can reproduce a compatible client by following
 this document alone.
 
+> **Audit-3.1 ABI break.**  Pre-Audit-3 logs and snapshots
+> (produced before commit `50abca7`, which landed
+> "Audit-3.1: hash swap-point and fixed 32-byte width") embedded
+> 8-byte `prevHash` and `postStateHash` fields.  Post-Audit-3
+> binaries expect 32-byte hashes throughout.  The migration path
+> for any pre-Audit-3 data is "throw away the old log file and
+> bootstrap fresh"; for research-stage software this is acceptable
+> and was the explicit choice in the audit-3 plan.
+
 ## 1. Scope
 
 The Phase-5 ABI covers three boundaries:

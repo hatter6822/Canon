@@ -38,6 +38,7 @@ open LegalKernel.Test.MockCrypto
 
 /-! ## Test fixtures -/
 
+/-- Deployment id carried in every test attestation. -/
 def testDeploymentId : ByteArray :=
   ByteArray.mk #[0xCA, 0xFE, 0xBA, 0xBE]
 
@@ -64,20 +65,38 @@ def mkAttested : AttestedSnapshot :=
 
 /-! ## Tests -/
 
-/-- AttestedSnapshot encode-decode round trip preserves all fields. -/
+/-- AttestedSnapshot encode-decode round trip preserves all fields,
+    including the inner Snapshot's stateHash, encodedState contents,
+    logIndex, and seedHash. -/
 def attestedSnapshotRoundtrip : TestCase := {
-  name := "AttestedSnapshot encode/decode round-trip"
+  name := "AttestedSnapshot encode/decode round-trip (all fields)"
   body := do
     let att := mkAttested
     let bytes := AttestedSnapshot.encode att
     match AttestedSnapshot.decode bytes with
     | .ok (att', _) =>
+      -- Outer envelope fields
       assertEq (expected := att.deploymentId.toList)
                 (actual := att'.deploymentId.toList) "deploymentId roundtrip"
       assertEq (expected := att.attestor) (actual := att'.attestor)
         "attestor roundtrip"
       assertEq (expected := att.sig.toList) (actual := att'.sig.toList)
         "sig roundtrip"
+      -- Inner Snapshot fields — strengthen audit-3.2 coverage to
+      -- verify the outer-envelope decode actually recovers the
+      -- inner snapshot bit-for-bit.
+      assertEq (expected := att.snap.stateHash.toList)
+                (actual := att'.snap.stateHash.toList)
+                "inner snapshot stateHash roundtrip"
+      assertEq (expected := att.snap.encodedState.toList)
+                (actual := att'.snap.encodedState.toList)
+                "inner snapshot encodedState roundtrip"
+      assertEq (expected := att.snap.logIndex)
+                (actual := att'.snap.logIndex)
+                "inner snapshot logIndex roundtrip"
+      assertEq (expected := att.snap.seedHash.toList)
+                (actual := att'.snap.seedHash.toList)
+                "inner snapshot seedHash roundtrip"
     | .error e =>
       throw <| IO.userError s!"decode failed: {repr e}"
 }
@@ -200,6 +219,7 @@ def saveLoadRoundtrip : TestCase := {
 
 /-! ## Term-level API stability -/
 
+/-- Term-level: `attestationSigningInput` is callable. -/
 def attestationSigningInputAPI : TestCase := {
   name := "attestationSigningInput API stability"
   body := do
@@ -207,6 +227,7 @@ def attestationSigningInputAPI : TestCase := {
     pure ()
 }
 
+/-- Term-level: `verifyAttestationWith` is callable. -/
 def verifyAttestationWithAPI : TestCase := {
   name := "verifyAttestationWith API stability"
   body := do
