@@ -198,7 +198,23 @@ The `signers` and `sigs` lists are parallel: `signers[i]` signed the
 verdict's canonical encoding, producing `sigs[i]`.  A verdict is
 *quorum-valid* when at least `quorum` of the listed `(signer, sig)`
 pairs verify under their respective registered keys.  The `quorum`
-threshold is supplied by the deployment's authority policy. -/
+threshold is supplied by the deployment's authority policy.
+
+**Audit-3.5 status note.**  An initial Audit-3.5 attempt
+refactored this structure to `signatures : Std.TreeMap ActorId
+Signature compare` to make per-signer uniqueness structural.
+The refactor was reverted because proving the round-trip for the
+`Std.TreeMap`-shape encoding requires a `toList ∘ ofList = id`
+lemma that Lean core's `Std.Data.TreeMap.Lemmas` does not ship
+(only `Equiv`-up-to weakening); reproving the existing
+`verdict_roundtrip` and `verdict_encode_injective` theorems would
+have required adding the missing lemma, which is non-trivial
+proof engineering.  The audit-1 per-signer deduplication in
+`countVerifiedSignatures` continues to provide the value-level
+defense against the trivial-quorum-forgery class.  A future
+Audit-3.5-followup may revisit the TreeMap refactor once the
+necessary `Std.TreeMap.toList_ofList_compare` lemma lands
+upstream. -/
 
 /-- A quorum-signed adjudicator decision.  References the dispute
     log entry by its `LogIndex`; carries the evidence outcome plus
