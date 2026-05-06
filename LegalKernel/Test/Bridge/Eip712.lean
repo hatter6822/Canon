@@ -112,6 +112,64 @@ def prefixSecondByte : TestCase := {
     | _ => throw <| IO.userError "prefix too short"
 }
 
+/-! ## Type-string sanity tests
+
+The type strings declare each field's EIP-712 type (`bytes32`,
+`uint256`, `bytes`, `string`, etc.).  A spec-compliant wallet
+parses the type string and applies the per-field encoding rule.
+These tests pin the type strings to the exact values the Lean
+encoder agrees with — a future change that desyncs the type
+string from the encoder would fail here. -/
+
+/-- The EIP-712 domain type string declares the five fields in the
+    expected order with the documented types.  Used by the wallet
+    to determine encoding rules. -/
+def domainTypeStringExact : TestCase := {
+  name := "eip712DomainTypeString declares 5 fields in EIP-712 order"
+  body := assertEq
+    (expected := "EIP712Domain(string name,string version,uint256 chainId,uint256 rollupId,bytes verifyingContract)")
+    (actual := eip712DomainTypeString) "domain type string"
+}
+
+/-- The Canon action type string declares the four fields in the
+    order the struct hash encodes them.  Each field's type matches
+    the encoding rule the Lean side applies (`bytes32` = verbatim,
+    `uint64` = uint256-BE, `bytes` = keccak256-prefixed). -/
+def actionTypeStringExact : TestCase := {
+  name := "canonActionTypeString declares 4 fields matching the struct hash"
+  body := assertEq
+    (expected := "CanonAction(bytes32 actionHash,uint64 signer,uint64 nonce,bytes deploymentId)")
+    (actual := canonActionTypeString) "action type string"
+}
+
+/-- The action type string declares `bytes deploymentId` (not
+    `bytes32`) — matching our hash-based canonicalization.  A
+    spec-compliant wallet parsing this declaration applies
+    `keccak256` to the deploymentId bytes, producing the same
+    32 bytes as our `hashBytes m.deploymentId`.
+
+    The exact value comparison (`actionTypeStringExact`) above
+    already pins this; this test exists as a focused regression
+    catcher with a descriptive name. -/
+def actionTypeStringDeploymentIsBytes : TestCase := {
+  name := "canonActionTypeString declares bytes (not bytes32) for deploymentId"
+  body := do
+    -- The expected type string ends with "bytes deploymentId)".
+    let expected := "CanonAction(bytes32 actionHash,uint64 signer,uint64 nonce,bytes deploymentId)"
+    assertEq (expected := expected) (actual := canonActionTypeString) "deploymentId is bytes"
+}
+
+/-- The domain type string declares `bytes verifyingContract` (not
+    `address`) — matching our hash-based canonicalization. -/
+def domainTypeStringContractIsBytes : TestCase := {
+  name := "eip712DomainTypeString declares bytes (not address) for verifyingContract"
+  body := do
+    let expected :=
+      "EIP712Domain(string name,string version,uint256 chainId,uint256 rollupId,bytes verifyingContract)"
+    assertEq (expected := expected) (actual := eip712DomainTypeString)
+      "verifyingContract is bytes"
+}
+
 /-! ## Domain separator shape tests -/
 
 /-- The domain separator is 32 bytes. -/
@@ -170,6 +228,69 @@ def structHashSize : TestCase := {
   name := "eip712StructHash is 32 bytes"
   body := assertEq (expected := 32) (actual := (eip712StructHash testMessage).size)
     "struct hash size"
+}
+
+/-- The struct pre-hash is 5 × 32 = 160 bytes (typeHash + actionHash +
+    signer_BE + nonce_BE + hashedDep), which is direct evidence that
+    all four declared message fields are encoded — preventing a
+    regression to the historical bug where only `actionHash` was
+    encoded. -/
+def structPreHashSize : TestCase := {
+  name := "structPreHash is 160 bytes (5 × 32, all 4 fields encoded)"
+  body := assertEq (expected := 160) (actual := (structPreHash testMessage).size)
+    "structPreHash size"
+}
+
+/-- Distinct signer values produce distinct struct pre-hashes — direct
+    evidence that the `signer` field is part of the struct hash
+    encoding (and not just indirectly via `actionHash`).  Catches the
+    regression where `eip712StructHash` only encoded `actionHash`
+    (in which case the struct hash would still differ since
+    `actionHash` depends on `signer` via `signInput`, but the
+    structPreHash size would be 64 not 160). -/
+def structPreHashContainsSigner : TestCase := {
+  name := "structPreHash differs across signers"
+  body := do
+    let m1 := { testMessage with signer := 100 }
+    let m2 := { testMessage with signer := 200 }
+    let preBytes1 := structPreHash m1
+    let preBytes2 := structPreHash m2
+    if preBytes1.toList == preBytes2.toList then
+      throw <| IO.userError "struct pre-hashes coincided across distinct signers"
+    -- Both must be 160 bytes (the documented size).
+    assertEq (expected := 160) (actual := preBytes1.size) "preBytes1 size"
+    assertEq (expected := 160) (actual := preBytes2.size) "preBytes2 size"
+}
+
+/-- Verify the byte-layout of structPreHash directly: at byte
+    position 95 (the LSB of `encodeUint256BE m.signer.toNat`,
+    which lives at bytes [64, 96)), the byte equals
+    `m.signer.toNat % 256`.  This is direct evidence of the
+    32-byte BE signer field being at the documented position. -/
+def structPreHashSignerLSBLayout : TestCase := {
+  name := "structPreHash byte 95 = signer LSB (BE encoding at bytes 64..96)"
+  body := do
+    let m := { testMessage with signer := 0xABCD }
+    let preBytes := structPreHash m
+    let signerLSB : UInt8 := UInt8.ofNat (m.signer.toNat % 256)
+    match preBytes.toList[95]? with
+    | some b =>
+      assertEq (expected := signerLSB) (actual := b) "byte 95 = signer LSB"
+    | none => throw <| IO.userError "byte 95 out of range"
+}
+
+/-- Verify the byte-layout of structPreHash at byte position 127
+    (the LSB of nonce BE, at bytes [96, 128)). -/
+def structPreHashNonceLSBLayout : TestCase := {
+  name := "structPreHash byte 127 = nonce LSB (BE encoding at bytes 96..128)"
+  body := do
+    let m := { testMessage with nonce := 0x1234 }
+    let preBytes := structPreHash m
+    let nonceLSB : UInt8 := UInt8.ofNat (m.nonce % 256)
+    match preBytes.toList[127]? with
+    | some b =>
+      assertEq (expected := nonceLSB) (actual := b) "byte 127 = nonce LSB"
+    | none => throw <| IO.userError "byte 127 out of range"
 }
 
 /-- The action hash is 32 bytes (it's `hashBytes signInput`). -/
@@ -481,11 +602,17 @@ def dsSizeAPI : TestCase := {
 def tests : List TestCase :=
   [ -- Prefix shape (3)
     prefixIsTwoBytes, prefixFirstByte, prefixSecondByte,
+    -- Type-string sanity (4)
+    domainTypeStringExact, actionTypeStringExact,
+    actionTypeStringDeploymentIsBytes, domainTypeStringContractIsBytes,
     -- Domain separator + type hash shapes (4)
     domainSeparatorSize, domainPreHashSize,
     domainTypeHashSize, actionTypeHashSize,
-    -- Wrap and struct shapes (4)
-    wrapSize, wrapBeginsWithPrefix, structHashSize, actionHashSize,
+    -- Wrap and struct shapes (8 — added structPreHash + layout tests)
+    wrapSize, wrapBeginsWithPrefix, structHashSize,
+    structPreHashSize, structPreHashContainsSigner,
+    structPreHashSignerLSBLayout, structPreHashNonceLSBLayout,
+    actionHashSize,
     -- Determinism (2)
     wrapDeterministic, dsDeterministic,
     -- Cross-* distinguishability (6)

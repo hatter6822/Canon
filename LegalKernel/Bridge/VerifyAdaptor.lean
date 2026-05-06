@@ -56,7 +56,6 @@ project.
 -/
 
 import LegalKernel.Authority.Crypto
-import LegalKernel.Authority.SignedAction
 
 namespace LegalKernel.Bridge
 

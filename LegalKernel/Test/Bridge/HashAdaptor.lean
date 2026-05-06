@@ -256,6 +256,69 @@ def hashAdaptorSingleZeroBranches : TestCase := {
       assertEq (expected := 32) (actual := h.size) "fallback single-zero size"
 }
 
+/-! ## Conditional KAT-vector tests for all four reference vectors
+
+When the production keccak256 binding is linked, every reference
+KAT must match the linked binding's output.  These tests fire
+*conditionally* — they're vacuously satisfied at the Lean level
+(where `isKeccak256Linked = false`) and become real assertions
+when the binding is wired in.
+
+Authoritative source for the KAT values: NIST SHA-3 KAT files
++ Keccak Team's ShortMsgKAT_256.txt + cross-checked against
+`pycryptodome`'s `Crypto.Hash.keccak.new(digest_bits=256)`.
+
+Each test inputs the documented preimage and asserts the linked
+hash output matches the corresponding `kat_*` constant. -/
+
+/-- `kat_abc` matches the production binding's `keccak256("abc")`. -/
+def hashAdaptorMatchesL1KeccakAbc : TestCase := {
+  name := "hashAdaptor matches kat_abc when production binding linked"
+  body := do
+    let h := hashBytes "abc".toUTF8
+    if isKeccak256Linked then
+      (if h.toList == kat_abc.toList then pure ()
+       else throw <| IO.userError
+         "production keccak256 binding produced unexpected output for \"abc\"")
+    else
+      -- Lean fallback: skip the KAT check (FNV ≠ keccak256), but
+      -- still verify the output size is 32 bytes.
+      assertEq (expected := 32) (actual := h.size) "fallback abc size"
+}
+
+/-- `kat_helloWorld` matches the production binding's
+    `keccak256("Hello, World!")`.  The KAT value is verified
+    against `pycryptodome`'s output. -/
+def hashAdaptorMatchesL1KeccakHelloWorld : TestCase := {
+  name := "hashAdaptor matches kat_helloWorld when production binding linked"
+  body := do
+    let h := hashBytes "Hello, World!".toUTF8
+    if isKeccak256Linked then
+      (if h.toList == kat_helloWorld.toList then pure ()
+       else throw <| IO.userError
+         "production keccak256 binding produced unexpected output for \"Hello, World!\"")
+    else
+      assertEq (expected := 32) (actual := h.size) "fallback helloWorld size"
+}
+
+/-- All four KAT vectors are pairwise distinct at their leading
+    byte.  Catches a copy-paste error where one vector's bytes
+    were duplicated under another vector's name. -/
+def katVectorsLeadingBytesDistinct : TestCase := {
+  name := "all four KAT vectors have pairwise distinct leading bytes"
+  body := do
+    let leads : List UInt8 := [
+      kat_empty.toList.headD 0x00,
+      kat_abc.toList.headD 0x00,
+      kat_helloWorld.toList.headD 0x00,
+      kat_singleZero.toList.headD 0x00 ]
+    -- Verify all distinct: since these are 0xc5, 0x4e, 0xac, 0xbc,
+    -- a copy-paste duplicate would surface here.
+    let uniqued := leads.eraseDups
+    assertEq (expected := leads.length) (actual := uniqued.length)
+      "leading bytes pairwise distinct"
+}
+
 /-! ## Term-level API stability -/
 
 /-- `hashAdaptor_thirty_two_byte_output` is reachable as a
@@ -315,6 +378,8 @@ def tests : List TestCase :=
     hashOutputAlways32, hashStreamOutputAlways32,
     hashBytesDeterminism, hashStreamDeterminism,
     hashAdaptorMatchesL1Keccak, hashAdaptorSingleZeroBranches,
+    hashAdaptorMatchesL1KeccakAbc, hashAdaptorMatchesL1KeccakHelloWorld,
+    katVectorsLeadingBytesDistinct,
     hashOutput32API, hashDeterministicAPI, identifierDistinctAPI,
     katEmptySizeAPI, fallbackHashSizeAPI ]
 

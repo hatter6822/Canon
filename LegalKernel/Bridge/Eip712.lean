@@ -33,31 +33,58 @@ security win, since a malicious dApp cannot trick the user into
 signing an opaque blob whose meaning differs from the on-screen
 description.
 
-**Canonicalisation deviation (documented).**  The strict EIP-712
-spec encodes `address` as 32-byte left-padded (12 zero bytes ‖
-20-byte address), `uint256` as 32-byte big-endian, and `string` /
-`bytes` (dynamic) as their hash.  This module instead hashes
-*every* `ByteArray`-typed field (name, version, verifyingContract)
-to canonicalise to 32-byte width, regardless of input length.
-This deviates from EIP-712 spec only on `address` encoding.  The
-deviation is intentional: hash-based canonicalisation gives
-unconditional 32-byte field width that simplifies the
-collision-free-only proofs.  Production wallet adaptors that
-need spec-compliant address encoding can wire a separate
-left-pad step at the FFI boundary; the security-critical
-property (`eip712Wrap_distinguishes`) holds for the canonical
-form.
+**Type-string conventions and EIP-712 spec compliance.**  The
+strict EIP-712 spec (`https://eips.ethereum.org/EIPS/eip-712`)
+encodes typed fields as follows:
 
-**Spec-fidelity simplification.**  The §5.3 spec details a
-struct hash with four fields (actionHash, signer, nonce,
-deploymentId).  This module stores only the `actionHash` in the
-struct hash, since `signer` / `nonce` / `deploymentId` are
-already committed-to inside the canonical Canon `signInput` bytes
-that `actionHash` hashes.  Wallets that want to display the
-structured fields parse them from the on-the-wire EIP-712
-envelope at the FFI boundary; the bridge runtime adaptor extends
-the struct with all four fields for wallet UX without changing
-the security-critical Canon side.
+  * `bytesN` (1 ≤ N ≤ 32): the value, padded right with zeros to
+    32 bytes.  `bytes32` is encoded as 32 bytes verbatim.
+  * `uintN` / `intN`: 32-byte big-endian (zero-padded).
+  * `address`: 20-byte address left-padded with 12 zero bytes to
+    32 bytes.
+  * `string` / `bytes` (dynamic): `keccak256(value_bytes)` — i.e.,
+    a 32-byte hash of the underlying bytes.
+
+This module deliberately declares variable-width fields as
+`bytes` (or `string`) so the spec's "hash before encoding" rule
+applies, matching our internal hash-based canonicalisation.
+Concretely:
+
+  * `EIP712Domain` declares `bytes verifyingContract` (not
+    `address`).  The Lean `domainPreHash` then computes
+    `hashBytes p.verifyingContract` for the field encoding,
+    matching what an EIP-712-aware wallet would compute when
+    parsing this type string.  Production deployments that need
+    canonical `address` encoding (left-padded) instead supply a
+    *different* type string and a parallel encoder; this module
+    serves the canonical hash-based-canonicalisation form.
+  * `CanonAction` declares `bytes deploymentId` (not `bytes32`).
+    Same reasoning: my struct hash applies `hashBytes` to the
+    deploymentId, which matches the spec's `bytes` rule.
+  * `bytes32 actionHash` is encoded directly (verbatim 32 bytes,
+    since `hashBytes` always returns 32 bytes per
+    `hashAdaptor_thirty_two_byte_output`).
+
+Under this discipline, *the bytes a spec-compliant wallet computes
+for these type strings exactly match what `eip712Wrap` produces*.
+The §5.3 acceptance criterion ("MetaMask-produced EIP-712
+signature on a Canon `signInput` verifies via the A.1 binding")
+is satisfied at the byte level, not just the security-property
+level.
+
+**Struct hash encodes all four declared fields.**  An earlier
+version of this module had a `eip712StructHash` that committed
+only to `actionHash`, while the type string declared four fields
+— a real interop bug (a spec-compliant wallet would compute a
+different struct hash and the resulting signature would fail to
+verify).  The current implementation encodes all four:
+`typeHash ‖ actionHash ‖ signer_BE ‖ nonce_BE ‖ hashBytes(depId)`,
+matching the type-string declaration exactly.  Even though
+`actionHash` already commits to `(action, signer, nonce, depId)`
+via the inner `signInput` hashing, the redundant inclusion of
+`signer` / `nonce` / `deploymentId` in the struct hash is
+required by EIP-712 to enable wallet-UI parsing of the
+structured fields.
 
 This module is **not** part of the trusted computing base.  Bugs
 here weaken the EIP-712 envelope's wallet UX or interop
@@ -80,8 +107,6 @@ Lean axiom.  Real-world security depends on the production
 keccak256 binding (Workstream A.2).
 -/
 
-import LegalKernel.Authority.Crypto
-import LegalKernel.Authority.SignedAction
 import LegalKernel.Encoding.SignInput
 import LegalKernel.Runtime.Hash
 
@@ -153,20 +178,31 @@ def eip712Prefix : ByteArray := ByteArray.mk #[0x19, 0x01]
 theorem eip712Prefix_size : eip712Prefix.size = 2 := rfl
 
 /-- The canonical EIP-712 type string for the Canon-on-Ethereum
-    domain separator.  All five fields are part of EIP-712's
-    standard `EIP712Domain` type plus our deployment-specific
-    `rollupId`.  Hashed once per deployment. -/
+    domain separator.  Five fields: `name`, `version`, `chainId`,
+    `rollupId`, `verifyingContract`.  The first two are standard
+    EIP-712 `EIP712Domain` fields; `chainId` is the L1 chain id;
+    `rollupId` is our deployment-specific extension; and
+    `verifyingContract` is declared `bytes` (rather than the
+    standard `address`) so the EIP-712 spec's
+    "hash-before-encoding" rule applies — matching the hash-based
+    canonicalisation in `domainPreHash`.  Hashed once per
+    deployment to produce `eip712DomainTypeHash`. -/
 def eip712DomainTypeString : String :=
   "EIP712Domain(string name,string version,uint256 chainId," ++
-  "uint256 rollupId,address verifyingContract)"
+  "uint256 rollupId,bytes verifyingContract)"
 
 /-- The canonical EIP-712 type string for a Canon action message.
-    The structured form (with separately-broken-out signer / nonce /
-    deploymentId) is wallet-side; the Canon side commits to the
-    full sign-input via `actionHash`. -/
+    Four fields: `actionHash` (32-byte commitment to the canonical
+    Canon `signInput`), `signer` and `nonce` (uint64 values
+    widened to uint256 BE per EIP-712 uint encoding), and
+    `deploymentId` (the genesis-state hash, declared `bytes` so
+    the spec's hash-before-encoding rule applies and the
+    Lean-side `hashBytes m.deploymentId` matches what a
+    spec-compliant wallet computes).  Hashed once per
+    deployment to produce `canonActionTypeHash`. -/
 def canonActionTypeString : String :=
   "CanonAction(bytes32 actionHash,uint64 signer," ++
-  "uint64 nonce,bytes32 deploymentId)"
+  "uint64 nonce,bytes deploymentId)"
 
 /-- The 32-byte type hash for the EIP-712 domain.  Equals
     `keccak256(eip712DomainTypeString)` under a production
@@ -326,19 +362,61 @@ def Eip712Message.signInput (m : Eip712Message) : ByteArray :=
 def Eip712Message.actionHash (m : Eip712Message) : ByteArray :=
   hashBytes m.signInput
 
+/-- `actionHash` always returns exactly 32 bytes (since `hashBytes`
+    does, per `hashAdaptor_thirty_two_byte_output`).  Used inside
+    the size-arithmetic chains in the `eip712Wrap_injective` proof. -/
+theorem Eip712Message.actionHash_size (m : Eip712Message) :
+    m.actionHash.size = 32 := by
+  unfold Eip712Message.actionHash
+  exact hashBytes_size _
+
+/-- The canonical pre-hash bytes for the CanonAction struct hash.
+    Concatenates the five 32-byte fields in EIP-712 order
+    (typehash + four message fields).  Total: 5 × 32 = 160 bytes. -/
+def structPreHash (m : Eip712Message) : ByteArray :=
+  canonActionTypeHash ++
+  m.actionHash ++
+  encodeUint256BE m.signer.toNat ++
+  encodeUint256BE m.nonce ++
+  hashBytes m.deploymentId
+
 /-- The CanonAction struct hash (EIP-712 §3.2 `hashStruct`).
-    `keccak256(canonActionTypeHash ‖ actionHash)`.  The single-field
-    struct (just `actionHash`) is sufficient for security since
-    `actionHash` already commits to the full structured tuple via
-    the Canon CBE encoding.  Wallet UX layers extend this with
-    visibly-broken-out fields at the FFI boundary. -/
+    `keccak256(canonActionTypeHash ‖ actionHash ‖ signer_BE ‖
+    nonce_BE ‖ hashBytes deploymentId)`.
+
+    Encodes all four fields declared in `canonActionTypeString`
+    per EIP-712 spec.  Field encodings:
+
+      * `actionHash` (`bytes32`): the 32 bytes verbatim (since
+        `hashBytes` returns exactly 32 bytes by
+        `hashAdaptor_thirty_two_byte_output`).
+      * `signer` (`uint64`): widened to 32-byte BE via
+        `encodeUint256BE m.signer.toNat`.
+      * `nonce` (`uint64`): same.
+      * `deploymentId` (`bytes`): hashed to 32 bytes via
+        `hashBytes` (matching EIP-712's
+        "hash-before-encoding" rule for `bytes` types).
+
+    A spec-compliant wallet parsing `canonActionTypeString` and
+    encoding a struct value of this type produces exactly the
+    same 160-byte preimage and exactly the same 32-byte struct
+    hash. -/
 def eip712StructHash (m : Eip712Message) : ByteArray :=
-  hashBytes (canonActionTypeHash ++ m.actionHash)
+  hashBytes (structPreHash m)
 
 /-- The struct hash has size 32. -/
 theorem eip712StructHash_size (m : Eip712Message) :
     (eip712StructHash m).size = 32 :=
   hashBytes_size _
+
+/-- The struct pre-hash has size 5 × 32 = 160 bytes. -/
+theorem structPreHash_size (m : Eip712Message) :
+    (structPreHash m).size = 160 := by
+  show (canonActionTypeHash ++ m.actionHash ++
+        encodeUint256BE m.signer.toNat ++ encodeUint256BE m.nonce ++
+        hashBytes m.deploymentId).size = 160
+  simp only [ByteArray.size_append, canonActionTypeHash_size,
+    Eip712Message.actionHash_size, encodeUint256BE_size, hashBytes_size]
 
 /-- The full EIP-712 wrap.  Returns the bytes a wallet would sign:
     `0x19 0x01 ‖ domainSeparator ‖ structHash`. -/
@@ -369,19 +447,25 @@ Under collision-free hashing, equal wraps for a fixed domain
 separator imply equal sign-input bytes for the contained
 messages.
 
-Proof flow:
+Proof flow (for the 5-field struct preimage
+`canonActionTypeHash ‖ actionHash ‖ signer_BE ‖ nonce_BE ‖
+hashBytes(deploymentId)`):
 
   1. From `eip712Wrap m₁ d = eip712Wrap m₂ d`, extract the
      suffix struct-hash equality via byte-level append injectivity
      at the boundary `(prefix ++ d).size`.
   2. Apply `CollisionFree hashBytes` to the struct hashes; lift
-     to equality of the pre-images
-     `canonActionTypeHash ++ actionHash`.
-  3. Apply byte-level append injectivity at the
-     `canonActionTypeHash.size` boundary; lift to equality of
-     `actionHash`es.
-  4. Apply `CollisionFree hashBytes` again to the action hashes;
-     lift to equality of `signInput` bytes.
+     to equality of the pre-images (`structPreHash m₁ =
+     structPreHash m₂`).
+  3. Peel `canonActionTypeHash` (32 bytes) from the preimage:
+     leftover₁ = `actionHash₁ ++ signer₁ ++ nonce₁ ++ hashedDep₁`
+     and leftover₂ shaped the same.
+  4. Peel `m₁.actionHash` (32 bytes) from the leftover: get
+     `m₁.actionHash = m₂.actionHash` and the remaining-fields
+     equality.
+  5. Apply `CollisionFree hashBytes` to the action hashes
+     (`actionHash = hashBytes signInput`); conclude
+     `m₁.signInput = m₂.signInput`.
 
 The `signInput`-bytes equality is the cryptographically
 meaningful conclusion: an attacker who produced equal EIP-712
@@ -430,14 +514,58 @@ theorem eip712Wrap_injective
   -- hstruct : eip712StructHash m₁ = eip712StructHash m₂
   -- Step 2: apply collision-freedom to the struct hashes.
   unfold eip712StructHash at hstruct
-  have hstructPre :
-      canonActionTypeHash ++ m₁.actionHash =
-      canonActionTypeHash ++ m₂.actionHash := hcf _ _ hstruct
-  -- Step 3: append injectivity at the canonActionTypeHash prefix.
-  have h_prefix_size :
+  have hstructPre : structPreHash m₁ = structPreHash m₂ := hcf _ _ hstruct
+  unfold structPreHash at hstructPre
+  -- hstructPre : canonActionTypeHash ++ m₁.actionHash ++
+  --                encodeUint256BE m₁.signer.toNat ++ encodeUint256BE m₁.nonce ++
+  --                hashBytes m₁.deploymentId
+  --             = canonActionTypeHash ++ m₂.actionHash ++
+  --                encodeUint256BE m₂.signer.toNat ++ encodeUint256BE m₂.nonce ++
+  --                hashBytes m₂.deploymentId
+  -- Step 3: peel `canonActionTypeHash ++ m_.actionHash` (the leftmost 64 bytes)
+  -- via fixed-size boundary extraction.  The 5-field preimage is
+  -- left-associated: ((((typeHash ++ ah) ++ s) ++ n) ++ d).
+  -- We peel from the LEFT to get `canonActionTypeHash ++ m_.actionHash`
+  -- (the leftmost 64 bytes), then peel again at the typeHash boundary
+  -- to get `m_.actionHash` equality.
+  -- First peel: extract the leftmost 128 bytes (typeHash ++ actionHash ++ signer ++ nonce).
+  have h_left₁_size :
+      (canonActionTypeHash ++ m₁.actionHash ++
+        encodeUint256BE m₁.signer.toNat ++ encodeUint256BE m₁.nonce).size =
+      (canonActionTypeHash ++ m₂.actionHash ++
+        encodeUint256BE m₂.signer.toNat ++ encodeUint256BE m₂.nonce).size := by
+    simp only [ByteArray.size_append, canonActionTypeHash_size,
+      Eip712Message.actionHash_size, encodeUint256BE_size]
+  obtain ⟨h_after_nonce, _h_dep⟩ :=
+    byteArray_append_inj_of_size_left _ _ _ _ hstructPre h_left₁_size
+  -- h_after_nonce : (((canonActionTypeHash ++ m₁.actionHash) ++ signer₁) ++ nonce₁) =
+  --                 (mirror for m₂)
+  -- Now peel three more 32-byte fields from the right to get to actionHash.
+  have h_left₂_size :
+      (canonActionTypeHash ++ m₁.actionHash ++
+        encodeUint256BE m₁.signer.toNat).size =
+      (canonActionTypeHash ++ m₂.actionHash ++
+        encodeUint256BE m₂.signer.toNat).size := by
+    simp only [ByteArray.size_append, canonActionTypeHash_size,
+      Eip712Message.actionHash_size, encodeUint256BE_size]
+  obtain ⟨h_after_signer, _h_nonce⟩ :=
+    byteArray_append_inj_of_size_left _ _ _ _ h_after_nonce h_left₂_size
+  -- h_after_signer : ((canonActionTypeHash ++ m₁.actionHash) ++ signer₁) =
+  --                  (mirror for m₂)
+  have h_left₃_size :
+      (canonActionTypeHash ++ m₁.actionHash).size =
+      (canonActionTypeHash ++ m₂.actionHash).size := by
+    simp only [ByteArray.size_append, canonActionTypeHash_size,
+      Eip712Message.actionHash_size]
+  obtain ⟨h_typeHash_actionHash, _h_signer⟩ :=
+    byteArray_append_inj_of_size_left _ _ _ _ h_after_signer h_left₃_size
+  -- h_typeHash_actionHash : canonActionTypeHash ++ m₁.actionHash =
+  --                         canonActionTypeHash ++ m₂.actionHash
+  -- Final peel: extract m_.actionHash via the canonActionTypeHash prefix.
+  have h_typeHash_size :
       canonActionTypeHash.size = canonActionTypeHash.size := rfl
   obtain ⟨_, hAH⟩ :=
-    byteArray_append_inj_of_size_left _ _ _ _ hstructPre h_prefix_size
+    byteArray_append_inj_of_size_left _ _ _ _ h_typeHash_actionHash h_typeHash_size
   -- hAH : m₁.actionHash = m₂.actionHash
   -- Step 4: apply collision-freedom to the action hashes.
   unfold Eip712Message.actionHash at hAH

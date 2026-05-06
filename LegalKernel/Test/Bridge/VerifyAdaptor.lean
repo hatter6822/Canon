@@ -113,6 +113,32 @@ def halfOrderEq : TestCase := {
   body := assertEq (expected := secp256k1Order / 2) (actual := secp256k1HalfOrder) "half order"
 }
 
+/-- The 32-byte BE encoding of `secp256k1OrderBytes` decodes to exactly
+    `secp256k1Order`.  Cross-check that the Nat constant and the byte
+    array constant agree — guards against a future copy-paste error
+    that desyncs them.
+
+    Decode by `bs.foldl (acc * 256 + b) 0` (the canonical BE→Nat
+    decoder for fixed-width arrays). -/
+def orderBytesDecodesToOrder : TestCase := {
+  name := "secp256k1OrderBytes decodes (BE) to secp256k1Order"
+  body := do
+    let decoded : Nat := secp256k1OrderBytes.toList.foldl
+      (fun acc b => acc * 256 + b.toNat) 0
+    assertEq (expected := secp256k1Order) (actual := decoded) "BE decode"
+}
+
+/-- The well-known `secp256k1HalfOrder` constant matches the
+    documented EIP-2 / BIP-62 threshold value
+    `0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0`. -/
+def halfOrderMatchesEip2 : TestCase := {
+  name := "secp256k1HalfOrder matches EIP-2 / BIP-62 threshold"
+  body := do
+    let expected : Nat :=
+      0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+    assertEq (expected := expected) (actual := secp256k1HalfOrder) "half order matches EIP-2"
+}
+
 /-! ## Low-s boundary tests -/
 
 /-- `isLowS 0 = true`. -/
@@ -328,7 +354,7 @@ def isLowSJustBelowAPI : TestCase := {
 def tests : List TestCase :=
   [ orderBytesShape, orderBytesEndpoints, signatureSize,
     pkCompressedSize, pkUncompressedSize, identifiersDistinct,
-    halfOrderEq,
+    halfOrderEq, orderBytesDecodesToOrder, halfOrderMatchesEip2,
     lowSZero, lowSAtThreshold, lowSJustAboveThreshold, lowSJustBelowOrder,
     highSComplementSmallValue, highSComplementHalfOrder,
     productionVerifyRejectsAtLeanLevel,

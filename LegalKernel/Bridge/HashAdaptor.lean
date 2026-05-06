@@ -60,7 +60,6 @@ signature, output size is 32 bytes, and identical inputs produce
 identical outputs.
 -/
 
-import LegalKernel.Authority.Crypto
 import LegalKernel.Runtime.Hash
 
 namespace LegalKernel.Bridge

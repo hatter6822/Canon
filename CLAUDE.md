@@ -182,7 +182,7 @@ lake build LegalKernel.Bridge.HashAdaptor            # Workstream A.2 keccak256 
 lake build LegalKernel.Bridge.Eip712                 # Workstream A.3 EIP-712 wrap
 lake build canon                              # Phase-5 `canon` runtime CLI
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (745 tests post-Workstream-A)
+lake test                           # run Tests.lean driver (758 tests post-Workstream-A audit-1)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
@@ -602,21 +602,30 @@ canon/
 │                                          frivolous-dispute deterrence).
 │       └── Bridge/
 │           ├── VerifyAdaptor.lean   -- Workstream A.1 verify-adaptor
-│           │                           stability tests (23 cases: curve
-│           │                           constants, low-s boundary, mock-
+│           │                           stability tests (25 cases: curve
+│           │                           constants, BE bytes ↔ Nat
+│           │                           coherence, EIP-2 threshold
+│           │                           sanity, low-s boundary, mock-
 │           │                           verifier happy path, term-level
 │           │                           API stability).
 │           ├── HashAdaptor.lean     -- Workstream A.2 hash-adaptor
-│           │                           stability tests (23 cases: KAT
+│           │                           stability tests (26 cases: KAT
 │           │                           vector shapes, identifier
 │           │                           distinctness, conditional KAT-
 │           │                           match branching on
-│           │                           `isKeccak256Linked`,
+│           │                           `isKeccak256Linked` for all four
+│           │                           reference vectors,
+│           │                           leading-byte distinctness,
 │           │                           determinism, term-level API).
 │           └── Eip712.lean          -- Workstream A.3 EIP-712 wrap
-│                                       tests (34 cases: prefix /
-│                                       struct / wrap shapes, value-
-│                                       level distinguishability across
+│                                       tests (42 cases: prefix /
+│                                       struct / wrap shapes, type-
+│                                       string sanity (4),
+│                                       structPreHash size (= 160) +
+│                                       byte-layout regression tests
+│                                       (signer LSB at byte 95, nonce
+│                                       LSB at byte 127), value-level
+│                                       distinguishability across
 │                                       distinct domains / messages /
 │                                       nonces / signers / deployment
 │                                       IDs / chains, cross-protocol
@@ -1089,6 +1098,8 @@ each mechanise one or more of the following:
 | 104| `encodeUint256BE_injective` (under `< 2^256` bound) | `encodeUint256BE_injective` | E-A.3 / `Bridge/Eip712.lean` |
 | 105| `encodeUint256BE_size` | `encodeUint256BE_size` | E-A.3 / `Bridge/Eip712.lean` |
 | 106| `eip712Wrap_size` (2 + d + 32) | `eip712Wrap_size` | E-A.3 / `Bridge/Eip712.lean` |
+| 107| `structPreHash_size` (= 160 bytes; encodes all 4 declared fields) | `structPreHash_size` | E-A.3 / `Bridge/Eip712.lean` |
+| 108| `Eip712Message.actionHash_size` (= 32) | `Eip712Message.actionHash_size` | E-A.3 / `Bridge/Eip712.lean` |
 
 The "Phase / File" `R` markers identify the Phase-4-prelude
 positive-incentive WUs (`R.1` – `R.23`); they precede Phase 4 (DSL and
@@ -1276,9 +1287,94 @@ canonical type / constant exports, and stability theorems for the
 production crypto adaptors that bridge Canon to Ethereum L1.
 Bumped `kernelBuildTag` to
 `"canon-ethereum-workstream-a-crypto-adaptors"`.  Test count grew
-from 665 to 745 (+80 tests across three new bridge suites).
+from 665 to 758 (+93 tests across three new bridge suites).
 TCB unchanged; no new axioms; no new opaque declarations beyond
 the existing `Verify` and `signingInput`.
+
+**Workstream-A audit-1 hardening summary.**  A first post-landing
+audit of the workstream identified a critical EIP-712 interop bug
+plus several quality-of-life issues; all are now closed.
+
+  * **Critical: `eip712StructHash` encoded only 1 of 4 declared
+    fields.**  The `canonActionTypeString` declared four fields
+    (`actionHash`, `signer`, `nonce`, `deploymentId`) but
+    `eip712StructHash` only computed
+    `keccak256(typeHash ‖ actionHash)` — committing to just one
+    field.  A spec-compliant MetaMask wallet parsing the type
+    string would compute
+    `keccak256(typeHash ‖ actionHash ‖ signer_BE ‖ nonce_BE ‖
+    keccak256(deploymentId))`, producing a **different** struct
+    hash and a signature that **would fail to verify** against the
+    Lean side.  This broke the §5.3 acceptance criterion
+    ("MetaMask-produced EIP-712 signature on a Canon `signInput`
+    verifies via the A.1 binding").
+
+    Fix: `eip712StructHash` now encodes all four declared fields
+    via the new `structPreHash` helper (5-field 160-byte
+    concatenation: `typeHash ‖ actionHash ‖ signer_BE ‖ nonce_BE
+    ‖ hashBytes(deploymentId)`).  The proof of
+    `eip712Wrap_injective` was rewritten to handle the 5-field
+    preimage via four successive byte-level boundary extractions
+    plus two `CollisionFree hashBytes` applications.
+
+  * **Type-string EIP-712 spec alignment.**
+    `canonActionTypeString` previously declared `bytes32
+    deploymentId`, but the Lean encoder hashes the `deploymentId`
+    bytes (i.e., applies the EIP-712 `bytes` rule).  The two were
+    inconsistent.  Fix: changed type string to `bytes
+    deploymentId`, so a spec-compliant wallet applies the same
+    hashing rule the Lean side does.  Same fix applied to
+    `verifyingContract` (was `address`, now `bytes`).  Under the
+    corrected type strings the Lean encoder is exactly EIP-712
+    spec-compliant for the declared field types.
+
+  * **KAT-vector authoritative verification.**  All four reference
+    `kat_*` vectors (`kat_empty`, `kat_abc`, `kat_helloWorld`,
+    `kat_singleZero`) cross-verified against `pycryptodome`'s
+    `Crypto.Hash.keccak.new(digest_bits=256)` output during the
+    audit.  No deltas.  Two new conditional KAT tests added
+    (`hashAdaptorMatchesL1KeccakAbc`,
+    `hashAdaptorMatchesL1KeccakHelloWorld`) to exercise the
+    production binding path; one new defence-in-depth test
+    (`katVectorsLeadingBytesDistinct`) catches future
+    copy-paste corruption of the KAT constants.
+
+  * **Constant-coherence test.**  Added
+    `orderBytesDecodesToOrder` test: the BE bytes of
+    `secp256k1OrderBytes` decode to exactly `secp256k1Order`.
+    Catches a future copy-paste error that desyncs the two
+    constant declarations.  Plus `halfOrderMatchesEip2`: the
+    `secp256k1HalfOrder` constant matches the documented EIP-2
+    threshold value.
+
+  * **`structPreHash` byte-layout regression tests.**  Three
+    new tests pin the 5-field encoding directly:
+    `structPreHashSize` (= 160 bytes total), `structPreHashContainsSigner`
+    (distinct signers ⇒ distinct `structPreHash` bytes),
+    `structPreHashSignerLSBLayout` and
+    `structPreHashNonceLSBLayout` (verify the signer/nonce LSB
+    bytes appear at the documented BE positions, byte 95 and
+    byte 127 respectively).  Closes a coverage gap where the
+    old 1-field struct hash bug would have been hidden by the
+    coarser cross-field-distinguishability tests.
+
+  * **Type-string sanity tests.**  Four new tests
+    (`domainTypeStringExact`, `actionTypeStringExact`,
+    `actionTypeStringDeploymentIsBytes`,
+    `domainTypeStringContractIsBytes`) pin the type string
+    declarations, preventing a future regression where the type
+    string and encoder drift apart.
+
+  * **Unused-import cleanup.**  Removed three unused imports
+    surfaced during the audit:
+    `LegalKernel.Authority.SignedAction` from
+    `Bridge/VerifyAdaptor.lean` and `Bridge/Eip712.lean`;
+    `LegalKernel.Authority.Crypto` from `Bridge/HashAdaptor.lean`.
+    No semantic change; tighter dependency graph.
+
+The audit raised the test count from 745 to 758 (+13 audit-1
+tests).  All gates remain green; axioms unchanged
+(`propext`, `Quot.sound` only); no new sorries.
 
   * **WU A.1 (`LegalKernel/Bridge/VerifyAdaptor.lean`)** —
     Lean-side contract for the ECDSA secp256k1 verify adaptor
@@ -1322,12 +1418,34 @@ the existing `Verify` and `signingInput`.
     type strings and 32-byte type hashes), `encodeUint256BE`
     (32-byte BE uint256 encoder), `DomainParams` (5-field
     EIP-712 domain), `Eip712Message` (4-field action message),
-    `domainPreHash` / `eip712DomainSeparator` /
-    `eip712StructHash` / `eip712Wrap`.  Headline theorems
-    (Genesis Plan §12.6 #24 – #26):
+    `domainPreHash` (6-field 192-byte preimage),
+    `eip712DomainSeparator`, `structPreHash` (5-field 160-byte
+    preimage), `eip712StructHash`, `eip712Wrap`.
+
+    The type strings declare:
+    * `EIP712Domain(string name,string version,uint256 chainId,uint256 rollupId,bytes verifyingContract)` — `verifyingContract` declared
+      `bytes` (not `address`) so the EIP-712 spec's
+      hash-before-encoding rule for `bytes` matches the Lean
+      side's `hashBytes p.verifyingContract` field encoding.
+    * `CanonAction(bytes32 actionHash,uint64 signer,uint64 nonce,bytes deploymentId)` — `deploymentId` declared `bytes`
+      (not `bytes32`) for the same reason; `actionHash`
+      declared `bytes32` and encoded verbatim (since
+      `hashBytes` returns exactly 32 bytes per
+      `hashAdaptor_thirty_two_byte_output`).
+    Under these declarations the Lean encoder is **exactly
+    EIP-712 spec-compliant** for the declared field types: a
+    spec-compliant wallet (MetaMask, Ledger) parsing the
+    declared types and signing produces a struct hash that
+    equals `eip712StructHash m` byte-for-byte.
+
+    Headline theorems (Genesis Plan §12.6 #24 – #26):
     * `eip712Wrap_injective` (theorem #24): under
       `CollisionFree hashBytes`, equal wraps for fixed domain
-      separator imply equal sign-input bytes.
+      separator imply equal sign-input bytes.  Proof peels the
+      5-field struct preimage via four successive byte-level
+      boundary extractions plus two collision-free
+      applications (one for the struct hash, one for the
+      action hash).
     * `eip712DomainSeparator_distinguishes` (theorem #25):
       under `CollisionFree hashBytes` plus bounded chainId /
       rollupId hypotheses, distinct domain params produce
@@ -1335,19 +1453,25 @@ the existing `Verify` and `signingInput`.
     * `eip712Wrap_distinguishes` (theorem #26): composing #24 +
       #25 — same-size distinct domains plus distinct messages
       produce distinct wraps.
+
     Auxiliary: `domainPreHash_injective`, `encodeUint256BE_injective`
     (under `< 2^256` bound), `encodeUint256BE_injective_uint64`
-    (UInt64-bounded variant), plus per-component size theorems
-    (`eip712Prefix_size`, `eip712DomainSeparator_size`,
+    (UInt64-bounded variant), `Eip712Message.actionHash_size`,
+    `structPreHash_size` (= 160 bytes; direct evidence the
+    struct hash encodes all four fields), plus per-component size
+    theorems (`eip712Prefix_size`, `eip712DomainSeparator_size`,
     `eip712StructHash_size`, `eip712Wrap_size`,
-    `encodeUint256BE_size`, etc.).  All theorems
-    `#print axioms`-clean (only `propext` / `Quot.sound`; no
-    custom axioms).  34 tests in the `bridge-eip712` suite,
-    covering shape, determinism, cross-deployment / cross-action /
-    cross-signer / cross-nonce / cross-deploymentId
-    distinguishability, cross-protocol distinguishability against
-    `signedActionDomain`, and term-level API stability for every
-    headline theorem.
+    `encodeUint256BE_size`, etc.).
+
+    All theorems `#print axioms`-clean (only `propext` /
+    `Quot.sound`; no custom axioms).  42 tests in the
+    `bridge-eip712` suite, covering: prefix shape (3); type
+    string declarations (4); domain-separator + type-hash sizes
+    (4); wrap and struct shapes including byte-layout
+    regression tests (8); determinism (2); cross-* and
+    cross-protocol distinguishability (7); `encodeUint256BE`
+    shape / value (4); headline theorem APIs (3); auxiliary
+    lemma APIs (5); stability size APIs (2).
 
 The §5.3 `eip712Wrap_injective` theorem statement is *strictly
 stronger than the cryptographically meaningful security goal*:

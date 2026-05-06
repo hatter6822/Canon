@@ -46,10 +46,38 @@ backed by the existing Phase-6 fraud-proof pipeline.
     headline §12.6 theorems (`eip712Wrap_injective`,
     `eip712DomainSeparator_distinguishes`,
     `eip712Wrap_distinguishes`) ship without `sorry` and depend
-    only on the three Lean built-in axioms.  Test count grew from
-    665 to 745 (+80 tests across the three new bridge suites);
-    `kernelBuildTag` bumped to
+    only on the standard Lean built-in axioms (`propext` and
+    `Quot.sound` only — `Classical.choice` not used).  Test
+    count grew from 665 to 758 (+93 tests across the three new
+    bridge suites, including the Workstream-A audit-1
+    additions); `kernelBuildTag` bumped to
     `"canon-ethereum-workstream-a-crypto-adaptors"`.
+
+    **Workstream-A audit-1 hardening (post-landing).**  A first
+    audit pass identified a **critical interop bug** —
+    `eip712StructHash` encoded only `actionHash` while the type
+    string declared four fields, meaning a spec-compliant
+    MetaMask wallet would produce a struct hash differing from
+    Lean's, so the §5.3 acceptance criterion ("MetaMask-produced
+    EIP-712 signature on a Canon `signInput` verifies via the
+    A.1 binding") would have failed at runtime.  Closed by:
+    (a) extending `eip712StructHash` to encode all four
+    declared fields via the new `structPreHash` helper (5-field
+    160-byte preimage); (b) re-proving `eip712Wrap_injective`
+    for the new struct hash (four byte-level boundary
+    extractions plus two collision-free applications);
+    (c) updating the type strings to declare `bytes` (not
+    `bytes32` / `address`) for the hashed `deploymentId` /
+    `verifyingContract` fields, restoring exact EIP-712
+    spec-compliance for the declared field types.  Plus six
+    new regression tests (`structPreHashSize`,
+    `structPreHashContainsSigner`, byte-layout LSB checks,
+    and four type-string sanity tests) that would have caught
+    the original bug, and four other defensive
+    additions (`orderBytesDecodesToOrder`,
+    `halfOrderMatchesEip2`, conditional KAT tests for
+    `kat_abc` / `kat_helloWorld`, `katVectorsLeadingBytesDistinct`).
+    Three unused imports also removed.
 
 ## Executive summary
 
@@ -491,12 +519,25 @@ deployment boundary.
 `LegalKernel/Test/Bridge/Eip712.lean`).  All three §12.6
 theorems (`eip712Wrap_injective`,
 `eip712DomainSeparator_distinguishes`, `eip712Wrap_distinguishes`)
-ship without `sorry` and `#print axioms`-clean.  See the
-`Bridge/Eip712.lean` docstring for the canonicalisation deviations
-(hash-based address encoding rather than EIP-712-spec left-pad,
-single-field `actionHash` struct rather than four-field for
-proof-tractability — both intentional and non-load-bearing for
-security).
+ship without `sorry` and `#print axioms`-clean.
+
+**Spec compliance (post-audit-1).**  An initial implementation
+shipped with two spec deviations: (a) the struct hash committed
+only to `actionHash` while the type string declared four fields
+(would have broken MetaMask interop); (b) ByteArray-typed fields
+(`deploymentId`, `verifyingContract`) were declared with fixed
+type names (`bytes32` / `address`) but encoded via hashing
+(EIP-712's `bytes` rule).  Workstream-A audit-1 closed both:
+the struct hash now encodes all four declared fields per
+EIP-712 spec, and the type strings now declare `bytes` for the
+hashed fields.  Under the corrected type strings, the Lean
+encoder is **byte-for-byte EIP-712 spec-compliant** — a
+spec-compliant wallet (MetaMask, Ledger, etc.) parsing the
+declared types and signing produces a struct hash that exactly
+equals `eip712StructHash m`.  The §5.3 acceptance criterion
+("MetaMask-produced EIP-712 signature on a Canon `signInput`
+verifies via the A.1 binding") is therefore satisfied at the
+byte level, not just the security-property level.
 
 **Owner:** Lean + runtime; **Reviewer count:** 1; **Depends on:**
 A.1 (verify must understand wrapped form), A.2 (keccak256 used
