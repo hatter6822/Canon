@@ -104,6 +104,7 @@ import LegalKernel.Test.Bridge.CrossCheck.Framework
 import LegalKernel.Test.Bridge.CrossCheck.EcdsaVerify
 import LegalKernel.Test.Bridge.CrossCheck.Keccak256
 import LegalKernel.Test.Bridge.CrossCheck.DepositReceiptHash
+import LegalKernel.Test.Bridge.CrossCheck.WithdrawalProof
 
 open LegalKernel.Test
 
@@ -199,6 +200,8 @@ def main : IO UInt32 := do
                                     Bridge.CrossCheck.Keccak256.tests)
   failed := failed + (← runAll "crosscheck-deposit-receipt"
                                     Bridge.CrossCheck.DepositReceiptHash.tests)
+  failed := failed + (← runAll "crosscheck-withdrawal-proof"
+                                    Bridge.CrossCheck.WithdrawalProof.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0
