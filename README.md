@@ -39,9 +39,9 @@ formal model, threat model, and phased roadmap.
 | Custom axioms                               | **0** — every theorem `#print axioms` to the three Lean built-ins |
 | `sorry` in TCB                              | **0**, mechanically enforced (`lake exe count_sorries`)           |
 | External Lake dependencies                  | **0** — Lean core only, no Mathlib, no batteries                  |
-| Lean tests                                  | **1 103** across **70** suites (`lake test`)                      |
+| Lean tests                                  | **1 169** across **74** suites (`lake test`)                      |
 | Solidity tests                              | **191 + 8 conditionally-skipped** across **16** suites (`forge test`) |
-| Build tag                                   | `canon-ethereum-workstream-f-cross-stack-verification`            |
+| Build tag                                   | `canon-local-policies`                                            |
 
 A green CI run on `lake build`, `lake test`, `lake exe count_sorries`,
 `lake exe tcb_audit`, and `lake exe stub_audit` is the authoritative

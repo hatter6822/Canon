@@ -159,10 +159,11 @@ Encoded as the concatenation of:
 
 ## 5. The `Action` CBE Encoding
 
-The `Action` type has 15 constructors, encoded by their inductive
+The `Action` type has 17 constructors, encoded by their inductive
 index (frozen — no phase will renumber existing constructors).
 Phase 5 ships indices 0..7; Phase 6 appends 8..11; Workstream B
-appends 12; Workstream C appends 13..14.
+appends 12; Workstream C appends 13..14; Workstream LP (actor-
+scoped policies) appends 15..16.
 
 ```
 Action.transfer            := 0
@@ -180,6 +181,8 @@ Action.rollback            := 11  -- Phase 6
 Action.registerIdentity    := 12  -- Workstream B (Ethereum integration)
 Action.deposit             := 13  -- Workstream C (bridge L1 → L2)
 Action.withdraw            := 14  -- Workstream C (bridge L2 → L1)
+Action.declareLocalPolicy  := 15  -- Workstream LP (actor-scoped policies)
+Action.revokeLocalPolicy   := 16  -- Workstream LP (actor-scoped policies)
 ```
 
 Each Action is encoded as `<constructor uint> :: <fields>`.  For
@@ -224,6 +227,12 @@ Action.deposit r recipient amount depositId  →
 Action.withdraw r sender amount recipientL1  →
   CBE-uint(14) ++ CBE-uint(r) ++ CBE-uint(sender) ++
   CBE-uint(amount) ++ CBE-bstr(recipientL1)
+
+Action.declareLocalPolicy policy  →
+  CBE-uint(15) ++ CBE-encode(policy : LocalPolicy)
+
+Action.revokeLocalPolicy  →
+  CBE-uint(16)
 ```
 
 The `Action.withdraw` `recipientL1` field is encoded as a
@@ -296,10 +305,10 @@ EvidenceVerdict.inconclusive := tag 2
 The full per-constructor table for the dispute types is in
 `LegalKernel/Encoding/Disputes.lean`.
 
-### 5.3 Phase-6 + Workstream-C `Event` Inductive Extension
+### 5.3 Phase-6 + Workstream-C + Workstream-LP `Event` Inductive Extension
 
-The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 11
-constructors at frozen indices 0..10:
+The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 13
+constructors at frozen indices 0..12:
 
 ```
 Event.balanceChanged       := 0
@@ -313,6 +322,8 @@ Event.verdictApplied       := 7  -- Phase 6
 Event.rewardIssued         := 8  -- Phase-6 incentive amendment
 Event.withdrawalRequested  := 9  -- Workstream C (bridge)
 Event.depositCredited      := 10 -- Workstream C (bridge)
+Event.localPolicyDeclared  := 11 -- Workstream LP (actor-scoped policies)
+Event.localPolicyRevoked   := 12 -- Workstream LP (actor-scoped policies)
 ```
 
 `Event.rewardIssued (resource, recipient, amount)` is emitted
@@ -363,6 +374,107 @@ External implementers reproducing a Canon-compatible client
 must respect these emission semantics: rewards via
 `Action.reward`, staking via `Action.transfer`, never `burn`
 (which would break the kernel-level monotonicity firewall).
+
+### 5.4 Workstream-LP `LocalPolicy` CBE Encoding
+
+Workstream LP (actor-scoped policies) introduces a
+`LocalPolicy` first-order data type that on-chain actors can
+declare via `Action.declareLocalPolicy` (frozen index 15) to
+constrain their *own* outgoing actions.  The `LocalPolicy`
+encoding:
+
+```
+LocalPolicy := { clauses : List LocalPolicyClause }
+LocalPolicy.encode lp  →  CBE-array of CBE-encode(clauses[i])
+```
+
+The `LocalPolicyClause` inductive has 3 frozen-index variants
+(LP §3.6):
+
+```
+LocalPolicyClause.denyTags          := tag 0
+LocalPolicyClause.requireRecipientIn := tag 1
+LocalPolicyClause.capAmount         := tag 2
+```
+
+Per-clause field encodings:
+
+```
+LocalPolicyClause.denyTags tags  →
+  CBE-uint(0) ++ CBE-array(CBE-uint(t) for t in tags)
+
+LocalPolicyClause.requireRecipientIn r allowed  →
+  CBE-uint(1) ++ CBE-uint(r) ++ CBE-array(CBE-uint(a) for a in allowed)
+
+LocalPolicyClause.capAmount r max  →
+  CBE-uint(2) ++ CBE-uint(r) ++ CBE-uint(max)
+```
+
+The `ExtendedState.localPolicies` field is encoded as a sorted-
+key CBE map of `(ActorId, encoded-policy-bytes)` pairs, mirroring
+the `KeyRegistry` and `BridgeState.consumed` patterns.  The
+post-LP `ExtendedState.encode` appends a 5th segment to the
+existing 4-segment encoding (`base ++ nonces ++ registry ++
+bridge ++ localPolicies`).  Pre-LP snapshots cannot be decoded
+by the post-LP `ExtendedState.decode`; operators upgrade by
+re-snapshotting under the post-LP build (see Workstream-LP plan
+§4.5 / §12.4).
+
+#### 5.4.1 DoS bounds (frozen)
+
+```
+MAX_CLAUSES_PER_POLICY      := 64
+MAX_TAGS_PER_DENY           := 64
+MAX_RECIPIENTS_PER_REQUIRE  := 64
+MAX_POLICY_ENCODE_BYTES     := 16_384
+```
+
+These are part of the on-wire ABI contract; the canonical
+decoder rejects oversize policies as
+`DecodeError.fieldOutOfBounds` (or fails the
+`LocalPolicy.fieldsBounded` decidability check at the encoder
+level).  Loosening any bound requires the §13.6 two-reviewer
+gate.
+
+#### 5.4.2 Admissibility extension (LP.7)
+
+The `Admissible` predicate gains a 5th top-level conjunct (the
+6th condition in §8.2):
+
+```
+Admissible P es st  ↔  ... ∧ localPolicyPermits es st.signer st.action
+```
+
+where `localPolicyPermits` is:
+
+```
+localPolicyPermits es signer action  ↔
+  isMetaPolicyAction action = true ∨
+  (es.localPolicies.lookup signer).permits signer action
+```
+
+`isMetaPolicyAction` returns `true` for `declareLocalPolicy` and
+`revokeLocalPolicy` only; this is the structural lockout-
+prevention exemption.  Actors with no declared policy see no
+admissibility narrowing (the `LocalPolicy.empty.permits` is
+vacuously `True`).
+
+#### 5.4.3 Future Solidity-port shape
+
+The Solidity-side mirror of LP is documented in
+`solidity/README.md`'s "Future: actor-scoped policies" section.
+It will require:
+
+  1. A CBE decoder in `solidity/src/lib/CBEDecode.sol` for the
+     `LocalPolicy` and `LocalPolicyClause` types (mirroring the
+     Lean codec line-for-line, with the same DoS bounds).
+  2. An admissibility-check call in
+     `CanonBridge.depositETH` / `depositERC20` that consults the
+     depositor's L2 `localPolicies` lookup before crediting (a
+     defensive layer; the L2 admissibility check already enforces
+     this — the Solidity-side check is for fast L1 user feedback).
+  3. Two new event-listener mappings for `LocalPolicyDeclared` /
+     `LocalPolicyRevoked` in the indexer.
 
 ## 6. The `Snapshot` Encoding
 

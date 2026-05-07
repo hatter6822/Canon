@@ -81,6 +81,7 @@ import LegalKernel.Laws.ProportionalDilute
 import LegalKernel.Laws.Deposit
 import LegalKernel.Laws.Withdraw
 import LegalKernel.Authority.Crypto
+import LegalKernel.Authority.LocalPolicy
 import LegalKernel.Bridge.AddressBook
 import LegalKernel.Bridge.State
 import LegalKernel.Disputes.Types
@@ -229,6 +230,35 @@ inductive Action
       via `applyActionToBridgeState`. -/
   | withdraw (r : ResourceId) (sender : ActorId)
              (amount : Amount) (recipientL1 : Bridge.EthAddress)
+  /-- LP.4: declare (or replace) the signer's local policy
+      (Workstream LP §5.2) at frozen index 15.  Mutates the
+      `ExtendedState.localPolicies` table to map the signer's
+      `ActorId` to `policy`.  Idempotent on equal `policy`;
+      replaces on differing `policy`.
+
+      Kernel-level effect: `Laws.freezeResource 0` (no `base`-state
+      effect).  Authority-level effect: `localPolicies` insertion
+      via `applyActionToLocalPolicies` inside `apply_admissible`
+      (LP.5).
+
+      Signed by the actor whose policy is being set: the signer's
+      `ActorId` (carried by `SignedAction.signer`) is what the
+      runtime inserts into `localPolicies`.  A different actor
+      signing this action sets *that signer*'s policy, not someone
+      else's — there is no "set policy for actor X" capability
+      short of revealing X's signing key. -/
+  | declareLocalPolicy (policy : LocalPolicy)
+  /-- LP.4: revoke the signer's local policy (Workstream LP §5.3)
+      at frozen index 16.  Mutates the `ExtendedState.localPolicies`
+      table to erase the signer's `ActorId` entry.  Idempotent:
+      revoking a non-existent entry is a no-op.  Compiles to
+      `Laws.freezeResource 0` at the kernel level.
+
+      No fields: which actor is being revoked is the signer.  The
+      meta-action exemption in admissibility (LP.7) ensures an
+      actor can always revoke their own policy regardless of the
+      policy's contents (the structural lockout-prevention proof). -/
+  | revokeLocalPolicy
   deriving Repr, DecidableEq
 
 /-! ## Compilation to kernel `Transition`s (§4.13 / WU 3.1) -/
@@ -282,6 +312,12 @@ def Action.compileTransition : Action → Transition
   -- `apply_bridge_admissible_with`.
   | .deposit r recipient amount d   => Laws.deposit  r recipient amount d
   | .withdraw r sender amount rcp   => Laws.withdraw r sender amount rcp
+  -- Workstream LP: actor-scoped local-policy actions.  Both compile
+  -- to the kernel-level no-op (`Laws.freezeResource 0`).  The
+  -- authority-level effect (`localPolicies` mutation) lives in
+  -- `applyActionToLocalPolicies` inside `apply_admissible` (LP.5).
+  | .declareLocalPolicy _           => Laws.freezeResource 0
+  | .revokeLocalPolicy              => Laws.freezeResource 0
 
 /-! ## The `CompiledAction` wrapper -/
 
@@ -444,6 +480,13 @@ example (r : ResourceId) (sender : ActorId) (amount : Amount)
     (rcp : Bridge.EthAddress) :
     (Action.compile (.withdraw r sender amount rcp)).source =
       .withdraw r sender amount rcp := rfl
+
+example (p : LocalPolicy) :
+    (Action.compile (.declareLocalPolicy p)).source =
+      .declareLocalPolicy p := rfl
+
+example :
+    (Action.compile .revokeLocalPolicy).source = .revokeLocalPolicy := rfl
 
 end Authority
 end LegalKernel

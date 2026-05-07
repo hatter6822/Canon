@@ -77,6 +77,7 @@ invariant.
 import LegalKernel.Authority.Nonce
 import LegalKernel.Bridge.State
 import LegalKernel.Encoding.Encodable
+import LegalKernel.Encoding.LocalPolicy
 import LegalKernel.Encoding.SignedAction
 
 open Std
@@ -441,12 +442,17 @@ instance instEncodableBridgeState : Encodable Bridge.BridgeState where
   decode := Bridge.BridgeState.decode
 
 /-- Encode an `ExtendedState` as
-    `[base ++ nonces ++ registry ++ bridge]`. -/
+    `[base ++ nonces ++ registry ++ bridge ++ localPolicies]`.
+    LP.3 appends the `localPolicies` segment.  Pre-LP snapshots
+    cannot be decoded by the post-LP `ExtendedState.decode` (which
+    is strict per §4.5); operators upgrade by re-snapshotting under
+    the post-LP build (see §12.4 of the actor-scoped policies plan). -/
 def ExtendedState.encode (es : ExtendedState) : Stream :=
   State.encode es.base ++
   NonceState.encode es.nonces ++
   KeyRegistry.encodeMap es.registry ++
-  Bridge.BridgeState.encode es.bridge
+  Bridge.BridgeState.encode es.bridge ++
+  LocalPolicies.encodeMap es.localPolicies
 
 /-- Decode a `NonceState`.  Each key is a CBE-decoded `Nat` in
     `[0, 2^64)` and converts to `UInt64` exactly. -/
@@ -468,7 +474,12 @@ def KeyRegistry.decodeMap (s : Stream) : Except DecodeError (KeyRegistry × Stre
     .ok (TreeMap.ofList pairs' compare, rest)
   | .error e => .error e
 
-/-- Decode an `ExtendedState`. -/
+/-- Decode an `ExtendedState`.  LP.3: strict 5-segment decoder —
+    pre-LP snapshots (4 segments only) decode-fail at the
+    `LocalPolicies.decodeMap` call, which is the intended migration
+    behaviour (§4.5 of the actor-scoped policies plan).  Operators
+    re-snapshot under the post-LP build to produce a fresh, fully-
+    canonical 5-segment encoding. -/
 def ExtendedState.decode (s : Stream) : Except DecodeError (ExtendedState × Stream) :=
   match State.decode s with
   | .ok (base, s₁) =>
@@ -478,7 +489,10 @@ def ExtendedState.decode (s : Stream) : Except DecodeError (ExtendedState × Str
       | .ok (registry, s₃) =>
         match Bridge.BridgeState.decode s₃ with
         | .ok (bridge, s₄) =>
-          .ok ({ base, nonces, registry, bridge }, s₄)
+          match LocalPolicies.decodeMap s₄ with
+          | .ok (localPolicies, s₅) =>
+            .ok ({ base, nonces, registry, bridge, localPolicies }, s₅)
+          | .error e => .error e
         | .error e => .error e
       | .error e => .error e
     | .error e => .error e

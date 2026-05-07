@@ -379,3 +379,69 @@ investigated but deliberately not changed:
 * The "no admin surface" assertion in F.3 (testnet acceptance)
   doubles as a safety check that no upgradeable-proxy bytecode
   has accidentally crept in.
+
+## Future: actor-scoped policies (Workstream LP)
+
+Workstream LP (actor-scoped policies) is a Lean-side workstream
+that adds per-actor on-chain mutable policy filters.  The
+Solidity-side mirror is **not yet implemented**; this section
+documents the future shape so an implementer can land it as a
+focused follow-up without re-litigating the Lean-side decisions.
+
+The Lean-side workstream introduces:
+
+  * `Action.declareLocalPolicy (policy : LocalPolicy)` at
+    frozen index 15.
+  * `Action.revokeLocalPolicy` at frozen index 16.
+  * `Event.localPolicyDeclared (actor, policy)` at frozen
+    index 11.
+  * `Event.localPolicyRevoked (actor)` at frozen index 12.
+  * A 5th admissibility conjunct: the signer's declared
+    policy (defaulting to empty) must permit the action, with
+    a structural meta-action exemption for the two LP action
+    constructors.
+
+The `LocalPolicy` data type is a list of
+`LocalPolicyClause` values combined by conjunction.  The MVP
+clause set has three variants:
+
+  * `denyTags (tags : List Nat)` — deny actions whose
+    constructor tag is in `tags`.
+  * `requireRecipientIn (resource, allowed)` — for
+    balance-mutating actions on `resource`, require the
+    recipient field to be in `allowed`.
+  * `capAmount (resource, max)` — for actions on `resource`
+    with an `amount` field, require `amount ≤ max`.
+
+DoS bounds (frozen):
+
+  * `MAX_CLAUSES_PER_POLICY = 64`
+  * `MAX_TAGS_PER_DENY = 64`
+  * `MAX_RECIPIENTS_PER_REQUIRE = 64`
+  * `MAX_POLICY_ENCODE_BYTES = 16_384`
+
+When the Solidity side lands, it will require:
+
+  1. A CBE decoder in `solidity/src/lib/CBEDecode.sol` for
+     the `LocalPolicy` and `LocalPolicyClause` types,
+     mirroring the Lean codec line-for-line with the same
+     DoS bounds.
+  2. An admissibility-check call in
+     `CanonBridge.depositETH` / `depositERC20` that consults
+     the depositor's L2 `localPolicies` lookup before
+     crediting (defensive layer; the L2 admissibility check
+     already enforces this — the Solidity-side check is for
+     fast L1 user feedback).
+  3. Two new event-listener mappings for
+     `LocalPolicyDeclared` / `LocalPolicyRevoked` in the
+     indexer.
+
+A future `CanonDisputeVerifier` extension may add a sixth
+claim variant (`localPolicyMisreported`) for adjudicating
+disputes about whether a particular L2 transaction violated
+the actor's declared policy; this is reserved for
+post-LP-MVP work.
+
+See `docs/actor_scoped_policies_plan.md` for the full
+engineering plan and `docs/abi.md` §5.4 for the canonical
+on-disk byte layouts.

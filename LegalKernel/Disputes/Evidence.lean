@@ -105,6 +105,13 @@ def kernelOnlyApply (es : ExtendedState) (entry : LogEntry) : ExtendedState :=
       { es'' with registry := es''.registry.insert actor newKey }
   | .registerIdentity actor pk =>
       { es'' with registry := es''.registry.insert actor pk }
+  -- LP.5: the two LP meta-actions update `localPolicies`; mirror the
+  -- runtime's `applyActionToLocalPolicies` step so that prefix-replay
+  -- via `kernelOnlyApply` reproduces the same state the runtime would.
+  | .declareLocalPolicy policy =>
+      { es'' with localPolicies := es''.localPolicies.declare signer policy }
+  | .revokeLocalPolicy =>
+      { es'' with localPolicies := es''.localPolicies.revoke signer }
   | _ => es''
 
 /-- Apply a list of log entries via `kernelOnlyApply` in order.
@@ -430,10 +437,13 @@ theorem apply_admissible_with_eq_kernelOnlyApply
     (h : AdmissibleWith verify P d es entry.signedAction) :
     apply_admissible_with verify P d es entry.signedAction h
       = kernelOnlyApply es entry := by
-  -- The admissibility witness's 5th conjunct gives us
+  -- The admissibility witness's 4th conjunct gives us
   -- `(Action.compile entry.signedAction.action).transition.pre es.base`.
-  have hPre : (Action.compile entry.signedAction.action).transition.pre es.base :=
-    h.2.2.2
+  -- LP.7 robustness: use `obtain` rather than chained-tuple projection
+  -- (the conjunct chain shifted with LP.7's local-policy addition).
+  have hPre : (Action.compile entry.signedAction.action).transition.pre es.base := by
+    obtain ⟨_, _, _, hPre, _⟩ := h
+    exact hPre
   -- Unfold both sides; under hPre, `step_impl` collapses to `apply_impl`,
   -- and the registry/nonce updates agree by construction.
   unfold apply_admissible_with applyActionToRegistry kernelOnlyApply step_impl
@@ -459,6 +469,8 @@ theorem apply_admissible_with_eq_kernelOnlyApply
   | registerIdentity actor pk     => rfl
   | deposit _ _ _ _               => rfl
   | withdraw _ _ _ _              => rfl
+  | declareLocalPolicy _          => rfl
+  | revokeLocalPolicy             => rfl
 
 /-! ### Inductive runtime-admissibility predicate
 

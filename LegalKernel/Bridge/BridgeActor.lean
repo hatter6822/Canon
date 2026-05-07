@@ -291,6 +291,27 @@ theorem bridgePolicy_rejects_withdraw
   intro ⟨_, h⟩
   exact absurd h (by simp [bridgeAuthorizedAction])
 
+/-- LP.8 — the bridge policy rejects `declareLocalPolicy` actions.
+    The bridge actor is a deployment-authority slot that signs L1
+    attestations; it does not declare per-actor policies.  A
+    deployment that wants to expose per-bridge policy management
+    can extend `bridgePolicy` via `AuthorityPolicy.union`, but the
+    default rejection is the safe baseline. -/
+theorem bridgePolicy_rejects_declareLocalPolicy (p : Authority.LocalPolicy) :
+    ¬ bridgePolicy.authorized bridgeActor (.declareLocalPolicy p) := by
+  unfold bridgePolicy
+  intro ⟨_, h⟩
+  exact absurd h (by simp [bridgeAuthorizedAction])
+
+/-- LP.8 — the bridge policy rejects `revokeLocalPolicy` actions
+    by the bridge actor.  Companion to
+    `bridgePolicy_rejects_declareLocalPolicy`. -/
+theorem bridgePolicy_rejects_revokeLocalPolicy :
+    ¬ bridgePolicy.authorized bridgeActor .revokeLocalPolicy := by
+  unfold bridgePolicy
+  intro ⟨_, h⟩
+  exact absurd h (by simp [bridgeAuthorizedAction])
+
 /-! ## Cross-actor rejection
 
 The bridge policy authorises actions ONLY when the signer is the

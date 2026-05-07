@@ -143,22 +143,24 @@ def admissibilityTests : List TestCase :=
 
 /-! ## apply_admissible behaviour -/
 
-/-- A *trivial* `Admissible` builder.  Takes the four component
-    witnesses explicitly and combines them into an `Admissible`
-    value.  Tests that want to drive `apply_admissible` without
-    exercising the (opaque) `Verify` can use this as a canonical
-    constructor — they have to supply a `Verify`-true witness
-    externally, but the builder packages the `∧`-chain correctly so
-    no test needs to know the conjunct order. -/
+/-- A *trivial* `Admissible` builder.  Takes the five component
+    witnesses explicitly (LP.7 added the local-policy conjunct) and
+    combines them into an `Admissible` value.  Tests that want to
+    drive `apply_admissible` without exercising the (opaque)
+    `Verify` can use this as a canonical constructor — they have to
+    supply a `Verify`-true witness externally, but the builder
+    packages the `∧`-chain correctly so no test needs to know the
+    conjunct order. -/
 def mkAdmissible
     (P : AuthorityPolicy) (es : ExtendedState) (st : SignedAction)
     (hauth : P.authorized st.signer st.action)
     (hnonce : st.nonce = expectsNonce es st.signer)
     (hreg : ∃ pk, es.registry[st.signer]? = some pk ∧
                   Verify pk (signingInput st.action st.signer st.nonce ByteArray.empty) st.sig = true)
-    (hpre : (Action.compile st.action).transition.pre es.base) :
+    (hpre : (Action.compile st.action).transition.pre es.base)
+    (hlp : localPolicyPermits es st.signer st.action) :
     Admissible P es st :=
-  ⟨hauth, hnonce, hreg, hpre⟩
+  ⟨hauth, hnonce, hreg, hpre, hlp⟩
 
 /-- Sub-suite: term-level checks of `apply_admissible` and the
     helper functions it composes (`advanceNonce`, registry update). -/
@@ -322,6 +324,7 @@ def applyTests : List TestCase :=
                  (∃ pk, es.registry[st.signer]? = some pk ∧
                         Verify pk (signingInput st.action st.signer st.nonce ByteArray.empty) st.sig = true) →
                  (Action.compile st.action).transition.pre es.base →
+                 localPolicyPermits es st.signer st.action →
                  Admissible P es st :=
           mkAdmissible
         pure ()

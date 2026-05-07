@@ -41,6 +41,10 @@ The constructor-tag map (frozen):
   | 10  | `verdict`            | `Verdict` (encoded via `Encoding.Disputes`)             |
   | 11  | `rollback`           | `targetIdx`                                             |
   | 12  | `registerIdentity`   | `actor`, `pk` (CBE bstr)                                |
+  | 13  | `deposit`            | `r`, `recipient`, `amount`, `depositId`                 |
+  | 14  | `withdraw`           | `r`, `sender`, `amount`, `recipientL1` (CBE bstr 20B)   |
+  | 15  | `declareLocalPolicy` | `policy` (encoded via `Encoding.LocalPolicy`)           |
+  | 16  | `revokeLocalPolicy`  | (no fields)                                             |
 
 The `Action.fieldsBounded` predicate captures the canonical-encoding
 bound (`< 2^64`) on every numeric field.  Round-trip and injectivity
@@ -54,8 +58,10 @@ invariant.
 -/
 
 import LegalKernel.Authority.Action
+import LegalKernel.Authority.LocalPolicySemantics
 import LegalKernel.Encoding.Encodable
 import LegalKernel.Encoding.Disputes
+import LegalKernel.Encoding.LocalPolicy
 
 namespace LegalKernel
 namespace Encoding
@@ -104,6 +110,8 @@ def Action.fieldsBounded : Action → Prop
       -- form is `< 2^64` unconditionally).
       r.toNat < 256 ^ 8 ∧ sender.toNat < 256 ^ 8 ∧
       amount < 256 ^ 8
+  | .declareLocalPolicy p           => LocalPolicy.fieldsBounded p
+  | .revokeLocalPolicy              => True
 
 /-- Decidable instance for `fieldsBounded`.  Each branch reduces to
     a finite conjunction of `Nat <` comparisons, so `Decidable`
@@ -189,6 +197,11 @@ def Action.encode : Action → Stream
       Encodable.encode (T := Nat) sender.toNat ++
       Encodable.encode (T := Nat) amount ++
       Encodable.encode (T := ByteArray) (Bridge.EthAddress.toBytes rcp)
+  | .declareLocalPolicy p           =>
+      Encodable.encode (T := Nat) 15 ++
+      Encodable.encode (T := LocalPolicy) p
+  | .revokeLocalPolicy              =>
+      Encodable.encode (T := Nat) 16
 
 /-! ## Decoder -/
 
@@ -362,6 +375,14 @@ def Action.decode (s : Stream) : Except DecodeError (Action × Stream) :=
         | .error e => .error e
       | .error e => .error e
     | .error e => .error e
+  | .ok (15, s₁) =>
+    -- declareLocalPolicy (policy)
+    match Encodable.decode (T := LocalPolicy) s₁ with
+    | .ok (p, s₂) => .ok (.declareLocalPolicy p, s₂)
+    | .error e => .error e
+  | .ok (16, s₁) =>
+    -- revokeLocalPolicy (no fields)
+    .ok (.revokeLocalPolicy, s₁)
   | .ok (other, _) => .error (.invalidConstructorIndex other)
   | .error e => .error e
 
@@ -660,6 +681,23 @@ theorem action_roundtrip (a : Action) (rest : Stream) (h : Action.fieldsBounded 
     dsimp only
     -- EthAddress round-trip: ofBytes ∘ toBytes = some.
     rw [Bridge.EthAddress.ofBytes_toBytes rcp]
+  | declareLocalPolicy p =>
+    -- h : LocalPolicy.fieldsBounded p
+    show Action.decode (Action.encode (.declareLocalPolicy p) ++ rest) = .ok (_, rest)
+    unfold Action.encode Action.decode
+    rw [show
+      Encodable.encode (T := Nat) 15 ++ Encodable.encode (T := LocalPolicy) p ++ rest =
+      Encodable.encode (T := Nat) 15 ++ (Encodable.encode (T := LocalPolicy) p ++ rest)
+        from by simp [List.append_assoc]]
+    rw [nat_roundtrip 15 _ (by decide)]
+    dsimp only
+    rw [show Encodable.decode (T := LocalPolicy)
+              (Encodable.encode (T := LocalPolicy) p ++ rest) = .ok (p, rest)
+        from localPolicy_roundtrip p rest h]
+  | revokeLocalPolicy =>
+    show Action.decode (Action.encode .revokeLocalPolicy ++ rest) = .ok (_, rest)
+    unfold Action.encode Action.decode
+    rw [nat_roundtrip 16 _ (by decide)]
 
 /-- Empty-suffix round-trip for `Action`. -/
 theorem action_roundtrip_empty (a : Action) (h : Action.fieldsBounded a) :
@@ -679,6 +717,54 @@ theorem action_encode_injective (a₁ a₂ : Action)
   have heq : (Except.ok (a₁, ([] : Stream)) : Except DecodeError (Action × Stream))
            = Except.ok (a₂, []) := r₁.symm.trans r₂
   exact (Prod.mk.injEq _ _ _ _).mp (Except.ok.inj heq) |>.1
+
+/-! ## LP.4 Action.tag agreement with the encoder
+
+The `Action.tag` projection (defined in
+`Authority/LocalPolicySemantics.lean`) and the leading byte of
+`Action.encode` are constructed to agree on every constructor.
+The theorem below discharges the agreement mechanically: every
+constructor's `Action.tag` value matches its CBE encoder's
+leading uint, so a `denyTags`-clause's tag check (over
+`Action.tag`) and the on-wire CBE tag byte (over `Action.encode`)
+share the same vocabulary.
+
+This theorem is stated *here* rather than in the LocalPolicy
+modules because both `Action.tag` and `Action.encode` must exist
+together for the agreement to be expressible; LP.4 is the first
+work unit where both cover the full constructor list. -/
+
+/-- LP.4: `Action.tag` agrees with the leading uint of
+    `Action.encode`.  For every action `a`, the encoded byte
+    sequence begins with `Encodable.encode (T := Nat) (Action.tag
+    a)`.  Proven by `cases a` plus per-branch `rfl`. -/
+theorem Action.tag_matches_encode_tag (a : Action) :
+    ∃ tail : Stream,
+      Encodable.encode (T := Action) a =
+      Encodable.encode (T := Nat) (Action.tag a) ++ tail := by
+  cases a with
+  | transfer r s r' am            => exact ⟨_, rfl⟩
+  | mint r to am                  => exact ⟨_, rfl⟩
+  | burn r fr am                  => exact ⟨_, rfl⟩
+  | freezeResource r              => exact ⟨_, rfl⟩
+  | replaceKey actor newKey       => exact ⟨_, rfl⟩
+  | reward r to am                => exact ⟨_, rfl⟩
+  | distributeOthers r e am       => exact ⟨_, rfl⟩
+  | proportionalDilute r e tr     => exact ⟨_, rfl⟩
+  | dispute d                     => exact ⟨_, rfl⟩
+  | disputeWithdraw idx           => exact ⟨_, rfl⟩
+  | verdict v                     => exact ⟨_, rfl⟩
+  | rollback idx                  => exact ⟨_, rfl⟩
+  | registerIdentity actor pk     => exact ⟨_, rfl⟩
+  | deposit r recipient amount d  => exact ⟨_, rfl⟩
+  | withdraw r sender amount rcp  => exact ⟨_, rfl⟩
+  | declareLocalPolicy p          => exact ⟨_, rfl⟩
+  | revokeLocalPolicy             =>
+    refine ⟨[], ?_⟩
+    show Action.encode .revokeLocalPolicy =
+         Encodable.encode (T := Nat) (Action.tag .revokeLocalPolicy) ++ []
+    rw [List.append_nil]
+    rfl
 
 /-! ## Spot-check `example`s (compile-time-only test vectors) -/
 

@@ -144,6 +144,8 @@ theorem applyActionToBridgeState_non_bridge
   | registerIdentity _ _          => rfl
   | deposit r recipient amount d  => exact absurd hact (hne_dep r recipient amount d)
   | withdraw r sender amount rcp  => exact absurd hact (hne_wd r sender amount rcp)
+  | declareLocalPolicy _          => rfl
+  | revokeLocalPolicy             => rfl
 
 /-! ## BridgeAdmissibleWith
 
