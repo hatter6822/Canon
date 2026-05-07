@@ -705,6 +705,13 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier, ReentrancyGuard {
         revert InvalidClaimVariant();
     }
 
+    /// @notice Reverts when the `_runDoubleApplyFromConcat` blob's
+    ///         array head doesn't declare exactly 2 entries.
+    ///         Audit-3 defensive check: closes a class of malformed
+    ///         input where the count and the actual byte-string
+    ///         count diverge.
+    error DoubleApplyConcatBadCount(uint64 declared, uint64 expected);
+
     function _runDoubleApplyFromConcat(uint64 impugnedLogIndex, bytes calldata blob)
         internal
         view
@@ -715,12 +722,18 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier, ReentrancyGuard {
         uint256 off = 0;
         uint64 secondaryLogIndex;
         (secondaryLogIndex, off) = CBEDecode.readUint(blob, off);
-        (, off) = CBEDecode.readArrayHead(blob, off); // discard count
+        uint64 count;
+        (count, off) = CBEDecode.readArrayHead(blob, off);
+        // Audit-3: assert the array declares exactly 2 entries (the
+        // dispute-replay tooling always emits this shape).
+        if (count != 2) revert DoubleApplyConcatBadCount(count, uint64(2));
         // Read each of the two byte strings.
         bytes memory impugnedBytes;
         bytes memory secondaryBytes;
         (impugnedBytes, off) = CBEDecode.readBytes(blob, off);
         (secondaryBytes, off) = CBEDecode.readBytes(blob, off);
+        // Audit-3: assert no trailing garbage.
+        CBEDecode.assertFullyConsumed(blob, off);
         return this.checkDoubleApplyFromBytes(
             impugnedLogIndex, secondaryLogIndex, impugnedBytes, secondaryBytes
         );

@@ -38,11 +38,20 @@ import {CanonEip712} from "src/lib/CanonEip712.sol";
 ///            attestor is read from `predecessor.attestor()` at
 ///            construction time, never supplied as a constructor
 ///            argument.
-///         4. **Successor-references-this-migration check.**  The
-///            constructor asserts `successor.migration() ==
-///            address(this)`.  Without this check, a malicious
-///            migration could be constructed whose successor
-///            doesn't actually route the handoff.
+///         4. **Predecessor-references-this-migration check
+///            (audit-3 fix).**  The constructor asserts
+///            `predecessor.migration() == address(this)`.  This
+///            is what BINDS the migration's `activated()` flag to
+///            the predecessor's `MigrationActivated` circuit
+///            breaker: at deploy time, the predecessor must have
+///            been pre-committed (via its `migration` immutable)
+///            to be frozen by THIS migration's activation.
+///            Without this check, the migration's `activated()`
+///            would have no effect — the predecessor wouldn't be
+///            reading this migration's status.  Pre-audit-3
+///            erroneously checked the SUCCESSOR's migration
+///            field, which silently froze the successor (the
+///            OPPOSITE of the intended user-exit behaviour).
 ///         5. **Grace-window minimum.**  `MIN_GRACE_WINDOW_BLOCKS`
 ///            is a `constant` (≈ 30 days @ 12s per block).  The
 ///            constructor reverts on a shorter grace window.
@@ -60,7 +69,13 @@ contract CanonMigration is ICanonMigration {
     error SelfMigration();
     error GraceTooShort();
     error SameDeploymentId();
-    error SuccessorDoesNotReferenceThisMigration();
+    /// @notice Reverts if `predecessor.migration() != address(this)`.
+    ///         Audit-3: the predecessor must be pre-committed (via
+    ///         its `migration` immutable) to be frozen by THIS
+    ///         migration's activation; otherwise the migration is
+    ///         deployable but inert (predecessor's circuit breaker
+    ///         doesn't fire on activation).
+    error PredecessorDoesNotReferenceThisMigration();
     error AttestationInvalid();
     error AlreadyActivated();
     error GraceNotElapsed();
@@ -188,16 +203,22 @@ contract CanonMigration is ICanonMigration {
         bytes32 _sucDid = ICanonBridge(_successor).deploymentId();
         if (_preDid == _sucDid) revert SameDeploymentId();
 
-        // ---- Successor must reference this migration ----
-        // This is the bidirectional consent check: an attacker
-        // cannot construct a valid migration unless the successor
-        // bridge has already been deployed with this migration's
-        // (predicted CREATE2) address baked into its `migration`
-        // immutable.  Without this check, a compromised attestor
-        // could sign a migration to a successor that doesn't
-        // honour the handoff, freezing the predecessor uselessly.
-        if (ICanonBridge(_successor).migration() != address(this)) {
-            revert SuccessorDoesNotReferenceThisMigration();
+        // ---- Predecessor must reference this migration ----
+        // Audit-3 fix: this binds THIS migration's `activated()`
+        // flag to the predecessor's `MigrationActivated` circuit
+        // breaker.  At deploy time, the predecessor must have
+        // been pre-committed (via its immutable `migration`
+        // field) to be frozen by THIS migration's activation.
+        // Without this check, the migration would deploy
+        // successfully but its `activated()` flag would have NO
+        // effect on the predecessor — the predecessor wouldn't
+        // be reading this migration.
+        //
+        // The pre-audit-3 design checked the SUCCESSOR's migration
+        // field, which silently froze the successor (the OPPOSITE
+        // of the intended user-exit behaviour).  See §20 amendment.
+        if (ICanonBridge(_predecessor).migration() != address(this)) {
+            revert PredecessorDoesNotReferenceThisMigration();
         }
 
         // ---- Read attestor from the predecessor ----

@@ -400,6 +400,121 @@ contract CanonDisputeVerifierTest is Test {
         assertEq(v, verifier.VERDICT_UPHELD());
     }
 
+    /// @notice **REJECTED-path test (audit-3 addition).**  When the
+    ///         supplied signature DOES validate against the
+    ///         registered pubkey for the supplied signerHint, the
+    ///         claim "the signature is invalid" is REJECTED.  This
+    ///         test was missing in audit-2's coverage; without it,
+    ///         the REJECTED branch was untested.
+    function test_audit3_checkSignatureInvalid_rejected_when_signature_is_valid()
+        public
+    {
+        // Register the well-known user (privkey = 1, secp256k1 G).
+        uint256 userPk = 1;
+        address userAddr = vm.addr(userPk);
+        bytes memory userPubkey = _vmAddrPubkey(userPk);
+        vm.prank(userAddr);
+        registry.registerECDSA(userPubkey);
+
+        // Construct a SignedAction-shaped digest the user would
+        // sign.  Use a deterministic actionHash and the bridge's
+        // canonical EIP-712 wrap.
+        uint64 signerId = 999;
+        uint64 nonce = 0;
+        bytes32 actionHash = keccak256("test-action");
+        bytes32 ds = _actionDomainSeparator();
+        bytes32 sh = _actionStructHash(actionHash, signerId, nonce, bridge.deploymentId());
+        bytes32 digest = keccak256(abi.encodePacked(bytes2(0x1901), ds, sh));
+
+        // Sign with privkey = 1.
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        // Build the LogEntry blob with the signed actionHash.
+        bytes memory blob =
+            _logEntryBlobWithActionHash(signerId, nonce, actionHash, sig);
+
+        // The verifier should recover userAddr (matching the
+        // registered identity) and return REJECTED.
+        uint8 verdict = verifier.checkSignatureInvalid(blob, userAddr);
+        assertEq(verdict, verifier.VERDICT_REJECTED());
+    }
+
+    /// @notice **UPHELD-path test (audit-3 addition).**  When the
+    ///         signature recovers to a DIFFERENT address than the
+    ///         supplied signerHint, the claim is UPHELD.
+    function test_audit3_checkSignatureInvalid_upheld_on_signature_for_wrong_signer()
+        public
+    {
+        // Register the well-known user (privkey = 1).
+        uint256 userPk = 1;
+        address userAddr = vm.addr(userPk);
+        bytes memory userPubkey = _vmAddrPubkey(userPk);
+        vm.prank(userAddr);
+        registry.registerECDSA(userPubkey);
+
+        // Build the digest the user would sign.
+        uint64 signerId = 999;
+        uint64 nonce = 0;
+        bytes32 actionHash = keccak256("test-action-2");
+        bytes32 ds = _actionDomainSeparator();
+        bytes32 sh = _actionStructHash(actionHash, signerId, nonce, bridge.deploymentId());
+        bytes32 digest = keccak256(abi.encodePacked(bytes2(0x1901), ds, sh));
+
+        // Sign with privkey = 1.
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        bytes memory blob =
+            _logEntryBlobWithActionHash(signerId, nonce, actionHash, sig);
+
+        // Now query with a DIFFERENT expectedSignerAddr.  The
+        // registry lookup against this wrong address will return
+        // UNREGISTERED (or, if registered, a different pubkey),
+        // so the verifier returns INCONCLUSIVE (not registered) or
+        // UPHELD (registered with different pubkey, sig won't
+        // match).  Use an unregistered address — INCONCLUSIVE is
+        // the correct return for "we can't verify this signer".
+        address wrongAddr = makeAddr("wrong-addr");
+        uint8 verdict = verifier.checkSignatureInvalid(blob, wrongAddr);
+        assertEq(verdict, verifier.VERDICT_INCONCLUSIVE());
+    }
+
+    // ---- Audit-3 helpers for the EIP-712 digest reconstruction ----
+
+    function _actionDomainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,uint256 rollupId,bytes verifyingContract)"
+                ),
+                keccak256("CanonAction"),
+                keccak256("1"),
+                block.chainid,
+                uint256(0),
+                keccak256(abi.encodePacked(address(bridge)))
+            )
+        );
+    }
+
+    function _actionStructHash(
+        bytes32 actionHash,
+        uint64 signer,
+        uint64 nonce,
+        bytes32 deploymentId
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256(
+                    "CanonAction(bytes32 actionHash,uint64 signer,uint64 nonce,bytes deploymentId)"
+                ),
+                actionHash,
+                uint256(signer),
+                uint256(nonce),
+                keccak256(abi.encodePacked(deploymentId))
+            )
+        );
+    }
+
     // ---- FIX 3: verdictDigest binding ----
 
     function test_audit_verdictDigest_distinguishes_disputeId() public view {

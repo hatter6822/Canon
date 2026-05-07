@@ -37,7 +37,7 @@ solidity/
 │       └── SmtVerifier.sol      — SMT verifier (mirrors Lean D.1)
 └── test/
     ├── CanonBridge.t.sol           (39 tests)
-    ├── CanonDisputeVerifier.t.sol  (32 tests)
+    ├── CanonDisputeVerifier.t.sol  (34 tests)
     ├── CanonIdentityRegistry.t.sol (19 tests)
     ├── CanonMigration.t.sol        (9 tests)
     ├── CanonSequencerStake.t.sol   (19 tests)
@@ -49,7 +49,7 @@ solidity/
         └── MockERC20.sol    — minimal ERC-20 for tests
 ```
 
-Total: **164 forge tests across 8 suites** (post-audit-2).
+Total: **166 forge tests across 8 suites** (post-audit-3).
 
 ## Build & test
 
@@ -262,6 +262,45 @@ section.
      (a constructor-time error name).  Fix: separate
      `BridgeAccountingMismatch(uint256, uint256)` error for
      the underflow case.
+
+## Audit-3 hardening summary
+
+A third deep audit found one HIGH-severity semantic bug in the
+migration mechanism plus several smaller defensive fixes.
+Cumulative test count: 164 → **166** (+2 audit-3 tests; one
+existing lifecycle test refactored to verify post-activation
+successor operability).
+
+  1. **HIGH: CanonMigration constructor's bidirectional
+     consent check was inverted.**  Pre-audit-3 asserted
+     `successor.migration() == address(this)`, which silently
+     froze the SUCCESSOR (the OPPOSITE of the intended
+     user-exit behaviour).  Per the integration plan §20, the
+     PREDECESSOR is what freezes; the successor remains
+     operational so users can interact with it post-migration.
+     Fix: swap to `predecessor.migration() == address(this)`;
+     renamed error to
+     `PredecessorDoesNotReferenceThisMigration`.  The
+     lifecycle test now verifies the successor remains
+     operational post-activation
+     (`successor.depositETH` succeeds).
+  2. **LOW: missing zero-recipient check in
+     `withdrawWithProof`.**  Defensive; `InvalidRecipient()`
+     revert added.
+  3. **LOW: `_runDoubleApplyFromConcat` decoder didn't
+     assert fully-consumed and didn't validate array count.**
+     Fix: count must equal 2 (`DoubleApplyConcatBadCount`
+     revert); `assertFullyConsumed` post-decode.
+  4. **LOW: redundant length check in `withdrawWithProof`** —
+     `keccak256` equality already implies length equality
+     under collision-resistance.  Removed.
+  5. **Test coverage gaps closed:**
+     - REJECTED-path test for `checkSignatureInvalid` (audit-2
+       missed it).
+     - Cross-signer-mismatch UPHELD test.
+     - Predecessor-does-not-reference revert regression test.
+     - Successor-still-operational post-activation assertion
+       in the lifecycle test.
 
 ## Audit-2 hardening summary
 

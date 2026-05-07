@@ -634,7 +634,9 @@ error names are part of the contract's frozen surface:
     `DuplicateResourceToken(address token)` (added by audit-2),
     `TransferAmountMismatch(uint256 declared, uint256 received)`
     (added by audit-2; rejects fee-on-transfer / rebasing
-    ERC-20s).
+    ERC-20s),
+    `InvalidRecipient` (added by audit-3; rejects withdrawals
+    to address(0)).
   * `CanonDisputeVerifier`: `NotApprovedAdjudicator`,
     `UnknownDispute`, `AlreadyDecided`, `NotOpen`,
     `QuorumNotMet`, `EvidenceNotUpheld`, `EvidenceNotRejected`,
@@ -645,7 +647,10 @@ error names are part of the contract's frozen surface:
     `EvidenceBlobTooLarge(uint256 actual, uint256 maxBytes)`
     (added by audit-1), `TooManySigners(uint256 supplied,
     uint256 maxAllowed)` (added by audit-1),
-    `MissingSignerHint` (added by audit-1).
+    `MissingSignerHint` (added by audit-1),
+    `DoubleApplyConcatBadCount(uint64 declared, uint64 expected)`
+    (added by audit-3; rejects malformed
+    `_runDoubleApplyFromConcat` blobs).
   * `CanonIdentityRegistry`: `PubkeyAddressMismatch`,
     `WrongPubkeyLength`, `NotEip1271Conforming`,
     `AlreadyRegistered`, `NotRegistered`.
@@ -655,7 +660,12 @@ error names are part of the contract's frozen surface:
     `SlashRatioOutOfRange`, `ZeroAddress`, `EthSendFailed`.
   * `CanonMigration`: `ZeroAddress`, `SelfMigration`,
     `GraceTooShort`, `SameDeploymentId`,
-    `SuccessorDoesNotReferenceThisMigration`,
+    `PredecessorDoesNotReferenceThisMigration` (renamed from
+    `SuccessorDoesNotReferenceThisMigration` in audit-3 to
+    reflect the corrected semantics — the migration freezes the
+    PREDECESSOR's state-shaping calls, so the predecessor must
+    pre-commit to be retired by THIS migration via its own
+    `migration` immutable),
     `AttestationInvalid`, `AlreadyActivated`, `GraceNotElapsed`,
     `InvalidSignatureLength`.
 

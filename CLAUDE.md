@@ -1640,10 +1640,11 @@ byte decoder mirroring `LegalKernel.Encoding.cborHeadDecode`);
 `solidity/src/lib/CREATE3.sol` (proxy-factory deployment that
 breaks the bridge ↔ verifier ↔ stake reference cycle by deriving
 addresses from `(deployer, salt)` only).  Solidity test count:
-**164** forge tests across 8 suites (CBEDecode +23,
+**166** forge tests across 8 suites (CBEDecode +23,
 SmtVerifier +20, CREATE3 +3, CanonIdentityRegistry +19,
 CanonBridge +39, CanonSequencerStake +19, CanonDisputeVerifier
-+32, CanonMigration +9; +17 from audit-1 and +8 from audit-2).  Build commands: `cd solidity &&
++34, CanonMigration +9; +17 from audit-1, +8 from audit-2,
++2 from audit-3).  Build commands: `cd solidity &&
 forge build` and `cd solidity && forge test`.  Toolchain pin:
 solc 0.8.20, Foundry v1.7.0 (forge / cast / anvil).  Vendored
 deps: OpenZeppelin v5.0.2, forge-std v1.9.4 (installable via
@@ -1669,10 +1670,68 @@ direct `new ...(...)` deployment so constructor reverts
 propagate verbatim; production deployment scripts that need
 richer revert info must use a bespoke proxy.
 
+**Workstream-E audit-3 hardening (this branch).**  A third deep
+audit found one HIGH-severity semantic bug that broke the
+migration mechanism's intent (freezing the wrong bridge), plus
+several smaller defensive fixes.  Test count grew from 164 to
+**166** (+2 new audit-3 tests; one existing test refactored to
+verify post-activation successor operability).
+
+  * **HIGH (audit-3): CanonMigration constructor's
+    bidirectional consent check was inverted.**  The pre-audit-3
+    code asserted `successor.migration() == address(this)`,
+    which silently FROZE THE SUCCESSOR (the OPPOSITE of the
+    intended user-exit behaviour) on activation.  The
+    integration plan §20 specifies the predecessor is what
+    freezes; the successor remains operational so users can
+    interact with it post-migration.
+    FIX: swap the check to `predecessor.migration() ==
+    address(this)`.  Renamed error from
+    `SuccessorDoesNotReferenceThisMigration` to
+    `PredecessorDoesNotReferenceThisMigration`.  The
+    predecessor must be pre-committed via its `migration`
+    immutable to be frozen by THIS migration's activation;
+    without this commitment, the migration's `activated()`
+    flag has no effect.  The new lifecycle test asserts
+    BOTH that predecessor freezes AND that successor
+    remains operational (`successor.depositETH` succeeds
+    post-activation).
+  * **LOW: missing zero-recipient check in
+    `withdrawWithProof`.**  The L2-side leaf could in
+    principle name `address(0)` as the recipient.
+    `Address.sendValue(payable(0), x)` reverts on most L1
+    forks but `safeTransfer(token, address(0), x)` is
+    silent for some non-conforming ERC-20s.
+    FIX: explicit `InvalidRecipient()` revert before the
+    proof check.
+  * **LOW: `_runDoubleApplyFromConcat` decoder didn't
+    assert fully-consumed and didn't validate array
+    count.**  A malformed evidence blob (count ≠ 2 or
+    trailing bytes) was silently accepted.
+    FIX: assert `count == 2` (`DoubleApplyConcatBadCount`
+    revert) and call `assertFullyConsumed` post-decode.
+  * **LOW: redundant length check in `withdrawWithProof`.**
+    `proofLeaf.length != leafBlob.length` was checked
+    explicitly, but the subsequent `keccak256(proofLeaf)
+    != leafHash` check already subsumes it under
+    collision-resistance.
+    FIX: removed the redundant check; documented that
+    keccak256 equality covers length equality.
+  * **Test coverage gaps closed:**
+    - Added `test_audit3_checkSignatureInvalid_rejected_when_signature_is_valid`
+      (REJECTED-path test that audit-2 missed).
+    - Added `test_audit3_checkSignatureInvalid_upheld_on_signature_for_wrong_signer`
+      (cross-signer mismatch path).
+    - Added `test_audit3_constructor_reverts_on_predecessor_does_not_reference`
+      (audit-3 fix-1 regression test).
+    - The lifecycle test now verifies the SUCCESSOR remains
+      operational after migration activation (audit-3 fix-1
+      semantic correctness).
+
 **Workstream-E audit-2 hardening (this branch).**  A second
 deep audit found six additional defects (one critical) that the
 first audit missed; all are now closed.  Test count grew from
-156 to **164** (+8 audit-2 tests; SmtVerifier suite refactored
+156 to 164 (+8 audit-2 tests; SmtVerifier suite refactored
 from 18 to 20 tests using the new variable-size API).
 
   * **CRITICAL: SMT cross-stack leaf-format mismatch.**  The

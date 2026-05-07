@@ -48,6 +48,13 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
     error UnsupportedResource();
     error EthValueMismatch(uint256 expected, uint256 actual);
     error InvariantViolation_DisputeWindowVsRedemption();
+    /// @notice Reverts when a withdrawal leaf names `address(0)` as
+    ///         the recipient.  Audit-3: defensive check; on most
+    ///         L1 forks `Address.sendValue(payable(0), x)` reverts,
+    ///         but `safeTransfer(token, address(0), x)` silently
+    ///         passes for some non-conforming ERC-20s.  Reject
+    ///         early so the leaf hash is not marked redeemed.
+    error InvalidRecipient();
     /// @notice Reverts when the bridge's internal `totalLockedValue`
     ///         disagrees with the L2 record at withdrawal time.
     ///         Should be unreachable if the bridge's deposit /
@@ -521,6 +528,10 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
         // ---- Check phase ----
         // (a) Decode the leaf into a structured PendingWithdrawal.
         PendingWithdrawal memory wd = _decodePendingWithdrawal(leafBlob);
+        // Audit-3: reject zero-recipient leaves explicitly.  Defensive;
+        // catches cross-stack drift where the L2 ledger admits an
+        // invalid recipient.
+        if (wd.recipientL1 == address(0)) revert InvalidRecipient();
 
         // (b) Look up the state root.
         if (!isStateRootFinalised(atLogIndexHigh)) {
@@ -543,7 +554,11 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
         // payment-determining leafBlob).
         (bytes memory proofLeaf, uint64 proofIndex, bytes[] memory siblings) =
             _decodeWithdrawalProof(proofBlob);
-        if (proofLeaf.length != leafBlob.length) revert InvalidProof();
+        // The keccak256 equality check is sufficient — under
+        // collision-resistance, equal hashes imply equal bytes
+        // (and equal lengths).  Audit-3: removed the redundant
+        // length comparison that the keccak check already
+        // subsumes.
         if (keccak256(proofLeaf) != leafHash) revert InvalidProof();
         if (proofIndex != wd.l2LogIndex) revert InvalidProof();
         if (!SmtVerifier.verifyProof(uint256(proofIndex), proofLeaf, siblings, root)) {
