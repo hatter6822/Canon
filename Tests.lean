@@ -106,6 +106,7 @@ import LegalKernel.Test.Bridge.CrossCheck.Keccak256
 import LegalKernel.Test.Bridge.CrossCheck.DepositReceiptHash
 import LegalKernel.Test.Bridge.CrossCheck.WithdrawalProof
 import LegalKernel.Test.Bridge.CrossCheck.DisputeEvidence
+import LegalKernel.Test.Bridge.CrossCheck.MigrationAttestation
 
 open LegalKernel.Test
 
@@ -205,6 +206,8 @@ def main : IO UInt32 := do
                                     Bridge.CrossCheck.WithdrawalProof.tests)
   failed := failed + (← runAll "crosscheck-dispute-evidence"
                                     Bridge.CrossCheck.DisputeEvidence.tests)
+  failed := failed + (← runAll "crosscheck-migration-attestation"
+                                    Bridge.CrossCheck.MigrationAttestation.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0
