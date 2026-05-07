@@ -100,6 +100,9 @@ import LegalKernel.Test.Bridge.WithdrawalProof
 import LegalKernel.Test.Bridge.WithdrawalProofCLI
 import LegalKernel.Test.Bridge.Finalisation
 import LegalKernel.Test.Bridge.WithdrawalRootGoldens
+import LegalKernel.Test.Bridge.CrossCheck.Framework
+import LegalKernel.Test.Bridge.CrossCheck.EcdsaVerify
+import LegalKernel.Test.Bridge.CrossCheck.Keccak256
 
 open LegalKernel.Test
 
@@ -187,6 +190,12 @@ def main : IO UInt32 := do
                                     Bridge.FinalisationTests.tests)
   failed := failed + (← runAll "bridge-withdrawal-goldens"
                                     Bridge.WithdrawalRootGoldens.tests)
+  failed := failed + (← runAll "crosscheck-framework"
+                                    Bridge.CrossCheck.tests)
+  failed := failed + (← runAll "crosscheck-ecdsa-verify"
+                                    Bridge.CrossCheck.EcdsaVerify.tests)
+  failed := failed + (← runAll "crosscheck-keccak256"
+                                    Bridge.CrossCheck.Keccak256.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0
