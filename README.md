@@ -158,10 +158,14 @@ authority: `EthAddress`, `AddressBook`, `bridgeActor`,
 `bridgePolicy`, L1 event ingestor), C (bridge laws:
 `BridgeState`, `BridgeAdmissibleWith`, `Action.deposit` /
 `Action.withdraw`, `totalDeposited` / `totalWithdrawn` accounting),
-and D (withdrawal proofs: sparse Merkle tree, verifier and
+D (withdrawal proofs: sparse Merkle tree, verifier and
 constructor with completeness + soundness theorems, snapshot-window
-finalisation policy, `canon withdrawal-proof` CLI) are complete
-on the Lean side; Workstreams E – G remain to be scoped per
+finalisation policy, `canon withdrawal-proof` CLI), and E (Solidity
+contracts: five immutable contracts deployed without proxies, no
+admin role, no `Pausable`; recovery via the dispute pipeline plus
+the attested-handoff `CanonMigration.sol` mechanism) are complete;
+Workstreams F (cross-stack verification) and G (documentation +
+amendment) remain to be scoped per
 [`docs/ethereum_integration_plan.md`](docs/ethereum_integration_plan.md).
 
 | Phase       | Title                                | Status       |
@@ -179,6 +183,7 @@ on the Lean side; Workstreams E – G remain to be scoped per
 | E-B         | Ethereum: identity and authority     | Complete (Lean side) |
 | E-C         | Ethereum: bridge laws                | Complete (Lean side) |
 | E-D         | Ethereum: withdrawal proofs          | Complete (Lean side) |
+| E-E         | Ethereum: Solidity contracts         | Complete (139 forge tests) |
 | 7           | Advanced capabilities                | Not started  |
 
 A full per-WU changelog (Phase 0.1 onward) lives in [CLAUDE.md](CLAUDE.md);
@@ -213,6 +218,11 @@ lake exe stub_audit     # placeholder-stub detection gate (Audit-3.8)
 .lake/build/bin/canon info                       # build tag + phase
 .lake/build/bin/canon bootstrap /tmp/test.log    # init an empty log
 .lake/build/bin/canon-replay /tmp/test.log       # reproduce state hash
+
+# Workstream E (Solidity contracts) — see solidity/README.md
+cd solidity && ./scripts/vendor-deps.sh   # one-time: vendor OZ + forge-std
+cd solidity && forge build                # compile via_ir + solc 0.8.20
+cd solidity && forge test                 # 139 tests across 8 suites
 ```
 
 A green CI run on the same commands is the authoritative signal that
@@ -264,6 +274,18 @@ canon/
 ├── tcb_allowlist.txt       -- TCB import allowlist
 ├── scripts/setup.sh        -- SHA-256-verified toolchain installer
 ├── .github/workflows/ci.yml-- CI gates (build, test, audits)
+├── solidity/                -- Workstream E: L1 Solidity contracts
+│   │                           (immutable, no proxies, no admin)
+│   ├── foundry.toml         -- toolchain (solc 0.8.20, via_ir)
+│   ├── src/contracts/       -- 5 contracts (CanonBridge,
+│   │                           CanonDisputeVerifier,
+│   │                           CanonIdentityRegistry,
+│   │                           CanonSequencerStake,
+│   │                           CanonMigration)
+│   ├── src/lib/             -- 4 libs (CBEDecode, SmtVerifier,
+│   │                           CanonEip712, CREATE3)
+│   ├── test/                -- 139 forge tests across 8 suites
+│   └── README.md            -- day-to-day Solidity guide
 ├── CLAUDE.md               -- engineering conventions for contributors
 ├── README.md               -- this file
 └── docs/

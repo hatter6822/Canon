@@ -202,6 +202,11 @@ lake exe stub_audit                 # Audit-3.8: stub-detection gate
 .lake/build/bin/canon info
 .lake/build/bin/canon bootstrap /tmp/test.log
 .lake/build/bin/canon-replay /tmp/test.log
+
+# Workstream E (Solidity contracts) — see solidity/README.md
+cd solidity && ./scripts/vendor-deps.sh   # one-time: pull OZ + forge-std
+cd solidity && forge build                # via_ir + solc 0.8.20
+cd solidity && forge test                 # 139 tests across 8 suites
 ```
 
 **Toolchain:** Lean 4 v4.29.1 (pinned in `lean-toolchain`; the
@@ -868,6 +873,24 @@ canon/
 │   └── CountSorries.lean          -- WU 1.12 sorry-counting CI gate.
 ├── scripts/
 │   └── setup.sh                   -- SHA-256-verified toolchain installer.
+├── solidity/                      -- Workstream E: L1 mirror of the
+│   │                                 kernel.  Five immutable contracts
+│   │                                 (CanonBridge, CanonDisputeVerifier,
+│   │                                 CanonIdentityRegistry,
+│   │                                 CanonSequencerStake, CanonMigration)
+│   │                                 + four cross-cutting libraries
+│   │                                 (CBEDecode, SmtVerifier, CanonEip712,
+│   │                                 CREATE3) + 8 forge test suites.
+│   │                                 See solidity/README.md.
+│   ├── foundry.toml               -- toolchain (solc 0.8.20, via_ir, OZ
+│   │                                 remappings).
+│   ├── src/contracts/             -- the five contracts (E.1.* / E.2.* /
+│   │                                 E.3 / E.4 / E.5 deliverables).
+│   ├── src/interfaces/            -- shared interfaces.
+│   ├── src/lib/                   -- CBE decoder, SMT verifier, EIP-712,
+│   │                                 CREATE3.
+│   ├── test/                      -- 139 forge tests across 8 suites.
+│   └── scripts/vendor-deps.sh     -- pinned OZ + forge-std installer.
 ├── .github/workflows/
 │   └── ci.yml                     -- lake build + test + count_sorries +
 │                                     tcb_audit on PR / push.
@@ -1585,12 +1608,66 @@ every match before submission.
 
 **Current Phase:** Phases 0 – 6 Complete; Audit-3 hardening
 complete; Ethereum-integration Workstreams A (cryptographic
-adaptors), B (identity and authority), C (bridge laws), and
-D (withdrawal proofs) complete.  Workstreams E – G of the
-Ethereum integration plan (`docs/ethereum_integration_plan.md`)
-and Phase 7 (Advanced Capabilities of the original Genesis Plan)
-are the next scoped work; both are open-ended and per-WU
-chartered.
+adaptors), B (identity and authority), C (bridge laws),
+D (withdrawal proofs), and E (Solidity contracts) complete.
+Workstreams F (cross-stack verification) and G (documentation
++ amendment) are the next scoped work; both are open-ended and
+per-WU chartered, plus Phase 7 (Advanced Capabilities of the
+original Genesis Plan).
+
+**Ethereum Workstream E (Solidity contracts) summary.**  Workstream E
+ships the L1 mirror of Canon's kernel as five immutable contracts
+in `solidity/`: `CanonBridge.sol` (E.1.1 – E.1.5), `CanonDispute
+Verifier.sol` (E.2.1 – E.2.5), `CanonIdentityRegistry.sol` (E.3),
+`CanonSequencerStake.sol` (E.4), and `CanonMigration.sol` (E.5).
+The implementation follows the §20 immutability amendment of the
+integration plan: no proxies, no `initialize` functions, no admin
+roles, no `Pausable.pause()`.  Recovery from sequencer / attestor
+misbehaviour uses the dispute pipeline (`applyVerdict (.upheld)`
+calls `revertToPriorRoot` via the immutable `disputeVerifier`
+reference); recovery from buggy contract code uses an attested
+one-shot handoff to a successor deployment via `CanonMigration.sol`
+with a `MIN_GRACE_WINDOW_BLOCKS = 216_000` (≈ 30 days) Solidity
+`constant` baked into the bytecode.  Whole-system halts use the
+four §9.1.4 automatic circuit breakers (`AttestationStale`,
+`DisputeCooldown`, `TvlCapReached`, `MigrationActivated`) which
+fire on observable state predicates with no privileged caller.
+Cross-cutting libraries: `solidity/src/lib/CBEDecode.sol` (CBE
+byte decoder mirroring `LegalKernel.Encoding.cborHeadDecode`);
+`solidity/src/lib/SmtVerifier.sol` (SMT verifier mirroring
+`LegalKernel.Bridge.WithdrawalRoot.verifyProof` line-for-line);
+`solidity/src/lib/CanonEip712.sol` (EIP-712 wrap helpers); and
+`solidity/src/lib/CREATE3.sol` (proxy-factory deployment that
+breaks the bridge ↔ verifier ↔ stake reference cycle by deriving
+addresses from `(deployer, salt)` only).  Solidity test count:
+**139** forge tests across 8 suites (CBEDecode +23,
+SmtVerifier +18, CREATE3 +3, CanonIdentityRegistry +19,
+CanonBridge +26, CanonSequencerStake +19, CanonDisputeVerifier
++22, CanonMigration +9).  Build commands: `cd solidity &&
+forge build` and `cd solidity && forge test`.  Toolchain pin:
+solc 0.8.20, Foundry v1.7.0 (forge / cast / anvil).  Vendored
+deps: OpenZeppelin v5.0.2, forge-std v1.9.4 (installable via
+`scripts/vendor-deps.sh`).  TCB unchanged; no Lean theorems
+altered; no new axioms.  See `solidity/README.md` for the
+day-to-day Solidity developer guide.
+
+The Solidity-side `CanonDisputeVerifier` MVP ports three of
+the five Lean `Disputes.Evidence` claim variants
+(`signatureInvalid`, `nonceMismatch`, `doubleApply`); the
+remaining two (`preconditionFalse`, `oracleMisreported`) are
+deferred to v2 per the integration plan §9.2.  Adding either
+requires a new dispute-verifier deployment + a `CanonMigration`
+handoff (no in-place extension path; matches the kernel's
+append-only frozen-index discipline).
+
+The Solidity port deliberately does **not** include a
+production-ready CREATE3 inner-revert propagation: standard
+CREATE3 proxy bytecode (used by Solady, Solmate, and our impl)
+returns 0 from CREATE on inner failure, leaving no code at the
+predicted address.  The `CanonMigration` test fixtures use
+direct `new ...(...)` deployment so constructor reverts
+propagate verbatim; production deployment scripts that need
+richer revert info must use a bespoke proxy.
 
 **Ethereum Workstream D (withdrawal proofs) summary.**  Workstream D
 adds the user-facing withdrawal redemption flow: a sparse Merkle

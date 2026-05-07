@@ -1,0 +1,21 @@
+# Foundry
+out/
+cache/
+broadcast/
+forge-cache/
+
+# Vendored dependencies (resolve via lib/* per remappings; do NOT commit
+# the snapshots).  The setup script in scripts/solidity-setup.sh restores
+# them to the pinned versions for CI.
+lib/openzeppelin-contracts/
+lib/forge-std/
+
+# Test artefacts that the framework may write
+test/fixtures/*.json
+!test/fixtures/.gitkeep
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
