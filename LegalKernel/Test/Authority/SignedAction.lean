@@ -143,22 +143,24 @@ def admissibilityTests : List TestCase :=
 
 /-! ## apply_admissible behaviour -/
 
-/-- A *trivial* `Admissible` builder.  Takes the four component
-    witnesses explicitly and combines them into an `Admissible`
-    value.  Tests that want to drive `apply_admissible` without
-    exercising the (opaque) `Verify` can use this as a canonical
-    constructor — they have to supply a `Verify`-true witness
-    externally, but the builder packages the `∧`-chain correctly so
-    no test needs to know the conjunct order. -/
+/-- A *trivial* `Admissible` builder.  Takes the five component
+    witnesses explicitly (LP.7 added the local-policy conjunct) and
+    combines them into an `Admissible` value.  Tests that want to
+    drive `apply_admissible` without exercising the (opaque)
+    `Verify` can use this as a canonical constructor — they have to
+    supply a `Verify`-true witness externally, but the builder
+    packages the `∧`-chain correctly so no test needs to know the
+    conjunct order. -/
 def mkAdmissible
     (P : AuthorityPolicy) (es : ExtendedState) (st : SignedAction)
     (hauth : P.authorized st.signer st.action)
     (hnonce : st.nonce = expectsNonce es st.signer)
     (hreg : ∃ pk, es.registry[st.signer]? = some pk ∧
                   Verify pk (signingInput st.action st.signer st.nonce ByteArray.empty) st.sig = true)
-    (hpre : (Action.compile st.action).transition.pre es.base) :
+    (hpre : (Action.compile st.action).transition.pre es.base)
+    (hlp : localPolicyPermits es st.signer st.action) :
     Admissible P es st :=
-  ⟨hauth, hnonce, hreg, hpre⟩
+  ⟨hauth, hnonce, hreg, hpre, hlp⟩
 
 /-- Sub-suite: term-level checks of `apply_admissible` and the
     helper functions it composes (`advanceNonce`, registry update). -/
@@ -322,6 +324,7 @@ def applyTests : List TestCase :=
                  (∃ pk, es.registry[st.signer]? = some pk ∧
                         Verify pk (signingInput st.action st.signer st.nonce ByteArray.empty) st.sig = true) →
                  (Action.compile st.action).transition.pre es.base →
+                 localPolicyPermits es st.signer st.action →
                  Admissible P es st :=
           mkAdmissible
         pure ()
@@ -592,9 +595,119 @@ def signingInputTests : List TestCase :=
     }
   ]
 
-/-- All Phase-3 SignedAction-suite tests. -/
+/-! ## Workstream LP / LP.5 — local-policy mutation theorems API stability -/
+
+/-- Term-level API stability for LP.5's mutation theorems. -/
+def localPolicyMutationTests : List TestCase :=
+  [ { name := "declareLocalPolicy_updates_localPolicies API stability"
+    , body := do
+        let _proof : ∀ (P : AuthorityPolicy) (es : ExtendedState)
+                       (policy : LocalPolicy)
+                       (signer : ActorId) (nonce : Nonce) (sig : Signature)
+                       (h : Admissible P es ⟨.declareLocalPolicy policy,
+                                              signer, nonce, sig⟩),
+                       (apply_admissible P es ⟨.declareLocalPolicy policy,
+                                                signer, nonce, sig⟩
+                         h).localPolicies.lookup signer = policy :=
+          declareLocalPolicy_updates_localPolicies
+        pure ()
+    }
+  , { name := "revokeLocalPolicy_clears_localPolicies API stability"
+    , body := do
+        let _proof : ∀ (P : AuthorityPolicy) (es : ExtendedState)
+                       (signer : ActorId) (nonce : Nonce) (sig : Signature)
+                       (h : Admissible P es ⟨.revokeLocalPolicy,
+                                              signer, nonce, sig⟩),
+                       (apply_admissible P es ⟨.revokeLocalPolicy,
+                                                signer, nonce, sig⟩
+                         h).localPolicies.lookup signer = LocalPolicy.empty :=
+          revokeLocalPolicy_clears_localPolicies
+        pure ()
+    }
+  , { name := "non_meta_preserves_localPolicies API stability"
+    , body := do
+        let _proof : ∀ (P : AuthorityPolicy) (es : ExtendedState)
+                       (st : SignedAction) (h : Admissible P es st),
+                       (∀ p, st.action ≠ .declareLocalPolicy p) →
+                       (st.action ≠ .revokeLocalPolicy) →
+                       (apply_admissible P es st h).localPolicies =
+                         es.localPolicies :=
+          non_meta_preserves_localPolicies
+        pure ()
+    }
+  , { name := "localPolicies_other_actor_untouched API stability"
+    , body := do
+        let _proof : ∀ (P : AuthorityPolicy) (es : ExtendedState)
+                       (st : SignedAction) (h : Admissible P es st)
+                       (a : ActorId) (_h_ne : st.signer ≠ a),
+                       (apply_admissible P es st h).localPolicies.lookup a =
+                         es.localPolicies.lookup a :=
+          localPolicies_other_actor_untouched
+        pure ()
+    }
+  , { name := "apply_admissible_localPolicies API stability"
+    , body := do
+        let _proof : ∀ (P : AuthorityPolicy) (es : ExtendedState)
+                       (st : SignedAction) (h : Admissible P es st),
+                       (apply_admissible P es st h).localPolicies =
+                         applyActionToLocalPolicies es.localPolicies st.signer
+                           st.action :=
+          apply_admissible_localPolicies
+        pure ()
+    }
+  , { name := "applyActionToLocalPolicies on non-LP action is identity"
+    , body := do
+        -- For every non-LP action, applyActionToLocalPolicies returns the
+        -- input table unchanged.  Spot-check on `transfer`.
+        let lp : LocalPolicies := LocalPolicies.empty.declare 5
+                                    { clauses := [.denyTags [0]] }
+        let result := applyActionToLocalPolicies lp 1
+                        (.transfer 1 1 2 50)
+        if result == lp then pure ()
+        else throw <| IO.userError "non-LP action mutated localPolicies"
+    }
+  , { name := "applyActionToLocalPolicies on declare uses signer"
+    , body := do
+        -- declareLocalPolicy mutates the SIGNER's entry, not an attacker-
+        -- chosen actor's.  Verify by declaring with two different signers
+        -- and checking that each signer's entry is set independently.
+        let p₁ : LocalPolicy := { clauses := [.denyTags [0]] }
+        let p₂ : LocalPolicy := { clauses := [.denyTags [1]] }
+        -- Apply by signer=1 first.
+        let lp1 := applyActionToLocalPolicies LocalPolicies.empty 1
+                     (.declareLocalPolicy p₁)
+        -- Then apply by signer=2.
+        let lp2 := applyActionToLocalPolicies lp1 2 (.declareLocalPolicy p₂)
+        assertEq p₁ (lp2.lookup 1) "signer 1's entry is p₁"
+        assertEq p₂ (lp2.lookup 2) "signer 2's entry is p₂"
+    }
+  , { name := "applyActionToLocalPolicies on revoke uses signer"
+    , body := do
+        let p₁ : LocalPolicy := { clauses := [.denyTags [0]] }
+        let lp1 := applyActionToLocalPolicies LocalPolicies.empty 1
+                     (.declareLocalPolicy p₁)
+        let lp2 := applyActionToLocalPolicies lp1 1 .revokeLocalPolicy
+        assertEq LocalPolicy.empty (lp2.lookup 1) "signer 1's entry is empty after revoke"
+    }
+  , { name := "isMetaPolicyAction classifies the two LP ctors"
+    , body := do
+        let p : LocalPolicy := { clauses := [] }
+        assertEq true (isMetaPolicyAction (.declareLocalPolicy p))
+          "declareLocalPolicy is meta"
+        assertEq true (isMetaPolicyAction .revokeLocalPolicy)
+          "revokeLocalPolicy is meta"
+        -- Every other action is not meta.
+        assertEq false (isMetaPolicyAction (.transfer 1 1 2 50)) "transfer not meta"
+        assertEq false (isMetaPolicyAction (.mint 1 1 50)) "mint not meta"
+        assertEq false (isMetaPolicyAction (.freezeResource 1)) "freeze not meta"
+    }
+  ]
+
+/-- All Phase-3 SignedAction-suite tests, plus LP-extension tests. -/
 def tests : List TestCase :=
   admissibilityTests ++ applyTests ++ replayProtectionTests ++ keyRotationTests
     ++ signingInputTests
+    -- LP.5 / LP.7 mutation theorem and classifier API stability:
+    ++ localPolicyMutationTests
 
 end LegalKernel.Test.Authority.SignedActionTests

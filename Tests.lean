@@ -53,6 +53,8 @@ import LegalKernel.Test.Laws.Deposit
 import LegalKernel.Test.Laws.Withdraw
 import LegalKernel.Test.Authority.Action
 import LegalKernel.Test.Authority.Identity
+import LegalKernel.Test.Authority.LocalPolicy
+import LegalKernel.Test.Authority.LocalPolicyAdmissibility
 import LegalKernel.Test.Authority.Nonce
 import LegalKernel.Test.Authority.SignedAction
 import LegalKernel.Test.Authority.SignedActionHappyPath
@@ -60,6 +62,7 @@ import LegalKernel.Test.MockCrypto
 import LegalKernel.Test.Property
 import LegalKernel.Test.Properties.Encoding
 import LegalKernel.Test.Properties.Bridge
+import LegalKernel.Test.Properties.LocalPolicy
 import LegalKernel.Test.Encoding.CBOR
 import LegalKernel.Test.Encoding.Encodable
 import LegalKernel.Test.Encoding.Action
@@ -67,6 +70,8 @@ import LegalKernel.Test.Encoding.SignedAction
 import LegalKernel.Test.Encoding.State
 import LegalKernel.Test.Encoding.SignInput
 import LegalKernel.Test.Encoding.Disputes
+import LegalKernel.Test.Encoding.LocalPolicy
+import LegalKernel.Test.LocalPolicy.LawClassification
 import LegalKernel.Test.DSL.Law
 import LegalKernel.Test.Events.Types
 import LegalKernel.Test.Events.Extract
@@ -131,6 +136,10 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "withdraw"            Laws.WithdrawTests.tests)
   failed := failed + (← runAll "authority-action"   Authority.ActionTests.tests)
   failed := failed + (← runAll "authority-identity" Authority.IdentityTests.tests)
+  failed := failed + (← runAll "authority-localpolicy"
+                                    Authority.LocalPolicyTests.tests)
+  failed := failed + (← runAll "authority-localpolicy-admissibility"
+                                    Authority.LocalPolicyAdmissibility.tests)
   failed := failed + (← runAll "authority-nonce"    Authority.NonceTests.tests)
   failed := failed + (← runAll "authority-signed"   Authority.SignedActionTests.tests)
   failed := failed + (← runAll "authority-signed-happy-path"
@@ -141,6 +150,10 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "encoding-signed"    Encoding.SignedActionTests.tests)
   failed := failed + (← runAll "encoding-state"     Encoding.StateTests.tests)
   failed := failed + (← runAll "encoding-signinput" Encoding.SignInputTests.tests)
+  failed := failed + (← runAll "encoding-localpolicy"
+                                    Encoding.LocalPolicyTests.tests)
+  failed := failed + (← runAll "localpolicy-lawclass"
+                                    LocalPolicy.LawClassificationTests.tests)
   failed := failed + (← runAll "dsl-law"            DSL.LawTests.tests)
   failed := failed + (← runAll "events-types"      Events.TypesTests.tests)
   failed := failed + (← runAll "events-extract"    Events.ExtractTests.tests)
@@ -170,6 +183,8 @@ def main : IO UInt32 := do
                                     Properties.Encoding.tests)
   failed := failed + (← runAll "property-bridge"
                                     Properties.Bridge.tests)
+  failed := failed + (← runAll "property-localpolicy"
+                                    Properties.LocalPolicy.tests)
   failed := failed + (← runAll "bridge-verify-adaptor"
                                     Bridge.VerifyAdaptorTests.tests)
   failed := failed + (← runAll "bridge-hash-adaptor"

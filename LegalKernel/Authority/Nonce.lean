@@ -50,6 +50,7 @@ import LegalKernel.Kernel
 import LegalKernel.RBMapLemmas
 import LegalKernel.Authority.Crypto
 import LegalKernel.Authority.Identity
+import LegalKernel.Authority.LocalPolicy
 import LegalKernel.Bridge.State
 
 open Std
@@ -86,8 +87,9 @@ adds the `registry` field so the `replaceKey` action of WU 3.10 can
 mutate it.  See the module docstring for the rationale. -/
 
 /-- The runtime's extended state: kernel `State` plus per-actor nonce
-    ledger plus key registry.  Owned by the runtime layer (Phase 5);
-    the kernel module proper still operates on the bare `State`.
+    ledger plus key registry plus bridge ledger plus per-actor
+    local-policy table.  Owned by the runtime layer (Phase 5); the
+    kernel module proper still operates on the bare `State`.
 
     The `registry` field is what `Admissible` consults for condition
     1 (signer is registered) and for looking up the public key the
@@ -123,17 +125,32 @@ structure ExtendedState where
       pre-existing `apply_admissible_with` body is unchanged by
       this addition. -/
   bridge   : Bridge.BridgeState := Bridge.BridgeState.empty
+  /-- LP.3: per-actor declared local policies.  Defaults to the
+      empty map so pre-LP `ExtendedState` constructions (test
+      fixtures, deployment-time seeds) keep elaborating without
+      modification.  Mutated by `declareLocalPolicy` /
+      `revokeLocalPolicy` actions through `apply_admissible`;
+      preserved by every other admissibility path.
+
+      The default is an additive, backwards-compatible extension —
+      mirrors the same pattern used by the `bridge` field
+      (Workstream C.1.2).  Existing call sites get an empty
+      `localPolicies`; LP-aware call sites overwrite the field via
+      `{ es with localPolicies := … }` syntax. -/
+  localPolicies : LocalPolicies := LocalPolicies.empty
   deriving Repr
 
 /-- The genesis extended state: empty `base`, empty nonce ledger,
-    empty key registry.  Deployments typically build a non-trivial
-    initial `ExtendedState` (e.g. with founding actors registered)
-    by chaining `register` / `setBalance` calls on top of this. -/
+    empty key registry, empty bridge ledger, empty local-policy
+    table.  Deployments typically build a non-trivial initial
+    `ExtendedState` (e.g. with founding actors registered) by
+    chaining `register` / `setBalance` calls on top of this. -/
 def ExtendedState.empty : ExtendedState where
-  base     := genesisState
-  nonces   := NonceState.empty
-  registry := KeyRegistry.empty
-  bridge   := Bridge.BridgeState.empty
+  base          := genesisState
+  nonces        := NonceState.empty
+  registry      := KeyRegistry.empty
+  bridge        := Bridge.BridgeState.empty
+  localPolicies := LocalPolicies.empty
 
 /-! ## expectsNonce / advanceNonce (§8.5) -/
 

@@ -200,6 +200,10 @@ lake build LegalKernel.Test.Bridge.CrossCheck.DisputeEvidence   # Workstream F.1
 lake build LegalKernel.Test.Bridge.CrossCheck.MigrationAttestation # Workstream F.1.7 migration fixture
 lake build LegalKernel.Test.Bridge.CrossCheck.Goldens           # Workstream F.2 mainnet goldens
 lake build LegalKernel.Test.Properties.Bridge                   # Workstream F.4 property-based bridge tests
+lake build LegalKernel.Authority.LocalPolicy                    # Workstream LP.1 LocalPolicy data layer
+lake build LegalKernel.Authority.LocalPolicySemantics           # Workstream LP.1 LocalPolicy semantics
+lake build LegalKernel.Encoding.LocalPolicy                     # Workstream LP.2 LocalPolicy CBE codec
+lake build LegalKernel.LocalPolicy.LawClassification            # Workstream LP.9 IsConservative/IsMonotonic
 lake build canon                              # Phase-5 `canon` runtime CLI (D.2: withdrawal-proof subcommand)
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
 lake test                           # run Tests.lean driver (1100 tests post-Workstream-F)
@@ -347,16 +351,38 @@ canon/
 │   │   │                             singleton) (non-TCB).
 │   │   ├── Nonce.lean             -- Phase-3 WU 3.5: NonceState,
 │   │   │                             ExtendedState (= base + nonces +
-│   │   │                             registry), expectsNonce,
-│   │   │                             advanceNonce,
+│   │   │                             registry + bridge + localPolicies
+│   │   │                             after Workstream-LP / LP.3),
+│   │   │                             expectsNonce, advanceNonce,
 │   │   │                             expectsNonce_strict_mono (non-TCB).
+│   │   ├── LocalPolicy.lean       -- Workstream LP.1 (data layer):
+│   │   │                             LocalPolicyClause (3 MVP variants),
+│   │   │                             LocalPolicy structure, LocalPolicies
+│   │   │                             abbrev with empty/lookup/declare/
+│   │   │                             revoke; §3.0 DoS bound constants;
+│   │   │                             5 RBMap-derived lookup lemmas
+│   │   │                             (non-TCB).
+│   │   ├── LocalPolicySemantics.lean -- Workstream LP.1 (semantics layer):
+│   │   │                             Action.tag (17-branch projection
+│   │   │                             covering indices 0..16);
+│   │   │                             LocalPolicyClause.permits /
+│   │   │                             LocalPolicy.permits semantic
+│   │   │                             predicates with named Decidable
+│   │   │                             instances; per-clause semantic
+│   │   │                             theorems (non-TCB).
 │   │   └── SignedAction.lean      -- Phase-3 WU 3.6 / 3.7 / 3.8 / 3.10:
 │   │                                 SignedAction, Admissible (5
-│   │                                 conditions), apply_admissible
-│   │                                 (single guarded entry point),
+│   │                                 conditions; 6 after Workstream-LP /
+│   │                                 LP.7), apply_admissible (single
+│   │                                 guarded entry point),
 │   │                                 nonce_uniqueness, replay_impossible,
 │   │                                 replaceKey registry-mutation
-│   │                                 theorems (non-TCB).
+│   │                                 theorems; LP.5 + LP.7 add
+│   │                                 applyActionToLocalPolicies +
+│   │                                 localPolicyPermits +
+│   │                                 isMetaPolicyAction +
+│   │                                 localPolicy_meta_action_independent
+│   │                                 (non-TCB).
 │   ├── Encoding/                   -- Phase-4 WU 4.1 – 4.8: canonical CBE
 │   │   │                             (Canon Binary Encoding) — strictly
 │   │   │                             canonical fixed-width binary form
@@ -504,6 +530,20 @@ canon/
 │   │                                 stake on upheld; treasury transfer on
 │   │                                 rejected/inconclusive); `fileDisputeStaked`
 │   │                                 wrapper.
+│   ├── LocalPolicy/                  -- Workstream LP (actor-scoped policies).
+│   │   │                                All non-TCB.
+│   │   └── LawClassification.lean   -- LP.9: 2 rfl-class identification
+│   │                                    lemmas + 4 typeclass instances
+│   │                                    (`IsConservative` × 2,
+│   │                                    `IsMonotonic` × 2) for the LP
+│   │                                    action ctors; composite
+│   │                                    `local_policy_actions_classification`
+│   │                                    summary theorem.
+│   ├── Encoding/LocalPolicy.lean    -- Workstream LP.2: CBE codec for
+│   │                                    LocalPolicyClause / LocalPolicy /
+│   │                                    LocalPolicies; `fieldsBounded`
+│   │                                    predicates + round-trip + injectivity
+│   │                                    proofs (non-TCB).
 │   ├── Bridge/                       -- Ethereum Workstream A (cryptographic
 │   │   │                                adaptors): non-TCB Lean-side contracts
 │   │   │                                for the production Rust crypto bindings.
@@ -673,15 +713,24 @@ canon/
 │       │   ├── Action.lean        -- Action layer tests (31 cases incl. R.18).
 │       │   ├── Identity.lean      -- Phase-3 Identity / KeyRegistry /
 │       │   │                         AuthorityPolicy tests (14 cases).
+│       │   ├── LocalPolicy.lean   -- Workstream LP.1 LocalPolicy data
+│       │   │                         layer tests (27 cases).
+│       │   ├── LocalPolicyAdmissibility.lean -- Workstream LP.11 e2e
+│       │   │                         acceptance tests (14 scenarios).
 │       │   ├── Nonce.lean         -- Phase-3 nonce ledger tests (11 cases).
 │       │   └── SignedAction.lean  -- Phase-3 admissibility / replay /
 │       │                             key-rotation tests (17 cases).
+│       ├── LocalPolicy/
+│       │   └── LawClassification.lean -- Workstream LP.9 IsConservative
+│       │                             / IsMonotonic tests (10 cases).
 │       ├── Encoding/
 │       │   ├── CBOR.lean          -- Phase-4 CBE codec tests (6 cases).
 │       │   ├── Encodable.lean     -- primitive-instance roundtrip tests
 │       │   │                         (12 cases).
 │       │   ├── Action.lean        -- Action encoder roundtrip tests
 │       │   │                         (12 cases).
+│       │   ├── LocalPolicy.lean   -- Workstream LP.2 LocalPolicy CBE
+│       │   │                         codec tests (12 cases).
 │       │   ├── SignedAction.lean  -- SignedAction encoder tests (4 cases).
 │       │   ├── State.lean         -- State / ExtendedState encoder tests
 │       │   │                         (6 cases).
@@ -1440,6 +1489,31 @@ each mechanise one or more of the following:
 | 184| `isFinalised_deterministic` (D.3) | `isFinalised_deterministic` | E-D.3 / `Bridge/Finalisation.lean` |
 | 185| `hasUpheldInRange_false_implies` (D.3 helper) | `hasUpheldInRange_false_implies` | E-D.3 / `Bridge/Finalisation.lean` |
 | 186| `emptyProofSiblings_length` (D.1.2 helper) | `emptyProofSiblings_length` | E-D.1.2 / `Bridge/WithdrawalRoot.lean` |
+| 187| Action constructor list extends to 17 with LP ctors | `Action.compile_injective` (extends to LP.4 ctors) | LP.4 / `Authority/Action.lean` |
+| 188| `Action.tag_matches_encode_tag` (LP-tag agreement) | `Action.tag_matches_encode_tag` | LP.4 / `Encoding/Action.lean` |
+| 189| `LocalPolicy.empty_permits_all` (vacuous-quantification base case) | `LocalPolicy.empty_permits_all` | LP.1 / `Authority/LocalPolicySemantics.lean` |
+| 190| `LocalPolicies.lookup_declare_self/_other`, `lookup_revoke_self/_other`, `empty_lookup` (5 lemmas) | `LocalPolicies.lookup_*` | LP.1 / `Authority/LocalPolicy.lean` |
+| 191| `localPolicyClause_roundtrip` / `localPolicyClause_encode_injective` (bounded) | `localPolicyClause_*` | LP.2 / `Encoding/LocalPolicy.lean` |
+| 192| `localPolicy_roundtrip` / `localPolicy_encode_injective` (bounded) | `localPolicy_*` | LP.2 / `Encoding/LocalPolicy.lean` |
+| 193| `LocalPolicies.encodeMap` deterministic + Equiv-deterministic | `localPolicies_encodeMap_deterministic[_of_equiv]` | LP.2 / `Encoding/LocalPolicy.lean` |
+| 194| `applyActionToLocalPolicies` definition + `apply_admissible_localPolicies` field projection | `applyActionToLocalPolicies`, `apply_admissible_localPolicies` | LP.5 / `Authority/SignedAction.lean` |
+| 195| `declareLocalPolicy_updates_localPolicies` (signer's policy is set) | `declareLocalPolicy_updates_localPolicies` | LP.5 / `Authority/SignedAction.lean` |
+| 196| `revokeLocalPolicy_clears_localPolicies` (signer's policy is erased) | `revokeLocalPolicy_clears_localPolicies` | LP.5 / `Authority/SignedAction.lean` |
+| 197| `non_meta_preserves_localPolicies` (non-meta actions don't touch table) | `non_meta_preserves_localPolicies` | LP.5 / `Authority/SignedAction.lean` |
+| 198| `localPolicies_other_actor_untouched` (cross-actor isolation) | `localPolicies_other_actor_untouched` | LP.5 / `Authority/SignedAction.lean` |
+| 199| `isMetaPolicyAction` Bool-returning meta-action classifier | `isMetaPolicyAction` | LP.7 / `Authority/SignedAction.lean` |
+| 200| `localPolicyPermits` admissibility predicate + `Decidable` instance | `localPolicyPermits`, `instDecidableLocalPolicyPermits` | LP.7 / `Authority/SignedAction.lean` |
+| 201| `localPolicy_meta_action_independent` (structural lockout-prevention) | `localPolicy_meta_action_independent` | LP.7 / `Authority/SignedAction.lean` |
+| 202| `localPolicyPermits_no_policy` (strict-narrowing at conjunct level) | `localPolicyPermits_no_policy` | LP.7 / `Authority/SignedAction.lean` |
+| 203| `admissible_localPolicy` / `admissibleWith_localPolicy` field extractors | `admissible[With]_localPolicy` | LP.7 / `Authority/SignedAction.lean` |
+| 204| `bridgePolicy_rejects_declareLocalPolicy/_revokeLocalPolicy` | `bridgePolicy_rejects_*LocalPolicy` | LP.8 / `Bridge/BridgeActor.lean` |
+| 205| `accounting_delta_declareLocalPolicy/_revokeLocalPolicy` (zero deltas) | `accounting_delta_*LocalPolicy` | LP.8 / `Bridge/Accounting.lean` |
+| 206| `applyActionToBridgeState_declareLocalPolicy/_revokeLocalPolicy` (identity) | `applyActionToBridgeState_*LocalPolicy` | LP.8 / `Bridge/Accounting.lean` |
+| 207| LP action ctors are `IsConservative` (2 instances) | `*LocalPolicy_compiled_isConservative` | LP.9 / `LocalPolicy/LawClassification.lean` |
+| 208| LP action ctors are `IsMonotonic` (2 instances) | `*LocalPolicy_compiled_isMonotonic` | LP.9 / `LocalPolicy/LawClassification.lean` |
+| 209| `local_policy_actions_classification` composite (4-conjunct summary) | `local_policy_actions_classification` | LP.9 / `LocalPolicy/LawClassification.lean` |
+| 210| `extractEvents_declareLocalPolicy_emits_localPolicyDeclared` | `extractEvents_*LocalPolicy*` | LP.10 / `Events/Extract.lean` |
+| 211| `extractEvents_revokeLocalPolicy_emits_localPolicyRevoked` | `extractEvents_*LocalPolicy*` | LP.10 / `Events/Extract.lean` |
 
 The "Phase / File" `R` markers identify the Phase-4-prelude
 positive-incentive WUs (`R.1` – `R.23`); they precede Phase 4 (DSL and
@@ -1536,6 +1610,7 @@ units.  Brief summary:
 | E-D    | Ethereum: withdrawal proofs        | D.1 (5 sub-WUs) – D.3 (`docs/ethereum_integration_plan.md` §8) | Complete (Lean side; `canon withdrawal-proof` CLI ships, Rust-side adaptor for production keccak256 deferred to A-track follow-up) |
 | E-E    | Ethereum: Solidity contracts       | E.1–E.4 (`docs/ethereum_integration_plan.md` §9) | Complete (166 forge tests across 8 suites; +6 cross-check suites in F.1) |
 | E-F    | Ethereum: cross-stack verification | F.1–F.4 (`docs/ethereum_integration_plan.md` §10) | Complete (656 fixture inputs across F.1.1 – F.1.7 + 96-record goldens corpus + testnet acceptance script + 3 property-based bridge tests) |
+| LP     | Actor-scoped policies              | LP.1–LP.14 (`docs/actor_scoped_policies_plan.md`) | Complete (Lean side; 14 work units; 5 new modules; 66 new tests across 5 new suites; Solidity-side mirror documented as future work) |
 | E-G    | Ethereum: documentation + amendment| G.1–G.5 (`docs/ethereum_integration_plan.md` §11) | Not started |
 | 7      | Advanced capabilities              | 7.x                      | Not started |
 
@@ -1621,9 +1696,210 @@ every match before submission.
 complete; Ethereum-integration Workstreams A (cryptographic
 adaptors), B (identity and authority), C (bridge laws),
 D (withdrawal proofs), E (Solidity contracts), and F
-(cross-stack verification) complete.  Workstream G
+(cross-stack verification) complete.  **Workstream LP
+(actor-scoped policies) complete.**  Workstream G
 (documentation + amendment) is the next scoped work, plus
 Phase 7 (Advanced Capabilities of the original Genesis Plan).
+
+**Workstream LP (actor-scoped policies) summary.**  Workstream
+LP introduces per-actor, on-chain, mutable policy filters that
+let each actor declare a `LocalPolicy` constraining their *own*
+outgoing actions.  Bumped `kernelBuildTag` to
+`"canon-local-policies"`.  Test count grew from 1103 to 1228
+(+125: 66 in 5 new suites + 59 across existing-suite extensions).
+The new suites are: `authority-localpolicy` (+27),
+`authority-localpolicy-admissibility` (+14),
+`encoding-localpolicy` (+18, including 6 audit-1 DoS-bound
+regression tests), `localpolicy-lawclass` (+10),
+`property-localpolicy` (+3).  Audit-1 follow-up extensions:
+`encoding-action` (+7), `authority-action` (+6),
+`authority-signed` (+9), `events-types` (+8),
+`events-extract` (+8), `encoding-state` (+3),
+`bridge-actor` (+5), `bridge-accounting` (+4),
+`bridge-admissible` (+3).  Audit-1 also lands a critical DoS
+hardening fix: the LP.2 decoder now enforces all four §3.0
+bounds (`MAX_CLAUSES_PER_POLICY`, `MAX_TAGS_PER_DENY`,
+`MAX_RECIPIENTS_PER_REQUIRE`) at decode time, rejecting oversize
+inputs as `DecodeError.invalidLength`.  This closes the
+defense-in-depth gap where a malicious encoder could craft an
+oversize payload accepted by the kernel.  Audit-2 strengthens
+the LP.12 `localpolicyEmptyNoNarrowingProperty` to vary the
+action variant across 7 non-meta types (transfer / mint / burn
+/ freezeResource / reward / distributeOthers /
+proportionalDilute) — previously this only tested
+`freezeResource`.  TCB unchanged; no new axioms; no new opaque
+declarations.  See `docs/actor_scoped_policies_plan.md` for the
+full engineering plan.
+
+  * **LP.1 (`LegalKernel/Authority/LocalPolicy.lean` and
+    `LegalKernel/Authority/LocalPolicySemantics.lean`)** —
+    `LocalPolicyClause` inductive (3 MVP variants: `denyTags`,
+    `requireRecipientIn`, `capAmount`); `LocalPolicy` structure
+    (list of clauses, conjunctively combined); `LocalPolicies`
+    abbrev (`TreeMap ActorId LocalPolicy compare`) with
+    `empty`/`lookup`/`declare`/`revoke` operations; `Action.tag`
+    projection (17-branch table covering pre-LP indices 0..14
+    plus LP indices 15..16); `LocalPolicyClause.permits` /
+    `LocalPolicy.permits` semantic predicates with named
+    `Decidable` instances; the four §3.0 DoS bounds
+    (`MAX_CLAUSES_PER_POLICY = 64` etc.); five RBMap-derived
+    look-up lemmas (`lookup_declare_self/_other`,
+    `lookup_revoke_self/_other`, `empty_lookup`).  Split into
+    two modules to break the circular import: the data layer
+    (`LocalPolicy.lean`) doesn't depend on `Action`; the
+    semantics layer (`LocalPolicySemantics.lean`) imports both
+    `Action` and the data layer for `Action.tag` and
+    `permits`.
+  * **LP.2 (`LegalKernel/Encoding/LocalPolicy.lean`)** — CBE
+    `Encodable` instances for `LocalPolicyClause`,
+    `LocalPolicy`, and `LocalPolicies`; `fieldsBounded`
+    predicates enforcing the §3.0 caps;
+    `localPolicyClause_roundtrip` /
+    `localPolicy_roundtrip` round-trip + injectivity proofs
+    under the bounded hypothesis;
+    `LocalPolicies.encodeMap` / `decodeMap` (sorted-key map
+    encoding) with structural and Equiv-based determinism
+    theorems.
+  * **LP.3 (extension to `Authority/Nonce.lean` and
+    `Encoding/State.lean`)** — adds `localPolicies :
+    LocalPolicies := LocalPolicies.empty` field to
+    `ExtendedState` (default-valued, so pre-LP fixtures keep
+    elaborating); extends `ExtendedState.encode`/`.decode`
+    with a 5th appended segment.  Strict-decoder design
+    (per §4.5 of the plan): pre-LP snapshots cannot be
+    decoded by the post-LP build; operators upgrade by
+    re-snapshotting under the new build.
+  * **LP.4 (extension to `Authority/Action.lean` and
+    `Encoding/Action.lean`)** — appends two new constructors
+    at frozen indices 15 (`declareLocalPolicy (policy :
+    LocalPolicy)`) and 16 (`revokeLocalPolicy`); both compile
+    to `Laws.freezeResource 0` at the kernel level (mirrors
+    `replaceKey` / `registerIdentity`).  CBE encoder /
+    decoder extensions; `Action.fieldsBounded` extension;
+    `Action.compile_injective` extends mechanically (one-line
+    `congrArg` covers the full constructor list);
+    `Action.tag_matches_encode_tag` theorem proves the
+    agreement between `Action.tag` and the leading byte of
+    `Action.encode` for all 17 constructors.
+    `non_registry_mutating_preserves_registry`,
+    `applyActionToBridgeState_non_bridge`, and
+    `apply_admissible_with_eq_kernelOnlyApply` all extend by
+    two `rfl` cases.
+  * **LP.5 (extension to `Authority/SignedAction.lean`)** —
+    `applyActionToLocalPolicies` helper (mirrors
+    `applyActionToRegistry`); extends `apply_admissible_with`
+    body with a final `localPolicies := …` step (the four
+    field updates now happen in order: `base` →
+    `advanceNonce` → `registry` → `localPolicies`).  Five
+    new mutation theorems:
+    `declareLocalPolicy_updates_localPolicies`,
+    `revokeLocalPolicy_clears_localPolicies`,
+    `non_meta_preserves_localPolicies`,
+    `localPolicies_other_actor_untouched`, and
+    `apply_admissible_localPolicies` (field projection).
+    `kernelOnlyApply` in `Disputes/Evidence.lean` is also
+    extended with the LP meta-action branches so the
+    dispute pipeline's prefix-replay reproduces the
+    runtime's localPolicies state.
+  * **LP.6 (proof-body re-discharge in
+    `Authority/SignedAction.lean`)** —
+    `expectsNonce_after_apply_admissible{,_other}`,
+    `apply_admissible_base/_registry`,
+    `replaceKey_updates_registry/_other_actor_untouched`,
+    `registerIdentity_updates_registry/_other_actor_untouched`,
+    `non_registry_mutating_preserves_registry`,
+    `nonce_uniqueness`, and `replay_impossible` all
+    re-elaborate after LP.5's body change.  The five
+    field-extractors (`admissible_authorized`,
+    `admissible_nonce`, `admissible_signer_registered_and_signed`,
+    `admissibleWith_signer_registered_and_signed`,
+    `admissible_pre`) are rewritten using `obtain ⟨…⟩ := h`
+    rather than chained-tuple projection (`.1`, `.2.1`,
+    etc.), making them robust to LP.7's added conjunct.
+  * **LP.7 (extension to `Authority/SignedAction.lean`)** —
+    `isMetaPolicyAction` Bool-returning classifier (returns
+    `true` for the two LP-introduced action ctors only);
+    `localPolicyPermits` predicate (the 6th admissibility
+    condition); extends `AdmissibleWith` with the 5th
+    top-level conjunct; new `admissible_localPolicy` /
+    `admissibleWith_localPolicy` field extractors;
+    `localPolicy_meta_action_independent` headline theorem
+    (the structural lockout-prevention proof: meta-actions
+    are admissibility-permitted regardless of any declared
+    policy);
+    `localPolicyPermits_no_policy` (the strict-narrowing
+    property at the conjunct level: actors with no declared
+    policy see no narrowing).  Decidability synthesises via
+    `instDecidableLocalPolicyPermits`.
+    `nonce_uniqueness` and `replay_impossible` re-elaborate
+    with byte-identical proof bodies (the new conjunct is
+    irrelevant to nonce reasoning).
+  * **LP.8 (extensions in `Bridge/{Accounting, BridgeActor}.lean`
+    and `Disputes/Evidence.lean`)** — verification of
+    cross-module re-elaboration.  Two new accounting
+    deltas (`accounting_delta_declareLocalPolicy /
+    _revokeLocalPolicy` — both zero), two new shape lemmas
+    (`applyActionToBridgeState_declareLocalPolicy /
+    _revokeLocalPolicy` — both identity).  Two new bridge-
+    rejection theorems (`bridgePolicy_rejects_declareLocalPolicy /
+    _revokeLocalPolicy`): the bridge actor cannot declare
+    or revoke local policies (deployment-policy decision
+    pinned at the type level).
+  * **LP.9 (`LegalKernel/LocalPolicy/LawClassification.lean`)** —
+    Two `compileTransition_eq_freezeResource_zero` rfl
+    lemmas + four `IsConservative` / `IsMonotonic`
+    typeclass instances (mirrors
+    `Disputes/LawClassification.lean`); composite
+    `local_policy_actions_classification` summary theorem.
+    Lets deployments include the LP pipeline alongside
+    `ConservativeLawSet` / `MonotonicLawSet` typeclass
+    firewalls without breaking either invariant.
+  * **LP.10 (extension to `Events/{Types, Extract}.lean`)** —
+    Two new `Event` constructors at frozen indices 11
+    (`localPolicyDeclared`) and 12 (`localPolicyRevoked`);
+    extends `Event.actor` projection;
+    `Event.isLocalPolicyEvent` Bool-returning classifier;
+    `extractEvents` extension emitting the LP semantic
+    events UNCONDITIONALLY (not delta-filtered: a re-
+    declaration of the same policy still emits the event,
+    mirroring the `rewardIssued` / bridge-event convention);
+    two new emission-rule theorems
+    (`extractEvents_declareLocalPolicy_emits_localPolicyDeclared`,
+    `extractEvents_revokeLocalPolicy_emits_localPolicyRevoked`).
+  * **LP.11 (`Test/Authority/LocalPolicyAdmissibility.lean`)** —
+    14 end-to-end acceptance tests (`mockVerify`-driven
+    value-level admissibility witnesses) covering: full
+    declare-then-revoke lifecycle; cross-actor independence;
+    meta-actions self-exempt (the LP.7 lockout-prevention
+    theorem at the value level); `requireRecipientIn` /
+    `capAmount` enforcement (positive + negative + boundary
+    + cross-resource isolation); replay protection still
+    holds; multi-clause conjunction; re-declaration overwrites;
+    bridge-actor rejection (LP.8); snapshot survival (LP.2 +
+    LP.3 round-trip).
+  * **LP.12 (`Test/Properties/LocalPolicy.lean`)** — Three
+    property tests × 100 default samples each:
+    `localpolicyRoundtripProperty` (LP.2 round-trip on
+    randomly-generated bounded policies);
+    `localpolicyMetaActionAdmissibleProperty` (the LP.7
+    meta-action exemption at the value level);
+    `localpolicyEmptyNoNarrowingProperty` (the LP.7
+    strict-narrowing property: actors without declared
+    policies see no admissibility narrowing).  Reproducible
+    via `CANON_PROPERTY_SEED` env var.
+  * **LP.13 (`docs/abi.md`, `solidity/README.md`)** —
+    extends the on-disk-format tables with the two new
+    `Action` ctors at frozen indices 15, 16 and the two
+    new `Event` ctors at indices 11, 12; documents the
+    `LocalPolicy` CBE encoding (§5.4); pins the future
+    Solidity-port shape (the implementer can land the
+    Solidity-side mirror as a focused follow-up without
+    re-litigating the Lean-side decisions).
+  * **LP.14 (umbrella + `CLAUDE.md` + `Tests.lean`)** —
+    `kernelBuildTag` bumped to `"canon-local-policies"`;
+    umbrella module imports the 5 new modules; test
+    driver registers the 5 new test suites; Test/Umbrella's
+    build-tag check updated; this changelog entry added.
 
 **Ethereum Workstream F (cross-stack verification) summary.**
 Workstream F lands the safety-net behavioural-equivalence

@@ -51,6 +51,8 @@ import LegalKernel.Kernel
 import LegalKernel.Authority.Crypto
 import LegalKernel.Authority.Action
 import LegalKernel.Authority.Identity
+import LegalKernel.Authority.LocalPolicy
+import LegalKernel.Authority.LocalPolicySemantics
 import LegalKernel.Authority.Nonce
 import LegalKernel.Encoding.Action
 
@@ -191,20 +193,86 @@ The five conditions of §8.2:
   4. The nonce matches the actor's next-expected nonce.
   5. The compiled transition's precondition holds in the base state.
 
+LP.7 adds a sixth condition (top-level conjunct):
+
+  6. The signer's local policy (defaulting to empty) permits the
+     action, OR the action is a policy-management meta-action
+     (`declareLocalPolicy` / `revokeLocalPolicy`), which are
+     structurally exempt to prevent lockout.
+
 Each condition is independent and can be discharged at a different
 time (Genesis Plan §8.2's "static vs dynamic" split), and the order
 of failures is meaningful for diagnostics.
 
 **Note on conjunct count.**  The §8.2 spec lists five admissibility
 conditions, but the Lean encoding below has *four* top-level `∧`
-connectives.  This is because conditions 1 (signer is registered)
-and 3 (signature verifies under the registered key) share the
-existential witness `pk` and are therefore most naturally combined
-into a single conjunct of the form
+connectives (post-LP.7: *five* top-level conjuncts).  This is
+because conditions 1 (signer is registered) and 3 (signature
+verifies under the registered key) share the existential witness
+`pk` and are therefore most naturally combined into a single
+conjunct of the form
 `∃ pk, registry[signer]? = some pk ∧ Verify pk msg sig = true`.
 This packing is *strictly stronger* than two independent existentials
 would be — the Verify check is forced to use *the* registered key,
 not any key — which is what §8.2 intends. -/
+
+/-! ## §6.2 Meta-action classifier (LP.7)
+
+`isMetaPolicyAction` enumerates the policy-management actions
+that are exempt from the local-policy admissibility conjunct.
+Defined by *enumeration* over the `Action` inductive's two
+LP-introduced constructors, NOT by any policy-derived predicate,
+so no `LocalPolicyClause` can ever block a policy-management
+action by construction (the structural lockout-prevention
+proof). -/
+
+/-- True iff `action` is a policy-management meta-action that is
+    exempt from the local-policy admissibility conjunct.  Defined
+    by *enumeration* over the `Action` inductive, NOT by any
+    policy-derived predicate, so no `LocalPolicyClause` can ever
+    block a policy-management action by construction.
+
+    Returns `Bool` (not `Prop`) for consistency with the existing
+    `Action.isBridgeOnly` classifier and to make the disjunction
+    branch in `localPolicyPermits` directly decidable. -/
+def isMetaPolicyAction : Action → Bool
+  | .declareLocalPolicy _ => true
+  | .revokeLocalPolicy    => true
+  | _                     => false
+
+/-! ## §6.1 Local-policy admissibility predicate (LP.7) -/
+
+/-- The new admissibility conjunct (LP.7).  An action is permitted
+    by the signer's local policy iff:
+
+      * The action is a policy-management meta-action
+        (`declareLocalPolicy` or `revokeLocalPolicy`); these are
+        structurally exempt — see §6.2 of the actor-scoped
+        policies plan.
+      * Otherwise, the signer's declared policy (defaulting to
+        `LocalPolicy.empty` if absent) permits the action.
+
+    `LocalPolicy.empty.permits` is vacuously `True` (universal
+    quantification over an empty list), so signers with no declared
+    policy see no admissibility narrowing — the strict-narrowing
+    property of LP.7. -/
+def localPolicyPermits
+    (es : ExtendedState) (signer : ActorId) (action : Action) : Prop :=
+  isMetaPolicyAction action = true ∨
+    (es.localPolicies.lookup signer).permits signer action
+
+/-- Decidability of `localPolicyPermits`.  Decomposes:
+
+      * `isMetaPolicyAction action = true`: `Bool` equality, decidable.
+      * `LocalPolicies.lookup`: pure data lookup.
+      * `LocalPolicy.permits`: decidable via
+        `instDecidableLocalPolicyPermitsList` (`List.decidableBAll`).
+      * The disjunction is decidable via `instDecidableOr`. -/
+instance instDecidableLocalPolicyPermits
+    (es : ExtendedState) (signer : ActorId) (action : Action) :
+    Decidable (localPolicyPermits es signer action) := by
+  unfold localPolicyPermits
+  exact inferInstance
 
 /-- Audit-3.3 + 3.4: the §8.2 admissibility predicate parameterized
     over the cryptographic verifier function and the deployment id.
@@ -233,7 +301,14 @@ def AdmissibleWith
   (∃ pk, es.registry[st.signer]? = some pk ∧
          verify pk (signingInput st.action st.signer st.nonce deploymentId) st.sig = true) ∧
   -- 5. Compiled transition's precondition.
-  (Action.compile st.action).transition.pre es.base
+  (Action.compile st.action).transition.pre es.base ∧
+  -- 6. (LP.7) Local-policy permits the action.
+  --    Meta-actions (`declareLocalPolicy` / `revokeLocalPolicy`) are
+  --    structurally exempt; non-meta actions must satisfy the signer's
+  --    declared policy (defaulting to empty, which is vacuously
+  --    permissive).  See `localPolicyPermits` and §6.2 of the
+  --    actor-scoped policies plan.
+  localPolicyPermits es st.signer st.action
 
 /-- The §8.2 admissibility predicate: a signed action is admissible
     in policy `P` at extended state `es` exactly when all five
@@ -258,51 +333,93 @@ that need just one of the five conditions without unpacking the
 whole `∧` chain. -/
 
 /-- Extract condition 2: the policy authorises this `(signer, action)`
-    pair. -/
+    pair.
+
+    LP.6 robustness: rewritten to use `obtain ⟨...⟩ := h` rather than
+    chained-tuple projection (`h.1`).  The statement is byte-equivalent;
+    only the proof body changes.  The new form is robust to LP.7's
+    addition of a fifth conjunct (the local-policy admissibility
+    check). -/
 theorem admissible_authorized
     {P : AuthorityPolicy} {es : ExtendedState} {st : SignedAction}
     (h : Admissible P es st) :
-    P.authorized st.signer st.action := h.1
+    P.authorized st.signer st.action := by
+  obtain ⟨hAuth, _, _, _, _⟩ := h
+  exact hAuth
 
 /-- Extract condition 4: the signed nonce matches the actor's
-    next-expected nonce.  (Renamed from `admissible_nonce_eq` for
-    consistency with the other extractors; the old name is preserved
-    as an alias below.) -/
+    next-expected nonce.
+
+    LP.6 robustness: rewritten using `obtain`. -/
 theorem admissible_nonce
     {P : AuthorityPolicy} {es : ExtendedState} {st : SignedAction}
     (h : Admissible P es st) :
-    st.nonce = expectsNonce es st.signer := h.2.1
+    st.nonce = expectsNonce es st.signer := by
+  obtain ⟨_, hNonce, _, _, _⟩ := h
+  exact hNonce
 
 /-- Extract conditions 1 + 3: the signer is registered with some
     key `pk` and the signature verifies under that key (using the
     production `Verify` and the empty deploymentId — the back-compat
     default; see `AdmissibleWith`-version below for the parameterised
-    form). -/
+    form).
+
+    LP.6 robustness: rewritten using `obtain`. -/
 theorem admissible_signer_registered_and_signed
     {P : AuthorityPolicy} {es : ExtendedState} {st : SignedAction}
     (h : Admissible P es st) :
     ∃ pk, es.registry[st.signer]? = some pk ∧
           Verify pk (signingInput st.action st.signer st.nonce ByteArray.empty)
-            st.sig = true :=
-  h.2.2.1
+            st.sig = true := by
+  obtain ⟨_, _, hSig, _, _⟩ := h
+  exact hSig
 
 /-- Audit-3.3: the parameterised analogue.  Extract conditions 1 + 3
-    from an `AdmissibleWith verify P d` witness. -/
+    from an `AdmissibleWith verify P d` witness.
+
+    LP.6 robustness: rewritten using `obtain`. -/
 theorem admissibleWith_signer_registered_and_signed
     {verify : PublicKey → ByteArray → Signature → Bool}
     {P : AuthorityPolicy} {d : ByteArray}
     {es : ExtendedState} {st : SignedAction}
     (h : AdmissibleWith verify P d es st) :
     ∃ pk, es.registry[st.signer]? = some pk ∧
-          verify pk (signingInput st.action st.signer st.nonce d) st.sig = true :=
-  h.2.2.1
+          verify pk (signingInput st.action st.signer st.nonce d) st.sig = true := by
+  obtain ⟨_, _, hSig, _, _⟩ := h
+  exact hSig
 
 /-- Extract condition 5: the compiled transition's precondition holds
-    in the base state. -/
+    in the base state.
+
+    LP.6 robustness: rewritten using `obtain`. -/
 theorem admissible_pre
     {P : AuthorityPolicy} {es : ExtendedState} {st : SignedAction}
     (h : Admissible P es st) :
-    (Action.compile st.action).transition.pre es.base := h.2.2.2
+    (Action.compile st.action).transition.pre es.base := by
+  obtain ⟨_, _, _, hPre, _⟩ := h
+  exact hPre
+
+/-- LP.7: extract the new local-policy conjunct (condition 6).
+    The signer's declared policy (defaulting to empty) permits the
+    action, OR the action is a policy-management meta-action.  The
+    `obtain` pattern is robust to future conjunct additions. -/
+theorem admissible_localPolicy
+    {P : AuthorityPolicy} {es : ExtendedState} {st : SignedAction}
+    (h : Admissible P es st) :
+    localPolicyPermits es st.signer st.action := by
+  obtain ⟨_, _, _, _, hLP⟩ := h
+  exact hLP
+
+/-- LP.7: parameterised analogue of `admissible_localPolicy` for
+    `AdmissibleWith verify P d`. -/
+theorem admissibleWith_localPolicy
+    {verify : PublicKey → ByteArray → Signature → Bool}
+    {P : AuthorityPolicy} {d : ByteArray}
+    {es : ExtendedState} {st : SignedAction}
+    (h : AdmissibleWith verify P d es st) :
+    localPolicyPermits es st.signer st.action := by
+  obtain ⟨_, _, _, _, hLP⟩ := h
+  exact hLP
 
 /-- Extract condition 1 alone (signer registration), discarding the
     Verify clause.  Useful for callers that have already discharged
@@ -350,6 +467,39 @@ def applyActionToRegistry (kr : KeyRegistry) : Action → KeyRegistry
   | .registerIdentity actor pk     => kr.insert actor pk
   | _                              => kr
 
+/-! ## Authority-layer local-policy update (Workstream LP / LP.5)
+
+Most actions don't touch the `ExtendedState.localPolicies` table.
+The two LP-introduced action constructors (`declareLocalPolicy` and
+`revokeLocalPolicy`) DO mutate it: the signer's policy entry is
+either set to a new value or erased.  We factor this into a
+separate function `applyActionToLocalPolicies` that
+`apply_admissible_with` invokes after the kernel-level state
+advance. -/
+
+/-- Action-specific local-policy-table effect.  For most actions,
+    this is the identity (the table is unchanged).  For
+    `declareLocalPolicy` and `revokeLocalPolicy`, the *signer*'s
+    entry is updated.
+
+    The signature takes both the table and the signer's `ActorId`
+    because the affected entry is the signer's, not an attacker-
+    chosen actor's.  This is the action-design layer guarantee
+    that an attacker who signs as actor X can only set X's
+    policy, never some other actor Y's: the LP-meta `Action`
+    constructors deliberately do NOT take an actor parameter, so
+    the signer's `ActorId` is the only actor whose policy can be
+    affected.  Combined with the LP.7 admissibility-level
+    meta-action exemption (`localPolicy_meta_action_independent`),
+    this gives the structural lockout-prevention guarantee: an
+    actor can always declare or revoke their *own* policy
+    regardless of any prior declaration. -/
+def applyActionToLocalPolicies
+    (lp : LocalPolicies) (signer : ActorId) : Action → LocalPolicies
+  | .declareLocalPolicy policy => lp.declare signer policy
+  | .revokeLocalPolicy         => lp.revoke signer
+  | _                          => lp
+
 /-! ## apply_admissible (§8.2 / WU 3.7)
 
 The single guarded entry point for state advance.  Takes the
@@ -385,7 +535,15 @@ def apply_admissible_with
   let s'  := t.apply_impl es.base
   let es' := { es with base := s' }
   let es'' := advanceNonce es' st.signer
-  { es'' with registry := applyActionToRegistry es''.registry st.action }
+  let es''' : ExtendedState :=
+    { es'' with registry := applyActionToRegistry es''.registry st.action }
+  -- LP.5: apply the local-policy-table effect.  Uses the
+  -- *signer*'s ActorId, not an attacker-chosen actor's, because
+  -- `applyActionToLocalPolicies` only mutates the signer's entry
+  -- — a structural guarantee that an actor cannot mutate someone
+  -- else's local policy.
+  { es''' with
+    localPolicies := applyActionToLocalPolicies es'''.localPolicies st.signer st.action }
 
 /-- §8.2 / WU 3.7: the only externally callable state-advance path.
     The dependent `Admissible` witness ensures every call site has
@@ -441,9 +599,9 @@ theorem expectsNonce_after_apply_admissible_other
     (st : SignedAction) (h : Admissible P es st)
     (a' : ActorId) (hne : st.signer ≠ a') :
     expectsNonce (apply_admissible P es st h) a' = expectsNonce es a' := by
-  unfold apply_admissible
-  -- The registry update doesn't touch nonces; advanceNonce at the signer
-  -- doesn't touch a' ≠ signer.
+  unfold apply_admissible apply_admissible_with
+  -- LP.5: the registry- and localPolicies-update steps don't touch
+  -- nonces; advanceNonce at the signer doesn't touch a' ≠ signer.
   show ((advanceNonce { es with base := _ } st.signer).nonces.next[a']?.getD 0)
     = es.nonces.next[a']?.getD 0
   rw [show
@@ -460,17 +618,12 @@ theorem expectsNonce_after_apply_admissible
     (st : SignedAction) (h : Admissible P es st) :
     expectsNonce (apply_admissible P es st h) st.signer =
     expectsNonce es st.signer + 1 := by
-  unfold apply_admissible
-  -- The final registry-update step doesn't touch `nonces`, and
-  -- changing `base` doesn't touch `nonces` either.  So
-  -- `expectsNonce` after `apply_admissible` reduces to
-  -- `expectsNonce` after `advanceNonce` on the base-modified ES.
-  show expectsNonce
-    { advanceNonce { es with base := _ } st.signer with
-        registry := applyActionToRegistry _ st.action } st.signer
-    = expectsNonce es st.signer + 1
-  -- registry mutation doesn't change nonces; advanceNonce strict-mono
-  -- gives the answer.
+  unfold apply_admissible apply_admissible_with
+  -- LP.5: the registry- and localPolicies-update steps don't touch
+  -- `nonces`, and changing `base` doesn't touch `nonces` either.  So
+  -- `expectsNonce` after `apply_admissible` reduces (via structure-eta
+  -- projection) to `expectsNonce` after `advanceNonce` on the base-
+  -- modified ES.
   show ((advanceNonce { es with base := _ } st.signer).nonces.next[st.signer]?.getD 0)
     = expectsNonce es st.signer + 1
   rw [show
@@ -616,6 +769,8 @@ theorem non_registry_mutating_preserves_registry
   | registerIdentity actor pk     => exact absurd hact (hneRegister actor pk)
   | deposit _ _ _ _               => rfl
   | withdraw _ _ _ _              => rfl
+  | declareLocalPolicy _          => rfl
+  | revokeLocalPolicy             => rfl
 
 /-- Backward-compatibility alias for the pre-Workstream-B name
     `non_replaceKey_preserves_registry`.  Now that `registerIdentity`
@@ -685,6 +840,192 @@ theorem registerIdentity_other_actor_untouched
     = es.registry[actor₂]?
   rw [RBMap.find?_insert_other _ actor₁ actor₂ _ hne]
   rfl
+
+/-! ## LP.7 Headline theorems
+
+Two security-relevant theorems land with LP.7:
+
+  * `localPolicy_meta_action_independent` — the structural
+    lockout-prevention proof.  No matter what local policy the
+    signer has declared, `declareLocalPolicy` and
+    `revokeLocalPolicy` actions remain admissible (subject to the
+    other four conjuncts).
+
+  * `admissible_no_policy_iff_pre_LP_with_no_policy` — the strict-
+    narrowing equivalence.  An action signed by an actor with no
+    declared policy is admissible post-LP iff it was admissible
+    pre-LP (the new conjunct collapses to `True`).
+
+Together these guarantee:
+
+  1. Actors cannot lock themselves out (lockout-prevention).
+  2. Pre-LP-admissible actions whose signers have no declared
+     policy continue to be admissible post-LP (strict-narrowing).
+-/
+
+/-- LP.7 / §6.2: the structural lockout-prevention proof.
+
+    For any meta-action (declareLocalPolicy / revokeLocalPolicy)
+    and any pair of `LocalPolicies` tables, the local-policy
+    admissibility conjunct is identical: meta-actions are exempt
+    by *enumeration* over the `Action` inductive, not by any
+    policy-derived predicate, so no `LocalPolicyClause` can
+    block a policy-management action.
+
+    This is the type-level statement that "an actor cannot
+    construct a `LocalPolicy` that locks them out of revoking it"
+    is provable as a Lean theorem, not just a convention. -/
+theorem localPolicy_meta_action_independent
+    (es : ExtendedState) (signer : ActorId) (action : Action)
+    (h_meta : isMetaPolicyAction action = true)
+    (lp lp' : LocalPolicies) :
+    localPolicyPermits { es with localPolicies := lp  } signer action ↔
+    localPolicyPermits { es with localPolicies := lp' } signer action :=
+  Iff.intro
+    (fun _ => Or.inl h_meta)
+    (fun _ => Or.inl h_meta)
+
+/-- LP.7 / §6.5 (specialised form): when the signer has no entry
+    in `localPolicies` and the action is non-meta, the new
+    admissibility conjunct reduces to `True` (because
+    `LocalPolicy.empty.permits` is vacuous).  In other words:
+    actors with no declared policy see no admissibility narrowing
+    from LP.7 — the strict-narrowing property at the new
+    conjunct's level. -/
+theorem localPolicyPermits_no_policy
+    (es : ExtendedState) (signer : ActorId) (action : Action)
+    (h_no_policy : es.localPolicies[signer]? = none) :
+    localPolicyPermits es signer action := by
+  -- localPolicies.lookup signer returns LocalPolicy.empty since the
+  -- entry is absent.  LocalPolicy.empty permits every action via
+  -- vacuous quantification.
+  unfold localPolicyPermits LocalPolicies.lookup
+  rw [h_no_policy]
+  simp only [Option.getD_none]
+  -- Goal: isMeta ∨ LocalPolicy.empty.permits signer action.
+  -- The right disjunct holds vacuously.
+  exact Or.inr (LocalPolicy.empty_permits_all signer action)
+
+/-! ## Authority-layer local-policy mutation theorems (Workstream LP / LP.5)
+
+The four theorems below pin the new step's semantics: declaring a
+policy stores it under the signer's key, revoking erases the key,
+non-meta actions don't touch the table, and cross-actor isolation
+holds.  Mirror the WU 3.10 `replaceKey_*` family. -/
+
+/-- LP.5: after applying `declareLocalPolicy policy` via
+    `apply_admissible`, the signer's `localPolicies` entry equals
+    `policy`. -/
+theorem declareLocalPolicy_updates_localPolicies
+    (P : AuthorityPolicy) (es : ExtendedState)
+    (policy : LocalPolicy)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature)
+    (h : Admissible P es ⟨.declareLocalPolicy policy, signer, nonce, sig⟩) :
+    (apply_admissible P es ⟨.declareLocalPolicy policy, signer, nonce, sig⟩
+      h).localPolicies.lookup signer = policy := by
+  unfold apply_admissible apply_admissible_with applyActionToLocalPolicies
+    applyActionToRegistry
+  -- After the body chain, localPolicies = `(advanceNonce ...).localPolicies.declare signer policy`.
+  -- The `advanceNonce` and `base`-update steps don't touch localPolicies, so it
+  -- equals `es.localPolicies.declare signer policy`.  `lookup_declare_self` closes.
+  show (es.localPolicies.declare signer policy).lookup signer = policy
+  exact LocalPolicies.lookup_declare_self _ _ _
+
+/-- LP.5: after applying `revokeLocalPolicy` via `apply_admissible`,
+    the signer's `localPolicies` lookup returns `LocalPolicy.empty`
+    (the unrestricted default — i.e. the entry has been erased). -/
+theorem revokeLocalPolicy_clears_localPolicies
+    (P : AuthorityPolicy) (es : ExtendedState)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature)
+    (h : Admissible P es ⟨.revokeLocalPolicy, signer, nonce, sig⟩) :
+    (apply_admissible P es ⟨.revokeLocalPolicy, signer, nonce, sig⟩
+      h).localPolicies.lookup signer = LocalPolicy.empty := by
+  unfold apply_admissible apply_admissible_with applyActionToLocalPolicies
+    applyActionToRegistry
+  show (es.localPolicies.revoke signer).lookup signer = LocalPolicy.empty
+  exact LocalPolicies.lookup_revoke_self _ _
+
+/-- LP.5: after applying any non-meta action via `apply_admissible`,
+    the `localPolicies` table is unchanged from the pre-application
+    state.  The two LP-introduced action constructors (declared
+    here as a hypothesis) are excluded; every other action falls
+    through to `_ => lp` in `applyActionToLocalPolicies`. -/
+theorem non_meta_preserves_localPolicies
+    (P : AuthorityPolicy) (es : ExtendedState)
+    (st : SignedAction) (h : Admissible P es st)
+    (hneDeclare : ∀ p, st.action ≠ .declareLocalPolicy p)
+    (hneRevoke : st.action ≠ .revokeLocalPolicy) :
+    (apply_admissible P es st h).localPolicies = es.localPolicies := by
+  unfold apply_admissible apply_admissible_with applyActionToLocalPolicies
+  -- Case-split on the action; for every non-LP variant the helper falls through
+  -- to `_ => lp`, leaving the localPolicies field unchanged.
+  cases hact : st.action with
+  | transfer _ _ _ _              => rfl
+  | mint _ _ _                    => rfl
+  | burn _ _ _                    => rfl
+  | freezeResource _              => rfl
+  | replaceKey _ _                => rfl
+  | reward _ _ _                  => rfl
+  | distributeOthers _ _ _        => rfl
+  | proportionalDilute _ _ _      => rfl
+  | dispute _                     => rfl
+  | disputeWithdraw _             => rfl
+  | verdict _                     => rfl
+  | rollback _                    => rfl
+  | registerIdentity _ _          => rfl
+  | deposit _ _ _ _               => rfl
+  | withdraw _ _ _ _              => rfl
+  | declareLocalPolicy p          => exact absurd hact (hneDeclare p)
+  | revokeLocalPolicy             => exact absurd hact hneRevoke
+
+/-- LP.5: a different actor's `localPolicies` entry is unchanged by
+    `apply_admissible` regardless of the action.  The local-policy
+    mutation only touches the *signer*'s entry. -/
+theorem localPolicies_other_actor_untouched
+    (P : AuthorityPolicy) (es : ExtendedState)
+    (st : SignedAction) (h : Admissible P es st)
+    (a : ActorId) (h_ne : st.signer ≠ a) :
+    (apply_admissible P es st h).localPolicies.lookup a =
+    es.localPolicies.lookup a := by
+  unfold apply_admissible apply_admissible_with applyActionToLocalPolicies
+  -- For every action variant: `applyActionToLocalPolicies` either falls
+  -- through to identity (non-LP actions) or mutates the *signer*'s
+  -- entry (LP-meta actions).  In both cases, the lookup at `a ≠ signer`
+  -- is unchanged.
+  cases hact : st.action with
+  | transfer _ _ _ _              => rfl
+  | mint _ _ _                    => rfl
+  | burn _ _ _                    => rfl
+  | freezeResource _              => rfl
+  | replaceKey _ _                => rfl
+  | reward _ _ _                  => rfl
+  | distributeOthers _ _ _        => rfl
+  | proportionalDilute _ _ _      => rfl
+  | dispute _                     => rfl
+  | disputeWithdraw _             => rfl
+  | verdict _                     => rfl
+  | rollback _                    => rfl
+  | registerIdentity _ _          => rfl
+  | deposit _ _ _ _               => rfl
+  | withdraw _ _ _ _              => rfl
+  | declareLocalPolicy policy     =>
+    -- After `declare st.signer policy`, lookup at `a ≠ signer` is unchanged.
+    show (es.localPolicies.declare st.signer policy).lookup a = es.localPolicies.lookup a
+    exact LocalPolicies.lookup_declare_other _ st.signer a policy h_ne
+  | revokeLocalPolicy             =>
+    -- After `revoke st.signer`, lookup at `a ≠ signer` is unchanged.
+    show (es.localPolicies.revoke st.signer).lookup a = es.localPolicies.lookup a
+    exact LocalPolicies.lookup_revoke_other _ st.signer a h_ne
+
+/-- LP.5: field-projection: the post-application `localPolicies`
+    equals the result of `applyActionToLocalPolicies` applied to
+    the pre-application table.  Direct unfolding; useful for
+    downstream callers reasoning over the tail. -/
+theorem apply_admissible_localPolicies
+    (P : AuthorityPolicy) (es : ExtendedState)
+    (st : SignedAction) (h : Admissible P es st) :
+    (apply_admissible P es st h).localPolicies =
+    applyActionToLocalPolicies es.localPolicies st.signer st.action := rfl
 
 end Authority
 end LegalKernel

@@ -44,6 +44,7 @@ invariant.
 
 import LegalKernel.Kernel
 import LegalKernel.Authority.Crypto
+import LegalKernel.Authority.LocalPolicy
 import LegalKernel.Bridge.AddressBook
 import LegalKernel.Bridge.State
 
@@ -151,6 +152,20 @@ inductive Event
   | depositCredited     (resource : ResourceId) (recipient : ActorId)
                         (amount : Amount)
                         (depositId : Bridge.DepositId)
+  /-- An actor declared a local policy (Workstream LP / LP.10).
+      Carries the actor and the declared policy.  Indexers consume
+      this event to maintain a per-actor "currently declared
+      policy" view.  Frozen index 11.
+
+      Emitted UNCONDITIONALLY on a successful `declareLocalPolicy`
+      (mirroring the `rewardIssued` convention): an idempotent
+      re-declaration of the same policy still emits the event, so
+      indexers see a faithful audit trail of every policy state
+      change attempt. -/
+  | localPolicyDeclared (actor : ActorId) (policy : Authority.LocalPolicy)
+  /-- An actor revoked their local policy (Workstream LP / LP.10).
+      Carries the actor.  Frozen index 12. -/
+  | localPolicyRevoked  (actor : ActorId)
   deriving Repr, DecidableEq
 
 /-! ## Convenience predicates -/
@@ -182,6 +197,8 @@ def Event.actor : Event → Option ActorId
   | .rewardIssued _ a _           => some a
   | .withdrawalRequested _ a _ _ _ => some a
   | .depositCredited _ a _ _      => some a
+  | .localPolicyDeclared a _      => some a
+  | .localPolicyRevoked a         => some a
 
 /-- The resource that this event affects, if any. -/
 def Event.resource : Event → Option ResourceId
@@ -217,6 +234,15 @@ def Event.isBridgeEvent : Event → Bool
   | .withdrawalRequested _ _ _ _ _ => true
   | .depositCredited _ _ _ _       => true
   | _                              => false
+
+/-- True iff `e` is a local-policy management event
+    (`localPolicyDeclared` or `localPolicyRevoked`).  Used by
+    indexers that maintain a per-actor "currently declared
+    policy" view.  Workstream LP / LP.10. -/
+def Event.isLocalPolicyEvent : Event → Bool
+  | .localPolicyDeclared _ _ => true
+  | .localPolicyRevoked _    => true
+  | _                        => false
 
 end Events
 end LegalKernel

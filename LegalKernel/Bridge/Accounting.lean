@@ -350,6 +350,53 @@ theorem accounting_delta_registerIdentity
   · intro r' s' am rcp heq
     rw [hst] at heq; cases heq
 
+/-! ### LP.8 accounting deltas for actor-scoped policies
+
+The two LP-introduced action constructors compile to the
+kernel-level no-op (`Laws.freezeResource 0`).  They don't touch
+`BridgeState`, so the accounting deltas are zero. -/
+
+/-- LP.8: `declareLocalPolicy` doesn't change `totalDeposited` or
+    `totalWithdrawn`.  The action mutates `localPolicies` only;
+    `BridgeState` is unchanged. -/
+theorem accounting_delta_declareLocalPolicy
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P d es st)
+    (hact : ∃ p, st.action = .declareLocalPolicy p)
+    (r : ResourceId) :
+    totalDeposited (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalDeposited es r ∧
+    totalWithdrawn (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalWithdrawn es r := by
+  obtain ⟨p, hst⟩ := hact
+  apply accounting_delta_non_bridge verify P d es st idx h
+  · intro r' rec am dep heq
+    rw [hst] at heq; cases heq
+  · intro r' s' am rcp heq
+    rw [hst] at heq; cases heq
+
+/-- LP.8: `revokeLocalPolicy` doesn't change `totalDeposited` or
+    `totalWithdrawn`.  Same as `accounting_delta_declareLocalPolicy`
+    in shape; the action only touches `localPolicies`. -/
+theorem accounting_delta_revokeLocalPolicy
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P d es st)
+    (hact : st.action = .revokeLocalPolicy)
+    (r : ResourceId) :
+    totalDeposited (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalDeposited es r ∧
+    totalWithdrawn (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalWithdrawn es r := by
+  apply accounting_delta_non_bridge verify P d es st idx h
+  · intro r' rec am dep heq
+    rw [hact] at heq; cases heq
+  · intro r' s' am rcp heq
+    rw [hact] at heq; cases heq
+
 /-! ### Helper: `applyActionToBridgeState` shape on bridge actions
 
 For `deposit` / `withdraw`, the bridge-state mutation is exactly
@@ -364,6 +411,22 @@ theorem applyActionToBridgeState_deposit
     (amount : Amount) (d : DepositId) (idx : Nat) :
     applyActionToBridgeState bs (.deposit r recipient amount d) idx =
     bs.markConsumed d ({ resource := r, amount := amount }) := by
+  unfold applyActionToBridgeState
+  rfl
+
+/-- LP.8: `applyActionToBridgeState` on `declareLocalPolicy` is the
+    identity (the action doesn't touch `BridgeState`). -/
+theorem applyActionToBridgeState_declareLocalPolicy
+    (bs : BridgeState) (p : Authority.LocalPolicy) (idx : Nat) :
+    applyActionToBridgeState bs (.declareLocalPolicy p) idx = bs := by
+  unfold applyActionToBridgeState
+  rfl
+
+/-- LP.8: `applyActionToBridgeState` on `revokeLocalPolicy` is the
+    identity. -/
+theorem applyActionToBridgeState_revokeLocalPolicy
+    (bs : BridgeState) (idx : Nat) :
+    applyActionToBridgeState bs .revokeLocalPolicy idx = bs := by
   unfold applyActionToBridgeState
   rfl
 

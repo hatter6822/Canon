@@ -160,6 +160,8 @@ import LegalKernel.Laws.Withdraw
 import LegalKernel.Authority.Crypto
 import LegalKernel.Authority.Action
 import LegalKernel.Authority.Identity
+import LegalKernel.Authority.LocalPolicy
+import LegalKernel.Authority.LocalPolicySemantics
 import LegalKernel.Authority.Nonce
 import LegalKernel.Authority.SignedAction
 import LegalKernel.Disputes.Types
@@ -170,6 +172,8 @@ import LegalKernel.Disputes.LawClassification
 import LegalKernel.Disputes.MonotonicDeployment
 import LegalKernel.Disputes.Rewards
 import LegalKernel.Disputes.Staking
+import LegalKernel.Encoding.LocalPolicy
+import LegalKernel.LocalPolicy.LawClassification
 import LegalKernel.Encoding.CBOR
 import LegalKernel.Encoding.Encodable
 import LegalKernel.Encoding.Disputes
@@ -212,6 +216,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-ethereum-workstream-f-cross-stack-verification"
+def kernelBuildTag : String := "canon-local-policies"
 
 end LegalKernel

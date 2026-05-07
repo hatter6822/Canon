@@ -205,6 +205,20 @@ def actionEvents
     let oldV := LegalKernel.getBalance preState  r sender
     let newV := LegalKernel.getBalance postState r sender
     if oldV != newV then [.balanceChanged r sender oldV newV] else []
+  | .declareLocalPolicy _ =>
+    -- Workstream LP: actor-scoped local-policy declaration.  The
+    -- kernel-level effect is identity (compiles to
+    -- `Laws.freezeResource 0`), so no `balanceChanged` event.
+    -- The deployment-level semantic event (`localPolicyDeclared`)
+    -- is emitted by `extractEvents` (LP.10) which has the signer
+    -- and policy in scope.
+    []
+  | .revokeLocalPolicy =>
+    -- Workstream LP: actor-scoped local-policy revocation.  Same
+    -- shape as `declareLocalPolicy`: kernel-level no-op; the
+    -- semantic event (`localPolicyRevoked`) is emitted by
+    -- `extractEvents` (LP.10).
+    []
 
 /-- The Phase-5 `extractEvents` per Genesis Plan §8.9.1.  Given the
     pre / post `ExtendedState` and the applied `SignedAction`,
@@ -240,10 +254,20 @@ def extractEvents
       -- module docstring.
       [Event.withdrawalRequested r sender amount rcp preState.bridge.nextWdId]
     | _ => []
+  let lpEvts : List Event :=
+    -- Workstream LP / LP.10 semantic local-policy events.  Emitted
+    -- UNCONDITIONALLY (mirroring `rewardIssued` / bridge events): an
+    -- idempotent re-declaration still emits the event.  The events
+    -- carry the *signer* as the actor since the LP actions are by
+    -- construction signer-mutating only.
+    match st.action with
+    | .declareLocalPolicy p => [Event.localPolicyDeclared st.signer p]
+    | .revokeLocalPolicy    => [Event.localPolicyRevoked st.signer]
+    | _                     => []
   let oldN     := expectsNonce preState  st.signer
   let newN     := expectsNonce postState st.signer
   let nonceEvt := [Event.nonceAdvanced st.signer oldN newN]
-  actEvts ++ bridgeEvts ++ nonceEvt
+  actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt
 
 /-! ## Determinism (the §8.9.1 headline property)
 
@@ -312,7 +336,10 @@ zero-amount deposit / withdrawal still emits the bridge event
 incentive amendment). -/
 
 /-- `deposit` always emits a `depositCredited` event in its
-    output list (Workstream C.5). -/
+    output list (Workstream C.5).  After LP.10 the output shape is
+    `actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt`; for a `deposit`
+    action `lpEvts = []`, so the depositCredited is in the
+    `bridgeEvts` segment. -/
 theorem extractEvents_deposit_emits_credited
     (pre post : ExtendedState) (r : ResourceId) (recipient : ActorId)
     (amount : Amount) (d : LegalKernel.Bridge.DepositId)
@@ -321,12 +348,14 @@ theorem extractEvents_deposit_emits_credited
     extractEvents pre post
       ⟨.deposit r recipient amount d, signer, nonce, sig⟩ := by
   unfold extractEvents
-  -- The bridgeEvts list is `[Event.depositCredited r recipient amount d]`.
-  -- The full output is `actEvts ++ bridgeEvts ++ nonceEvt`; the
-  -- depositCredited is the unique element of bridgeEvts.
-  show _ ∈ _ ++ [Event.depositCredited r recipient amount d] ++ _
-  exact List.mem_append.mpr (Or.inl
-    (List.mem_append.mpr (Or.inr (List.mem_singleton.mpr rfl))))
+  -- The bridgeEvts list is `[Event.depositCredited r recipient amount d]`;
+  -- with LP.10 the lpEvts = [] for non-LP actions; nonceEvt has 1 elt.
+  -- Full output: actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt.
+  show _ ∈ _ ++ [Event.depositCredited r recipient amount d] ++ _ ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
 
 /-- `withdraw` always emits a `withdrawalRequested` event in its
     output list (Workstream C.5).  The withdrawal id is exactly
@@ -339,9 +368,54 @@ theorem extractEvents_withdraw_emits_requested
     extractEvents pre post
       ⟨.withdraw r sender amount rcp, signer, nonce, sig⟩ := by
   unfold extractEvents
-  show _ ∈ _ ++ [Event.withdrawalRequested r sender amount rcp pre.bridge.nextWdId] ++ _
-  exact List.mem_append.mpr (Or.inl
-    (List.mem_append.mpr (Or.inr (List.mem_singleton.mpr rfl))))
+  show _ ∈ _ ++ [Event.withdrawalRequested r sender amount rcp pre.bridge.nextWdId]
+                ++ _ ++ _
+  -- The withdrawalRequested is in the `bridgeEvts` segment; flat-walk the
+  -- nested `++` structure to find it.
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
+
+/-! ## Workstream LP / LP.10 — local-policy event extraction
+
+The `declareLocalPolicy` and `revokeLocalPolicy` actions emit a
+`localPolicyDeclared` or `localPolicyRevoked` event, then the
+nonce event.  The semantic event is NOT delta-filtered: an
+idempotent re-declaration (same policy as before) still emits
+the event, mirroring the `rewardIssued` / bridge-event
+convention. -/
+
+/-- LP.10: `declareLocalPolicy` always emits a `localPolicyDeclared`
+    event in its output list.  The event carries the signer as the
+    actor (per-actor policies are declared by their owner). -/
+theorem extractEvents_declareLocalPolicy_emits_localPolicyDeclared
+    (pre post : ExtendedState) (p : Authority.LocalPolicy)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature) :
+    Event.localPolicyDeclared signer p ∈
+    extractEvents pre post
+      ⟨.declareLocalPolicy p, signer, nonce, sig⟩ := by
+  unfold extractEvents
+  -- The event is in the `lpEvts` segment of the output list.
+  -- Output shape: actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt.
+  show _ ∈ _ ++ _ ++ [Event.localPolicyDeclared signer p] ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
+
+/-- LP.10: `revokeLocalPolicy` always emits a `localPolicyRevoked`
+    event in its output list. -/
+theorem extractEvents_revokeLocalPolicy_emits_localPolicyRevoked
+    (pre post : ExtendedState)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature) :
+    Event.localPolicyRevoked signer ∈
+    extractEvents pre post
+      ⟨.revokeLocalPolicy, signer, nonce, sig⟩ := by
+  unfold extractEvents
+  show _ ∈ _ ++ _ ++ [Event.localPolicyRevoked signer] ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
 
 end Events
 end LegalKernel
