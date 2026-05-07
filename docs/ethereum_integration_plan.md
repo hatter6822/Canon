@@ -566,6 +566,80 @@ backed by the existing Phase-6 fraud-proof pipeline.
     unchanged; no new axioms.  Verified end-to-end via the
     `canon` binary on a dense-pair snapshot fixture.
 
+  * **Workstream F (cross-stack verification) status:**
+    **Complete** as of branch
+    `claude/cross-stack-verification-8uwUJ`.  All four
+    sub-workstreams (F.1 fixture corpus across 7 sub-WUs, F.2
+    goldens, F.3 testnet acceptance script, F.4 property-based
+    bridge tests) land with full Lean + Solidity coverage.
+
+    Cumulative fixture-input count: **656** across the six F.1
+    fixtures (ECDSA-128 + keccak-104 + deposit-receipt-128 +
+    withdrawal-proof-96 + dispute-evidence-168 + migration-32);
+    plus 96 mainnet-shaped goldens records + 9 cross-check
+    test contracts on the Solidity side.
+
+    The implementation covers every cross-stack invariant
+    flagged by the §21 audit:
+
+      * Audit-1 invariants: `signerHint` API, `verdictDigest`
+        derivation (no caller-supplied free parameter),
+        `MAX_VERDICT_SIGNERS = 64` boundary, `MAX_EVIDENCE_BLOB
+        _BYTES = 100_000` boundary, quorum dedup discipline.
+      * Audit-2 invariants: variable-size leaf and siblings
+        (dense-pair coverage in F.1.5), `resourceId` in
+        receiptHash (F.1.4), Bridge `revertToPriorRoot`
+        floor+ceiling pair (mirrored in §21.8 / F.3 acceptance).
+      * Audit-3 invariants: doubleApply concat shape (`count
+        == 2`, `assertFullyConsumed`), predecessor pre-
+        commitment direction (F.1.7), CREATE3 cycle-breaking
+        + post-deploy `assertConsistent()` discipline (F.3).
+
+    Hash-binding-conditional behaviour: the Lean side's
+    `Bridge.HashAdaptor.isKeccak256Linked` flag gates per-entry
+    byte-equivalence assertions in the cross-check fixtures —
+    when the production keccak256 binding is not linked, the
+    Lean fixture content is FNV-derived and the Solidity-side
+    cross-check skips with an explicit log line.  CI gates the
+    `cross-stack-equivalence` job on the production binding
+    being linked.  Without the binding, **8 Solidity cross-
+    stack tests skip; with the binding, all 197 Solidity tests
+    pass**.
+
+    Workstream-F adds **3 property-based bridge tests** (F.4)
+    over the §12.13 `bridgeLawSet : MonotonicLawSet`:
+    `prop_deposit_then_withdraw_roundtrip`,
+    `prop_bridge_account_invariant_holds`, and
+    `prop_withdrawal_proof_verifies` (the latter discharged
+    unconditionally by `verifyProof_complete`).
+    `Laws.withdraw` is deliberately excluded from the law set
+    via the typeclass-level forward-protection
+    (`withdraw_not_monotonic` — adding `withdraw` to the law
+    list produces a `failed to synthesize IsMonotonic` error
+    at elaboration time).
+
+    Test count grew from 1024 to **1100** (+76 tests across 9
+    new suites: 8 framework + 7 ECDSA + 9 keccak + 11 deposit-
+    receipt + 8 withdrawal-proof + 10 dispute-evidence + 10
+    migration-attestation + 10 goldens + 3 property-bridge).
+    Solidity test count grew from 166 to **189 + 8
+    conditionally-skipped** (+23 / +8: 9 new cross-check
+    contracts).  No new theorem obligations (F is a cross-
+    stack equivalence corpus, not a kernel-level proof
+    obligation, per §21.11).  TCB unchanged; no new axioms.
+
+    `kernelBuildTag` bumped to
+    `"canon-ethereum-workstream-f-cross-stack-verification"`.
+
+    **Toolchain bootstrap.**  `scripts/setup.sh` extended to
+    install Foundry v1.7.0 (SHA-256 pinned for x86_64 +
+    aarch64) and solc v0.8.20 (SHA-256 pinned for x86_64;
+    upstream v0.8.20 doesn't ship an ARM static binary).  New
+    flags `--skip-solidity` and `--solidity-only`.  A
+    `.claude/hooks/session-start.sh` SessionStart hook invokes
+    `setup.sh --quiet` so subsequent `lake build` / `forge
+    test` calls don't race against an in-flight install.
+
 ## Executive summary
 
 The MVP makes Canon usable by any Ethereum wallet against any
