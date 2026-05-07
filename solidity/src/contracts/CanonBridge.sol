@@ -48,6 +48,12 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
     error UnsupportedResource();
     error EthValueMismatch(uint256 expected, uint256 actual);
     error InvariantViolation_DisputeWindowVsRedemption();
+    /// @notice Reverts when the bridge's internal `totalLockedValue`
+    ///         disagrees with the L2 record at withdrawal time.
+    ///         Should be unreachable if the bridge's deposit /
+    ///         withdrawal accounting matches the L2 ledger; firing
+    ///         it indicates a cross-stack drift bug.
+    error BridgeAccountingMismatch(uint256 totalLockedValue, uint256 amountRequested);
     error InvalidSignatureLength();
 
     // ------------------------------------------------------------------
@@ -88,19 +94,38 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
     mapping(address => uint64) public depositNonce;
 
     /// @notice State-root ledger keyed by the post-state log index
-    ///         of the highest-indexed log entry covered.
+    ///         of the highest-indexed log entry covered.  The
+    ///         `reverted` status is NOT stored here; it is computed
+    ///         on-the-fly as `logIndexHigh >= lowestRevertedLogIndexHigh`
+    ///         per the O(1) `revertToPriorRoot` discipline.
     struct StateRootRecord {
         bytes32 root;
         uint64 logIndexHigh;
         uint64 submittedAtBlock;
         bool exists;
-        bool reverted;
     }
 
     mapping(uint64 => StateRootRecord) private _stateRoots;
     uint64 public latestSubmittedLogIndexHigh;
     uint64 public latestStateRootSubmittedAtBlock;
     uint64 public lastUpheldDisputeBlock;
+
+    /// @notice The lowest log-index-high that has been marked
+    ///         reverted by `revertToPriorRoot`.  All state roots at
+    ///         indices `>= lowestRevertedLogIndexHigh` are
+    ///         considered reverted (linearly, since state-root
+    ///         dependence is monotonic).  Initialised to
+    ///         `type(uint64).max` (no reversions yet).  Each
+    ///         successful call to `revertToPriorRoot` reduces this
+    ///         value monotonically; it can only decrease.
+    /// @dev    Replaces the previous O(N) "iterate-and-mark-each-record"
+    ///         design which had a denial-of-service vector when
+    ///         `latestSubmittedLogIndexHigh - disputedLogIndexHigh`
+    ///         exceeded the per-block gas budget.  The new design
+    ///         is O(1) per call; per-record `reverted` status is
+    ///         computed on-the-fly via `_isReverted(idx) := idx >=
+    ///         lowestRevertedLogIndexHigh`.
+    uint64 public lowestRevertedLogIndexHigh = type(uint64).max;
 
     /// @notice Tracks redeemed leaves by their canonical
     ///         `keccak256(leafBlob)` so a single PendingWithdrawal
@@ -354,11 +379,16 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
             root: root,
             logIndexHigh: logIndexHigh,
             submittedAtBlock: uint64(block.number),
-            exists: true,
-            reverted: false
+            exists: true
         });
 
         emit StateRootSubmitted(root, logIndexHigh, recovered, uint64(block.number));
+    }
+
+    /// @notice Whether `logIndexHigh` falls in the reverted range.
+    ///         Computed from the O(1) floor — no per-record state.
+    function isStateRootReverted(uint64 logIndexHigh) public view returns (bool) {
+        return logIndexHigh >= lowestRevertedLogIndexHigh;
     }
 
     /// @inheritdoc ICanonBridge
@@ -368,7 +398,7 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
         returns (bytes32, uint64, bool)
     {
         StateRootRecord storage rec = _stateRoots[logIndexHigh];
-        return (rec.root, rec.submittedAtBlock, rec.reverted);
+        return (rec.root, rec.submittedAtBlock, isStateRootReverted(logIndexHigh));
     }
 
     /// @inheritdoc ICanonBridge
@@ -378,7 +408,8 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
         returns (bool)
     {
         StateRootRecord storage rec = _stateRoots[logIndexHigh];
-        if (!rec.exists || rec.reverted) return false;
+        if (!rec.exists) return false;
+        if (isStateRootReverted(logIndexHigh)) return false;
         return block.number >= uint256(rec.submittedAtBlock) + uint256(disputeWindowBlocks);
     }
 
@@ -434,7 +465,7 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
         if (!isStateRootFinalised(atLogIndexHigh)) {
             StateRootRecord storage rec = _stateRoots[atLogIndexHigh];
             if (!rec.exists) revert UnknownStateRoot();
-            if (rec.reverted) revert StateRootReverted();
+            if (isStateRootReverted(atLogIndexHigh)) revert StateRootReverted();
             revert PreFinalisation();
         }
         bytes32 root = _stateRoots[atLogIndexHigh].root;
@@ -456,11 +487,11 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
 
         // ---- Effect phase: mark redeemed before any external call ----
         withdrawalLeafRedeemed[leafHash] = true;
+        // Underflow safeguard — should be unreachable if the
+        // bridge's accounting matches the L2 record.  This
+        // catches a class of cross-stack drift bugs early.
         if (totalLockedValue < wd.amount) {
-            // Underflow safeguard — should be unreachable if the
-            // bridge's accounting matches the L2 record.  This
-            // catches a class of cross-stack drift bugs early.
-            revert InvariantViolation_DisputeWindowVsRedemption();
+            revert BridgeAccountingMismatch(totalLockedValue, wd.amount);
         }
         unchecked {
             totalLockedValue = totalLockedValue - wd.amount;
@@ -521,29 +552,32 @@ contract CanonBridge is ICanonBridge, ReentrancyGuard {
     // E.1.5 Rollback hook
     // ------------------------------------------------------------------
 
-    event StateRootReverted_(uint64 indexed disputedLogIndexHigh, bytes32 indexed revertedRoot);
+    /// @notice Emitted exactly once per `revertToPriorRoot` call,
+    ///         carrying the new `lowestRevertedLogIndexHigh` floor.
+    ///         All state roots at indices `>= floor` are now
+    ///         considered reverted (per-record `reverted` status
+    ///         is computed on-the-fly from this floor).
+    event StateRootRangeReverted(uint64 indexed disputedLogIndexHigh, uint64 newRevertedFloor);
 
     function revertToPriorRoot(uint64 disputedLogIndexHigh) external {
         if (msg.sender != disputeVerifier) revert NotDisputeVerifier();
 
-        // Mark all state roots from `disputedLogIndexHigh` onward as
-        // reverted.  We iterate forward; the dispute verifier supplies
-        // the lowest-indexed disputed entry, so all later ones must
-        // also be invalidated (state roots are linearly dependent).
-        // Idempotent: if already reverted, the function is a no-op
-        // for that record.
-        for (
-            uint64 idx = disputedLogIndexHigh; idx <= latestSubmittedLogIndexHigh; ++idx
-        ) {
-            StateRootRecord storage rec = _stateRoots[idx];
-            if (rec.exists && !rec.reverted) {
-                rec.reverted = true;
-                emit StateRootReverted_(idx, rec.root);
-            }
+        // O(1) reversion: track only the LOWEST reverted index.
+        // This replaces the previous O(N) loop that had a DoS
+        // vector when `latestSubmittedLogIndexHigh -
+        // disputedLogIndexHigh` exceeded the block gas budget.
+        //
+        // Idempotent: if `disputedLogIndexHigh` is already at or
+        // above the existing floor, the floor doesn't move.
+        if (disputedLogIndexHigh < lowestRevertedLogIndexHigh) {
+            lowestRevertedLogIndexHigh = disputedLogIndexHigh;
+            emit StateRootRangeReverted(disputedLogIndexHigh, disputedLogIndexHigh);
         }
 
         // Trip the DisputeCooldown breaker for the next
-        // `cooldownBlocks` blocks.
+        // `cooldownBlocks` blocks (called every time, not just on
+        // a fresh-floor revert, so multiple disputes within the
+        // window each refresh the cooldown).
         lastUpheldDisputeBlock = uint64(block.number);
     }
 

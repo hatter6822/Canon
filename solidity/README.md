@@ -36,8 +36,8 @@ solidity/
 │       ├── CREATE3.sol          — proxy-factory deployment for cyclic refs
 │       └── SmtVerifier.sol      — SMT verifier (mirrors Lean D.1)
 └── test/
-    ├── CanonBridge.t.sol           (26 tests)
-    ├── CanonDisputeVerifier.t.sol  (22 tests)
+    ├── CanonBridge.t.sol           (33 tests)
+    ├── CanonDisputeVerifier.t.sol  (32 tests)
     ├── CanonIdentityRegistry.t.sol (19 tests)
     ├── CanonMigration.t.sol        (9 tests)
     ├── CanonSequencerStake.t.sol   (19 tests)
@@ -49,7 +49,7 @@ solidity/
         └── MockERC20.sol    — minimal ERC-20 for tests
 ```
 
-Total: **139 forge tests across 8 suites.**
+Total: **156 forge tests across 8 suites** (post-audit-1).
 
 ## Build & test
 
@@ -211,6 +211,76 @@ properties:
 * `activated` is one-way; once `true`, never reverts.
 * Anyone can call `activate()` after the grace window; no role
   gating.
+
+## Audit-1 hardening summary
+
+A deep post-PR audit of the workstream-E contracts identified
+eight defects across the five contracts; all are now closed.
+Cross-reference: the audit changelog in
+[`docs/ethereum_integration_plan.md` §21](../docs/ethereum_integration_plan.md)
+and [`CLAUDE.md`](../CLAUDE.md)'s active-development status
+section.
+
+  1. **`checkSignatureInvalid` signer-id resolution** — the
+     pre-audit code synthesized an "address" by zero-padding
+     the uint64 signer-id, which never matched any registered
+     entry.  Fix: function now takes an explicit
+     `address signerHint` parameter; the dispute filer
+     supplies the actor-id ↔ address resolution.
+  2. **EIP-712 domain mismatch** in `checkSignatureInvalid` —
+     pre-audit code used `("CanonDisputeVerifier", "1")` as
+     the domain when the user signed against
+     `("CanonAction", "1")`.  Fix: split into
+     `ACTION_DOMAIN_NAME` (per-action signing) and
+     `VERDICT_DOMAIN_NAME` (verdict signing) constants.
+  3. **`verdictHash` unbinding** — adjudicator signatures over
+     verdictHash X could be replayed for ANY dispute Y
+     because the contract never bound the hash to the
+     dispute.  Fix: the contract derives the canonical digest
+     on-chain via `verdictDigest(disputeId, outcome)` and
+     adjudicators must sign that exact value (binds
+     `(disputeId, outcome, deploymentId)`).
+  4. **`revertToPriorRoot` O(N) DoS** — the per-record
+     iterate-and-mark loop could OOG when there were many
+     state-root submissions between the disputed index and
+     `latestSubmittedLogIndexHigh`.  Fix: replaced with O(1)
+     `lowestRevertedLogIndexHigh` floor; `isStateRootReverted(idx)`
+     view computes status on-the-fly.
+  5. **`signers[]` unbounded** in `_countVerifiedSignatures` →
+     memory-allocation DoS.  Fix: `MAX_VERDICT_SIGNERS = 64`
+     constant; `TooManySigners` revert above the bound.
+  6. **`evidenceBlob` unbounded** in `fileDispute` → griefing
+     via huge blob storage.  Fix: `MAX_EVIDENCE_BLOB_BYTES =
+     100_000` constant; `EvidenceBlobTooLarge` revert above
+     the bound.
+  7. **`evidenceBlob` wasted storage** — file-time blob was
+     stored on-chain but never read at finalisation.  Fix:
+     removed from `DisputeRecord`; emitted in `DisputeFiled`
+     event instead (~60× cheaper per byte than storage).
+  8. **Wrong custom-error name** — TVL underflow check at
+     withdrawal time reused `InvariantViolation_DisputeWindowVsRedemption`
+     (a constructor-time error name).  Fix: separate
+     `BridgeAccountingMismatch(uint256, uint256)` error for
+     the underflow case.
+
+The audit also documented several low-severity items
+investigated but deliberately not changed:
+
+  * **`receive()` reverts** on all bridge contracts; ETH can
+    still arrive via `selfdestruct(target)`.  Accounting uses
+    `totalLockedValue`, not `address(this).balance`, so
+    correctness is preserved; documented as a known property.
+  * **`hasOpenDisputeOlderThan` is conservative** (returns
+    `true` if any state root is within the dispute window
+    regardless of open-dispute count).  Future enhancement:
+    have the dispute verifier maintain an authoritative
+    per-state-root open-dispute index.
+  * **`withdrawWithProof` recipient self-DoS** — a contract
+    recipient that reverts on `receive()` cannot redeem its
+    own withdrawal.  Accepted as a known property of
+    `Address.sendValue` semantics.
+  * **`receive()` rejection of bare ETH** is necessary so
+    deposit accounting doesn't drift; intentional.
 
 ## Production deployment notes
 

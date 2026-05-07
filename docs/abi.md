@@ -625,6 +625,10 @@ error names are part of the contract's frozen surface:
     `InvalidProof`, `InvalidLeafSizeForResource`,
     `UnsupportedResource`, `EthValueMismatch`,
     `InvariantViolation_DisputeWindowVsRedemption`,
+    `BridgeAccountingMismatch(uint256 totalLockedValue, uint256 amountRequested)`
+    (added by audit-1; reserved specifically for the TVL
+    underflow check at withdrawal time, distinct from the
+    constructor-time invariant check),
     `InvalidSignatureLength`.
   * `CanonDisputeVerifier`: `NotApprovedAdjudicator`,
     `UnknownDispute`, `AlreadyDecided`, `NotOpen`,
@@ -632,7 +636,11 @@ error names are part of the contract's frozen surface:
     `SelfClaimInvalid`, `InvalidClaimVariant`,
     `MaxPrefixLenExceeded`, `PrefixSignerMissing`,
     `InvalidSignatureLength`, `VerifierBridgeMismatch`,
-    `ZeroAddress`, `QuorumThresholdOutOfRange`, `VerdictReplay`.
+    `ZeroAddress`, `QuorumThresholdOutOfRange`, `VerdictReplay`,
+    `EvidenceBlobTooLarge(uint256 actual, uint256 maxBytes)`
+    (added by audit-1), `TooManySigners(uint256 supplied,
+    uint256 maxAllowed)` (added by audit-1),
+    `MissingSignerHint` (added by audit-1).
   * `CanonIdentityRegistry`: `PubkeyAddressMismatch`,
     `WrongPubkeyLength`, `NotEip1271Conforming`,
     `AlreadyRegistered`, `NotRegistered`.
@@ -696,7 +704,56 @@ siblings)` mirrors `LegalKernel.Bridge.WithdrawalRoot.verifyProofRec`
 line-for-line.  The cross-stack F.1.5 fixture (workstream F)
 asserts byte-equivalence across 64 randomised inputs.
 
-### 12.5 Migration attestation shape
+### 12.5 Verdict signature shape (post-audit-1)
+
+`CanonDisputeVerifier.finalizeUpheld` /
+`finalizeRejected` expect adjudicator signatures over the
+on-chain-derived verdict digest:
+
+  digest = `verdictDigest(disputeId, outcome)` =
+    keccak256(0x1901 ‖ domainSeparator ‖ structHash) where
+    domainSeparator = keccak256(EIP712Domain(
+        "CanonDisputeVerifier", "1", chainId, 0,
+        canonDisputeVerifierAddress
+    ))
+    structHash = keccak256(Verdict(
+        disputeId,            // uint64 → uint256
+        outcome,              // uint8  → uint256
+        deploymentId          // bytes32 verbatim
+    ))
+
+The `verdictDigest(uint64, uint8)` view is exposed publicly so
+off-chain tooling can reproduce the digest before signing.
+
+The previous design accepted a `bytes32 verdictHash`
+parameter from the caller and trusted it; this allowed
+adjudicator signatures to be replayed across disputes (sign
+once, replay for ANY dispute).  The audit-1 fix removes the
+parameter and derives the digest from `(disputeId, outcome,
+deploymentId)`.
+
+### 12.6 signatureInvalid claim signature shape
+
+`CanonDisputeVerifier.checkSignatureInvalid(logEntryBlob,
+signerHint)` reconstructs the digest the user signed when
+producing the impugned `LogEntry`:
+
+  domainSeparator = keccak256(EIP712Domain(
+      "CanonAction", "1", chainId, 0,
+      bridgeAddress
+  ))
+  structHash = `actionStructHash(actionHash, signer, nonce,
+      bridge.deploymentId())`
+  digest = keccak256(0x1901 ‖ domainSeparator ‖ structHash)
+
+The `signerHint` argument is the L1 address corresponding
+to the LogEntry's `uint64 signer` actor-id.  The runtime
+adaptor's L1 ingestor (workstream B.2) provides the
+resolution; the on-chain `CanonIdentityRegistry` keys
+records by address, so the dispute filer must supply the
+mapping.
+
+### 12.7 Migration attestation shape
 
 The `CanonMigration` constructor's
 `_attestorSig` argument is a 65-byte ECDSA signature over the
@@ -718,7 +775,7 @@ The attestor signs the digest off-chain; the Solidity
 constructor recovers the signer via OpenZeppelin's `ECDSA.recover`
 (low-s canonicalisation enforced by OZ).
 
-### 12.6 EIP-712 sign-input shape (state root attestations)
+### 12.8 EIP-712 sign-input shape (state root attestations)
 
 `CanonBridge.submitStateRoot(bytes32 root, uint64 logIndexHigh,
 bytes attestorSig)` expects a 65-byte ECDSA signature over:
@@ -735,7 +792,7 @@ bytes attestorSig)` expects a 65-byte ECDSA signature over:
 
 This shape is the on-chain mirror of Lean's `signedActionDomain`.
 
-### 12.7 Deployment-time contract addresses
+### 12.9 Deployment-time contract addresses
 
 Per workstream E (and the integration plan §9), production
 deployments use `CREATE3` with deterministic salts so the bridge

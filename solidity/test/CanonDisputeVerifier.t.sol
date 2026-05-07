@@ -37,7 +37,8 @@ contract CanonDisputeVerifierTest is Test {
         uint64 indexed disputeId,
         address indexed challenger,
         uint64 impugnedLogIndex,
-        uint8 claimVariant
+        uint8 claimVariant,
+        bytes evidenceBlob
     );
 
     function setUp() public {
@@ -140,7 +141,7 @@ contract CanonDisputeVerifierTest is Test {
         uint8 openStatus = verifier.STATUS_OPEN();
 
         vm.expectEmit(true, true, false, true);
-        emit DisputeFiled(0, challenger, uint64(7), doubleApplyVariant);
+        emit DisputeFiled(0, challenger, uint64(7), doubleApplyVariant, ev);
         vm.prank(challenger);
         uint64 id = verifier.fileDispute(uint64(7), doubleApplyVariant, ev);
         assertEq(id, 0);
@@ -339,5 +340,187 @@ contract CanonDisputeVerifierTest is Test {
             _cborUint(nonce),
             _cborBytesEncoding(sig)
         );
+    }
+
+    /// @notice Build a CBE-encoded LogEntry with a known
+    ///         actionHash (instead of the default fingerprint).
+    ///         Used by signatureInvalid tests where the signer
+    ///         signs a *specific* actionHash.
+    function _logEntryBlobWithActionHash(
+        uint64 signer,
+        uint64 nonce,
+        bytes32 actionHash,
+        bytes memory sig
+    ) internal pure returns (bytes memory) {
+        return bytes.concat(
+            _cborBytes32(bytes32(0)),
+            _cborBytes32(actionHash),
+            _cborUint(signer),
+            _cborUint(nonce),
+            _cborBytesEncoding(sig)
+        );
+    }
+
+    // ==================================================================
+    // Audit fix tests — added in the post-PR security audit.
+    // ==================================================================
+
+    // ---- FIX 1+2: checkSignatureInvalid signer-id resolution + domain ----
+
+    function test_audit_checkSignatureInvalid_inconclusive_on_zero_address() public view {
+        bytes memory blob = _logEntryBlob(uint64(1), uint64(0), hex"00");
+        uint8 v = verifier.checkSignatureInvalid(blob, address(0));
+        assertEq(v, verifier.VERDICT_INCONCLUSIVE());
+    }
+
+    function test_audit_checkSignatureInvalid_inconclusive_on_unregistered_address()
+        public
+    {
+        bytes memory blob = _logEntryBlob(uint64(1), uint64(0), hex"00");
+        // Use a fresh, never-registered address.
+        address unreg = makeAddr("never-registered");
+        uint8 v = verifier.checkSignatureInvalid(blob, unreg);
+        assertEq(v, verifier.VERDICT_INCONCLUSIVE());
+    }
+
+    function test_audit_checkSignatureInvalid_upheld_on_invalid_signature_length()
+        public
+    {
+        // Register the well-known user (privkey = 1, secp256k1 G).
+        uint256 userPk = 1;
+        address userAddr = vm.addr(userPk);
+        bytes memory userPubkey = _vmAddrPubkey(userPk);
+        vm.prank(userAddr);
+        registry.registerECDSA(userPubkey);
+
+        // Build a blob whose `sig` is too short (not 65 bytes).
+        bytes memory blob = _logEntryBlob(uint64(1), uint64(0), hex"deadbeef");
+        uint8 v = verifier.checkSignatureInvalid(blob, userAddr);
+        // Length != 65 → upheld (signature is invalid).
+        assertEq(v, verifier.VERDICT_UPHELD());
+    }
+
+    // ---- FIX 3: verdictDigest binding ----
+
+    function test_audit_verdictDigest_distinguishes_disputeId() public view {
+        bytes32 d1 = verifier.verdictDigest(uint64(1), verifier.VERDICT_UPHELD());
+        bytes32 d2 = verifier.verdictDigest(uint64(2), verifier.VERDICT_UPHELD());
+        assertTrue(d1 != d2, "verdict digests must differ across disputeIds");
+    }
+
+    function test_audit_verdictDigest_distinguishes_outcome() public view {
+        bytes32 dUpheld =
+            verifier.verdictDigest(uint64(1), verifier.VERDICT_UPHELD());
+        bytes32 dRejected =
+            verifier.verdictDigest(uint64(1), verifier.VERDICT_REJECTED());
+        assertTrue(dUpheld != dRejected, "verdict digests must differ across outcomes");
+    }
+
+    function test_audit_verdictDigest_deterministic() public view {
+        bytes32 d1 = verifier.verdictDigest(uint64(1), verifier.VERDICT_UPHELD());
+        bytes32 d2 = verifier.verdictDigest(uint64(1), verifier.VERDICT_UPHELD());
+        assertEq(d1, d2);
+    }
+
+    // ---- FIX 5: signers length bound ----
+
+    function test_audit_finalize_reverts_on_too_many_signers() public {
+        // Cache constants before setting up state.
+        uint8 doubleApply = verifier.CLAIM_DOUBLE_APPLY();
+        uint256 maxSigners = verifier.MAX_VERDICT_SIGNERS();
+
+        vm.prank(challenger);
+        verifier.fileDispute(uint64(7), doubleApply, hex"00");
+
+        // Build an oversized signers array.
+        uint256 oversize = maxSigners + 1;
+        address[] memory bigSigners = new address[](oversize);
+        bytes[] memory bigSigs = new bytes[](oversize);
+        for (uint256 i = 0; i < oversize; ++i) {
+            bigSigners[i] = adjudicator1;
+            bigSigs[i] = new bytes(65);
+        }
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CanonDisputeVerifier.TooManySigners.selector, oversize, maxSigners
+            )
+        );
+        verifier.finalizeUpheld(uint64(0), hex"", address(0), bigSigners, bigSigs);
+    }
+
+    // ---- FIX 6: evidenceBlob bound ----
+
+    function test_audit_fileDispute_reverts_on_oversized_evidence() public {
+        // Cache constants BEFORE setting up the expectRevert.
+        // `vm.expectRevert` only matches the next external call;
+        // a getter call consumed in argument evaluation would
+        // mistakenly match.
+        uint256 maxBytes = verifier.MAX_EVIDENCE_BLOB_BYTES();
+        uint8 doubleApply = verifier.CLAIM_DOUBLE_APPLY();
+        bytes memory tooBig = new bytes(maxBytes + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CanonDisputeVerifier.EvidenceBlobTooLarge.selector,
+                maxBytes + 1,
+                maxBytes
+            )
+        );
+        verifier.fileDispute(uint64(0), doubleApply, tooBig);
+    }
+
+    function test_audit_fileDispute_accepts_evidence_at_max() public {
+        uint256 maxBytes = verifier.MAX_EVIDENCE_BLOB_BYTES();
+        uint8 doubleApply = verifier.CLAIM_DOUBLE_APPLY();
+        bytes memory atMax = new bytes(maxBytes);
+        vm.prank(challenger);
+        uint64 id = verifier.fileDispute(uint64(0), doubleApply, atMax);
+        assertEq(id, 0);
+    }
+
+    // ---- FIX 6b: evidenceBlob is NOT stored on-chain (only emitted) ----
+
+    function test_audit_evidenceBlob_not_stored_in_state() public {
+        // Cache the constant BEFORE the prank so the prank applies
+        // to fileDispute (not to the getter call).
+        uint8 doubleApply = verifier.CLAIM_DOUBLE_APPLY();
+        // Filing with a 50KB blob.
+        bytes memory big = new bytes(50_000);
+        vm.prank(challenger);
+        uint64 id = verifier.fileDispute(uint64(7), doubleApply, big);
+        // The DisputeRecord struct in storage no longer contains
+        // evidenceBlob.  Verify by checking that disputeAt's
+        // returned tuple doesn't expose the blob (the absence
+        // would be a compile error if the field still existed).
+        (uint64 idx, address chal, uint8 cv, uint8 status, uint64 fab) =
+            verifier.disputeAt(id);
+        // Sanity:
+        assertEq(idx, 7);
+        assertEq(chal, challenger);
+        assertEq(cv, doubleApply);
+        assertEq(status, verifier.STATUS_OPEN());
+        assertEq(fab, uint64(block.number));
+    }
+
+    // ---- Helpers ----
+
+    /// @notice Reconstruct an ECDSA secp256k1 uncompressed pubkey
+    ///         from a private key, for registry registration in
+    ///         tests.  Hard-coded for the well-known privkey = 1
+    ///         (the secp256k1 generator); callers using other PKs
+    ///         must hard-code their pubkey.
+    function _vmAddrPubkey(uint256 pk) internal pure returns (bytes memory) {
+        // For privkey = 1 the pubkey is the secp256k1 generator.
+        // For other privkeys we'd need a per-pk lookup table.
+        if (pk == 1) {
+            return
+                hex"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                hex"483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
+        }
+        // Default: dummy 64-byte pubkey (will fail address-derivation
+        // check); used by tests that don't care about the registry
+        // entry beyond its existence.
+        bytes memory dummy = new bytes(64);
+        return dummy;
     }
 }

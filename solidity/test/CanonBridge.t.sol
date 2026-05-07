@@ -54,7 +54,9 @@ contract CanonBridgeTest is Test {
         address indexed signer,
         uint64 submittedAtBlock
     );
-    event StateRootReverted_(uint64 indexed disputedLogIndexHigh, bytes32 indexed revertedRoot);
+    /// @dev Local copy of the new event signature (renamed from
+    ///      `StateRootReverted_` for the audit-1 cleanup).
+    event StateRootRangeReverted(uint64 indexed disputedLogIndexHigh, uint64 newRevertedFloor);
 
     function setUp() public {
         attestor = vm.addr(ATTESTOR_PK);
@@ -419,5 +421,107 @@ contract CanonBridgeTest is Test {
         bytes32 digest = _stateRootDigest(root, idx);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ATTESTOR_PK, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    // ==================================================================
+    // Audit fix tests — added in the post-PR security audit.
+    // ==================================================================
+
+    // ---- FIX 4: revertToPriorRoot is now O(1) (lowestRevertedLogIndexHigh floor) ----
+
+    function test_audit_revertToPriorRoot_initial_floor_is_max() public view {
+        assertEq(bridge.lowestRevertedLogIndexHigh(), type(uint64).max);
+    }
+
+    function test_audit_revertToPriorRoot_lowers_floor() public {
+        bridge.submitStateRoot(keccak256("r1"), 1, _signStateRoot(keccak256("r1"), 1));
+        bridge.submitStateRoot(keccak256("r2"), 2, _signStateRoot(keccak256("r2"), 2));
+
+        vm.expectEmit(true, false, false, true);
+        emit StateRootRangeReverted(uint64(2), uint64(2));
+        vm.prank(address(verifier));
+        bridge.revertToPriorRoot(2);
+
+        assertEq(bridge.lowestRevertedLogIndexHigh(), uint64(2));
+        assertFalse(bridge.isStateRootReverted(uint64(1)));
+        assertTrue(bridge.isStateRootReverted(uint64(2)));
+        assertTrue(bridge.isStateRootReverted(uint64(3)));
+        assertTrue(bridge.isStateRootReverted(type(uint64).max));
+    }
+
+    function test_audit_revertToPriorRoot_idempotent_at_same_floor() public {
+        bridge.submitStateRoot(keccak256("r1"), 1, _signStateRoot(keccak256("r1"), 1));
+        vm.startPrank(address(verifier));
+        bridge.revertToPriorRoot(1);
+        bridge.revertToPriorRoot(1);
+        bridge.revertToPriorRoot(1);
+        vm.stopPrank();
+        // Floor unchanged after repeated calls at same value.
+        assertEq(bridge.lowestRevertedLogIndexHigh(), uint64(1));
+    }
+
+    function test_audit_revertToPriorRoot_floor_only_decreases() public {
+        bridge.submitStateRoot(keccak256("r1"), 1, _signStateRoot(keccak256("r1"), 1));
+        bridge.submitStateRoot(keccak256("r2"), 2, _signStateRoot(keccak256("r2"), 2));
+        bridge.submitStateRoot(keccak256("r3"), 3, _signStateRoot(keccak256("r3"), 3));
+
+        vm.startPrank(address(verifier));
+        // First revert at idx 3 → floor = 3.
+        bridge.revertToPriorRoot(3);
+        assertEq(bridge.lowestRevertedLogIndexHigh(), uint64(3));
+        // Second revert at idx 1 → floor lowers to 1 (broader range).
+        bridge.revertToPriorRoot(1);
+        assertEq(bridge.lowestRevertedLogIndexHigh(), uint64(1));
+        // Third revert at idx 5 → floor stays at 1 (cannot raise).
+        bridge.revertToPriorRoot(5);
+        assertEq(bridge.lowestRevertedLogIndexHigh(), uint64(1));
+        vm.stopPrank();
+    }
+
+    function test_audit_revertToPriorRoot_O1_with_huge_gap() public {
+        // Submit a small number of state roots but with a HUGE gap
+        // in indices.  The new O(1) implementation handles this in
+        // constant gas; the old O(N) loop would have OOG'd.
+        bridge.submitStateRoot(keccak256("r1"), 1, _signStateRoot(keccak256("r1"), 1));
+        bridge.submitStateRoot(
+            keccak256("r2"),
+            uint64(1_000_000_000),
+            _signStateRoot(keccak256("r2"), uint64(1_000_000_000))
+        );
+
+        // Revert at index 1 — must complete without OOG.
+        uint256 gasStart = gasleft();
+        vm.prank(address(verifier));
+        bridge.revertToPriorRoot(1);
+        uint256 gasUsed = gasStart - gasleft();
+        // Sanity: gas usage is bounded (under 100k).  The old O(N)
+        // loop would have used billions for the same call.
+        assertLt(gasUsed, 100_000);
+
+        // Both indices are now reverted.
+        assertTrue(bridge.isStateRootReverted(uint64(1)));
+        assertTrue(bridge.isStateRootReverted(uint64(1_000_000_000)));
+    }
+
+    function test_audit_revertToPriorRoot_blocks_withdrawal_for_reverted_indices() public {
+        bridge.submitStateRoot(keccak256("r1"), 1, _signStateRoot(keccak256("r1"), 1));
+        // Wait past finalisation.
+        vm.roll(block.number + DISPUTE_WINDOW);
+        assertTrue(bridge.isStateRootFinalised(1));
+
+        // Revert it.
+        vm.prank(address(verifier));
+        bridge.revertToPriorRoot(1);
+
+        // isStateRootFinalised now returns false.
+        assertFalse(bridge.isStateRootFinalised(1));
+    }
+
+    // ---- FIX 7: BridgeAccountingMismatch (renamed from misleading earlier error) ----
+
+    function test_audit_BridgeAccountingMismatch_is_distinct_error_selector() public pure {
+        bytes4 sel1 = CanonBridge.BridgeAccountingMismatch.selector;
+        bytes4 sel2 = CanonBridge.InvariantViolation_DisputeWindowVsRedemption.selector;
+        assertTrue(sel1 != sel2, "two errors must have distinct selectors");
     }
 }

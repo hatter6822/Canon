@@ -69,8 +69,45 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
     mapping(address => bool) private _approvedAdjudicator;
     bytes32 public immutable approvedAdjudicatorRoot;
 
-    string public constant DOMAIN_NAME = "CanonDisputeVerifier";
-    string public constant DOMAIN_VERSION = "1";
+    /// @notice The EIP-712 domain name used for **per-action signing**
+    ///         by users.  This MUST match the domain used at the
+    ///         time the user signed the action (off-chain), so the
+    ///         dispute verifier can reproduce the digest the
+    ///         signature was made against.
+    ///
+    ///         Per the integration plan §5.3 / §9.2.2, the canonical
+    ///         per-action signing domain is `("CanonAction", "1")`
+    ///         with `verifyingContract = bridge`.  This constant is
+    ///         frozen for the dispute verifier's lifetime; rotating
+    ///         it requires a new dispute-verifier deployment plus a
+    ///         `CanonMigration` handoff.
+    string public constant ACTION_DOMAIN_NAME = "CanonAction";
+    string public constant ACTION_DOMAIN_VERSION = "1";
+
+    /// @notice The EIP-712 domain used for **verdict signing** by
+    ///         adjudicators.  Different from the action domain so a
+    ///         per-action signature cannot be replayed as a verdict
+    ///         signature (cross-protocol replay protection mirroring
+    ///         Lean's `verdictDomain` / `signedActionDomain` split).
+    string public constant VERDICT_DOMAIN_NAME = "CanonDisputeVerifier";
+    string public constant VERDICT_DOMAIN_VERSION = "1";
+
+    /// @notice Hard upper bound on the verdict signers array length.
+    ///         Prevents memory-allocation DoS in
+    ///         `_countVerifiedSignatures`.  64 is comfortably above
+    ///         realistic quorum sizes (typical 3..7) yet bounds the
+    ///         worst-case gas usage at ≈ 64 × 64 × 5k = 20M gas
+    ///         (still within block-gas budget).
+    uint256 public constant MAX_VERDICT_SIGNERS = 64;
+
+    /// @notice Hard upper bound on the per-dispute evidence blob
+    ///         emitted in the `DisputeFiled` event.  Bounds gas
+    ///         cost of filing; values larger than this cap should
+    ///         use the `nonceMismatch`-style log-prefix bound
+    ///         (`MAX_PREFIX_LEN`) at finalisation time, not the
+    ///         file-time blob.  100 KB is enough for a 256-entry
+    ///         log prefix at ≈ 400 bytes per entry.
+    uint256 public constant MAX_EVIDENCE_BLOB_BYTES = 100_000;
 
     /// @notice One-shot bound on `nonceMismatch` log prefix length
     ///         (the MVP fraud-proof bound; bisection is post-MVP).
@@ -107,11 +144,17 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
     // Storage
     // ------------------------------------------------------------------
 
+    /// @dev `evidenceBlob` is **emitted in the `DisputeFiled` event,
+    ///      not stored** in the record.  It is purely informational
+    ///      (off-chain inspection / auditor); finalisation re-runs
+    ///      the per-claim verifier on a freshly-supplied
+    ///      `reEvidenceBlob` so the file-time blob is never read
+    ///      on-chain.  Skipping the storage write saves ~640k gas
+    ///      per typical large filing.
     struct DisputeRecord {
         uint64 impugnedLogIndex;
         address challenger;
         uint8 claimVariant;
-        bytes evidenceBlob;
         uint8 status; // STATUS_*
         uint64 filedAtBlock;
     }
@@ -127,7 +170,8 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
         uint64 indexed disputeId,
         address indexed challenger,
         uint64 impugnedLogIndex,
-        uint8 claimVariant
+        uint8 claimVariant,
+        bytes evidenceBlob
     );
 
     event DisputeUpheld(uint64 indexed disputeId, uint64 impugnedLogIndex);
@@ -200,6 +244,11 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
     ///         dispute pipeline must remain available for as long
     ///         as the predecessor accepts state roots.  Anyone may
     ///         file (the challenger pays the gas).
+    /// @notice Reverts when `evidenceBlob.length` exceeds the
+    ///         per-dispute upper bound.  Prevents storage / event
+    ///         griefing.
+    error EvidenceBlobTooLarge(uint256 actual, uint256 maxBytes);
+
     function fileDispute(
         uint64 impugnedLogIndex,
         uint8 claimVariant,
@@ -210,18 +259,23 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
         {
             revert InvalidClaimVariant();
         }
+        if (evidenceBlob.length > MAX_EVIDENCE_BLOB_BYTES) {
+            revert EvidenceBlobTooLarge(evidenceBlob.length, MAX_EVIDENCE_BLOB_BYTES);
+        }
 
         disputeId = nextDisputeId++;
         _disputes[disputeId] = DisputeRecord({
             impugnedLogIndex: impugnedLogIndex,
             challenger: msg.sender,
             claimVariant: claimVariant,
-            evidenceBlob: evidenceBlob,
             status: STATUS_OPEN,
             filedAtBlock: uint64(block.number)
         });
 
-        emit DisputeFiled(disputeId, msg.sender, impugnedLogIndex, claimVariant);
+        // Emit `evidenceBlob` in the event for off-chain inspection;
+        // we deliberately do NOT store it on-chain (the file-time
+        // blob is unused by finalisation).
+        emit DisputeFiled(disputeId, msg.sender, impugnedLogIndex, claimVariant, evidenceBlob);
     }
 
     // ------------------------------------------------------------------
@@ -230,17 +284,40 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
 
     /// @notice The Solidity port of
     ///         `LegalKernel.Disputes.Evidence.checkSignatureInvalid`.
-    ///         Decodes a `LogEntry` blob into `(action, signer,
-    ///         nonce, sig)`, looks up the signer's currently-
-    ///         registered ECDSA pubkey in the `CanonIdentityRegistry`,
-    ///         re-runs ECDSA recovery on the action's EIP-712
-    ///         hash, and returns the verdict.
-    /// @return verdict 0 = upheld, 1 = rejected, 2 = inconclusive.
-    function checkSignatureInvalid(bytes calldata logEntryBlob)
-        external
-        view
-        returns (uint8 verdict)
-    {
+    ///         Decodes a `LogEntry` blob into `(actionHash, signer,
+    ///         nonce, sig)`, recomputes the EIP-712 digest the
+    ///         user signed, recovers the signing address, and
+    ///         compares it against the on-chain registered address
+    ///         for `expectedSignerAddr` looked up in the
+    ///         `CanonIdentityRegistry`.
+    ///
+    /// @dev    The dispute filer MUST supply
+    ///         `expectedSignerAddr` — the L1 address corresponding
+    ///         to the LogEntry's `uint64 signer` actor-id.  This
+    ///         resolution lives in the runtime adaptor (workstream
+    ///         B's L1 ingestor), not on-chain in the MVP.  An
+    ///         incorrect `expectedSignerAddr` causes the verifier
+    ///         to return `UPHELD` (the supplied address won't
+    ///         match the recovered signer), which is the correct
+    ///         behaviour for the dispute claim "the signature is
+    ///         invalid for this signer-id".
+    ///
+    ///         The previous design self-derived the address from
+    ///         `signer` via `address(uint160(signer))` — a stub that
+    ///         silently broke `checkSignatureInvalid` because the
+    ///         synthesized address was never the user's actual
+    ///         registered address.  The current API closes that gap.
+    ///
+    /// @param logEntryBlob       CBE-encoded LogEntry
+    ///                           (prevHash, actionHash, signer, nonce, sig).
+    /// @param expectedSignerAddr the L1 address the dispute filer
+    ///                           claims corresponds to `signer`.  The
+    ///                           registry lookup keys off this.
+    /// @return verdict           0 = upheld, 1 = rejected, 2 = inconclusive.
+    function checkSignatureInvalid(
+        bytes calldata logEntryBlob,
+        address expectedSignerAddr
+    ) external view returns (uint8 verdict) {
         // The logEntryBlob's CBE shape mirrors Lean's
         // `Runtime.LogFile.LogEntry` encoding:
         //   prevHash :  bytes32 (32 bytes payload)
@@ -269,37 +346,69 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
         bytes32 bridgeDid = ICanonBridge(bridge).deploymentId();
 
         // Re-construct the EIP-712 digest the signer must have
-        // signed for this entry to be valid.
+        // signed for this entry to be valid.  Uses the canonical
+        // per-action signing domain (`ACTION_DOMAIN_NAME`), NOT the
+        // verdict domain — the user signed against the action
+        // domain at submission time.
         bytes32 ds = CanonEip712.domainSeparator(
-            DOMAIN_NAME, DOMAIN_VERSION, block.chainid, uint256(0), bridge
+            ACTION_DOMAIN_NAME, ACTION_DOMAIN_VERSION, block.chainid, uint256(0), bridge
         );
         bytes32 sh =
             CanonEip712.actionStructHash(actionHash, signer, nonce, bridgeDid);
         bytes32 digest = CanonEip712.digest(ds, sh);
 
-        // Look up the signer's registered pubkey.  If unregistered,
-        // we cannot verify and return INCONCLUSIVE.
-        address signerAddr = _signerToAddress(signer);
-        if (signerAddr == address(0)) return VERDICT_INCONCLUSIVE;
+        // Defensive: if the supplied expected address is zero, we
+        // can't verify and return INCONCLUSIVE.  A zero address
+        // would never produce a valid ECDSA signature.
+        if (expectedSignerAddr == address(0)) return VERDICT_INCONCLUSIVE;
+
+        // Look up the supplied address in the identity registry.
+        // If unregistered or wrong kind, return INCONCLUSIVE — the
+        // dispute filer either provided the wrong address or the
+        // signer hasn't registered yet.
         ICanonIdentityRegistry.IdentityRecord memory rec =
-            ICanonIdentityRegistry(identityRegistry).lookup(signerAddr);
+            ICanonIdentityRegistry(identityRegistry).lookup(expectedSignerAddr);
         if (rec.kind != ICanonIdentityRegistry.SignerKind.ECDSA_EOA) {
             return VERDICT_INCONCLUSIVE;
         }
 
+        // Sanity: the registered pubkey must hash to the supplied
+        // address (front-running protection from
+        // `CanonIdentityRegistry.registerECDSA`).  This is
+        // already guaranteed by the registry's invariants but the
+        // explicit check is defence in depth.
+        address derivedFromPubkey = address(uint160(uint256(keccak256(rec.pubkey))));
+        if (derivedFromPubkey != expectedSignerAddr) return VERDICT_INCONCLUSIVE;
+
         // Recover the signer from the signature.  Length / s-value
         // are checked by OZ ECDSA; an invalid signature produces
-        // `address(0)`.
+        // a different recovered address.  The OZ `recover` reverts
+        // on malformed signatures (high-s, length != 65, etc.).
         if (sig.length != 65) return VERDICT_UPHELD;
-        address recovered = ECDSA.recover(digest, sig);
+        address recovered;
+        try this.tryRecover(digest, sig) returns (address rec_) {
+            recovered = rec_;
+        } catch {
+            // OZ ECDSA reverts on malformed signature — claim is
+            // upheld (signature was indeed invalid).
+            return VERDICT_UPHELD;
+        }
         if (recovered == address(0)) return VERDICT_UPHELD;
-
-        // The recovered address must match the signer's registered
-        // address.  Signer-id → address is derived via the
-        // pubkey hash kept in the registry.
-        address derivedFromPubkey = address(uint160(uint256(keccak256(rec.pubkey))));
-        if (recovered == derivedFromPubkey) return VERDICT_REJECTED;
+        if (recovered == expectedSignerAddr) return VERDICT_REJECTED;
         return VERDICT_UPHELD;
+    }
+
+    /// @notice External wrapper for `ECDSA.recover` so we can use
+    ///         try/catch for malformed signatures (`recover` reverts
+    ///         on high-s sigs etc.).  The MVP-friendly behaviour
+    ///         maps a revert to `UPHELD` (the signature is indeed
+    ///         invalid).  Public so test fixtures can call it.
+    function tryRecover(bytes32 digest, bytes memory sig)
+        external
+        pure
+        returns (address)
+    {
+        return ECDSA.recover(digest, sig);
     }
 
     // ------------------------------------------------------------------
@@ -417,27 +526,77 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
     // E.2.5 Verdict finalisation
     // ------------------------------------------------------------------
 
+    /// @notice Reverts if the supplied signers array is too long.
+    error TooManySigners(uint256 supplied, uint256 maxAllowed);
+
+    /// @notice Reverts if the supplied evidence references the
+    ///         wrong signer-id resolution (used by `signatureInvalid`
+    ///         only).
+    error MissingSignerHint();
+
+    /// @notice Computes the canonical EIP-712 verdict digest that
+    ///         adjudicators sign.  Binds `(disputeId, outcome,
+    ///         deploymentId)` so a signature for one verdict cannot
+    ///         be replayed as a signature for a different one.  The
+    ///         dispute filer / finaliser never supplies the digest;
+    ///         the contract derives it on-chain.
+    function verdictDigest(uint64 disputeId, uint8 outcome)
+        public
+        view
+        returns (bytes32)
+    {
+        bytes32 ds = CanonEip712.domainSeparator(
+            VERDICT_DOMAIN_NAME, VERDICT_DOMAIN_VERSION,
+            block.chainid, uint256(0), address(this)
+        );
+        bytes32 sh = keccak256(
+            abi.encode(
+                keccak256(
+                    "Verdict(uint64 disputeId,uint8 outcome,bytes32 deploymentId)"
+                ),
+                uint256(disputeId),
+                uint256(outcome),
+                deploymentId
+            )
+        );
+        return CanonEip712.digest(ds, sh);
+    }
+
+    /// @notice For `signatureInvalid` claims, the dispute finaliser
+    ///         must supply `signerHint` — the L1 address
+    ///         corresponding to the LogEntry's `uint64 signer`
+    ///         actor-id.  For other claim variants this argument is
+    ///         ignored.  See `checkSignatureInvalid` docstring for
+    ///         rationale.
     function finalizeUpheld(
         uint64 disputeId,
-        bytes32 verdictHash,
         bytes calldata reEvidenceBlob,
+        address signerHint,
         address[] calldata signers,
         bytes[] calldata sigs
     ) external {
         DisputeRecord storage d = _disputes[disputeId];
         if (d.challenger == address(0)) revert UnknownDispute();
         if (d.status != STATUS_OPEN) revert AlreadyDecided();
+        if (signers.length > MAX_VERDICT_SIGNERS) {
+            revert TooManySigners(signers.length, MAX_VERDICT_SIGNERS);
+        }
+
+        // Compute the canonical verdict digest the adjudicators
+        // must have signed.  Binds (disputeId, outcome=UPHELD,
+        // deploymentId) — replay-resistant across disputes.
+        bytes32 digest = verdictDigest(disputeId, VERDICT_UPHELD);
 
         // Quorum check with deduplication: each distinct approved
         // signer with a valid signature contributes at most 1.
-        uint256 verified = _countVerifiedSignatures(verdictHash, signers, sigs);
+        uint256 verified = _countVerifiedSignatures(digest, signers, sigs);
         if (verified < quorumThreshold) revert QuorumNotMet(verified, quorumThreshold);
 
         // Re-run the per-claim verifier at finalisation time.
         // The contract does not trust the file-time evidence; the
         // verifier must re-confirm UPHELD against the *current*
         // log prefix.
-        uint8 verdict = _runClaimVerifier(d, reEvidenceBlob);
+        uint8 verdict = _runClaimVerifier(d, reEvidenceBlob, signerHint);
         if (verdict != VERDICT_UPHELD) revert EvidenceNotUpheld();
 
         // ---- Effects ----
@@ -457,19 +616,24 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
     ///         that the evidence does not support.
     function finalizeRejected(
         uint64 disputeId,
-        bytes32 verdictHash,
         bytes calldata reEvidenceBlob,
+        address signerHint,
         address[] calldata signers,
         bytes[] calldata sigs
     ) external {
         DisputeRecord storage d = _disputes[disputeId];
         if (d.challenger == address(0)) revert UnknownDispute();
         if (d.status != STATUS_OPEN) revert AlreadyDecided();
+        if (signers.length > MAX_VERDICT_SIGNERS) {
+            revert TooManySigners(signers.length, MAX_VERDICT_SIGNERS);
+        }
 
-        uint256 verified = _countVerifiedSignatures(verdictHash, signers, sigs);
+        bytes32 digest = verdictDigest(disputeId, VERDICT_REJECTED);
+
+        uint256 verified = _countVerifiedSignatures(digest, signers, sigs);
         if (verified < quorumThreshold) revert QuorumNotMet(verified, quorumThreshold);
 
-        uint8 verdict = _runClaimVerifier(d, reEvidenceBlob);
+        uint8 verdict = _runClaimVerifier(d, reEvidenceBlob, signerHint);
         if (verdict != VERDICT_REJECTED) revert EvidenceNotRejected();
 
         d.status = STATUS_REJECTED;
@@ -487,9 +651,12 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
         bytes[] calldata sigs
     ) internal view returns (uint256) {
         if (signers.length != sigs.length) return 0;
+        // Caller-side bound is enforced in finalize{Upheld,Rejected};
+        // this is a defence-in-depth re-check.
+        if (signers.length > MAX_VERDICT_SIGNERS) return 0;
 
-        // Quadratic dedup over signers — bounded by quorumThreshold
-        // in practice (≤ 7-of-N typical).
+        // Quadratic dedup over signers — bounded by
+        // MAX_VERDICT_SIGNERS = 64 in the worst case.
         address[] memory seen = new address[](signers.length);
         uint256 seenLen = 0;
 
@@ -513,13 +680,16 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
         return seenLen;
     }
 
-    function _runClaimVerifier(DisputeRecord storage d, bytes calldata reEvidenceBlob)
-        internal
-        view
-        returns (uint8)
-    {
+    function _runClaimVerifier(
+        DisputeRecord storage d,
+        bytes calldata reEvidenceBlob,
+        address signerHint
+    ) internal view returns (uint8) {
         if (d.claimVariant == CLAIM_SIGNATURE_INVALID) {
-            return this.checkSignatureInvalid(reEvidenceBlob);
+            // signatureInvalid REQUIRES a signerHint.  Without it
+            // the registry lookup can't proceed.
+            if (signerHint == address(0)) revert MissingSignerHint();
+            return this.checkSignatureInvalid(reEvidenceBlob, signerHint);
         } else if (d.claimVariant == CLAIM_NONCE_MISMATCH) {
             return this.checkNonceMismatch(d.impugnedLogIndex, reEvidenceBlob);
         } else if (d.claimVariant == CLAIM_DOUBLE_APPLY) {
@@ -571,21 +741,6 @@ contract CanonDisputeVerifier is ICanonDisputeVerifier {
 
         if (sigA == sigB && nonceA == nonceB) return VERDICT_UPHELD;
         return VERDICT_REJECTED;
-    }
-
-    /// @notice Stub helper: maps a 64-bit signer identifier to its
-    ///         canonical Ethereum address.  In the runtime adaptor
-    ///         this is a `(uint64 → address)` mapping computed from
-    ///         the L1 ingestor (workstream B.2) — for the MVP we
-    ///         interpret the signer as the low 64 bits of the
-    ///         address, which is sufficient for cross-stack
-    ///         fixtures.  Production deployments overlay a richer
-    ///         resolver via a separate (immutable) registry
-    ///         contract; that's out of scope for E.2 (it's part
-    ///         of B.2's runtime adaptor).
-    function _signerToAddress(uint64 signer) internal pure returns (address) {
-        if (signer == 0) return address(0);
-        return address(uint160(uint256(signer)));
     }
 
     // ------------------------------------------------------------------

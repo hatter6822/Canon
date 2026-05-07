@@ -1640,10 +1640,10 @@ byte decoder mirroring `LegalKernel.Encoding.cborHeadDecode`);
 `solidity/src/lib/CREATE3.sol` (proxy-factory deployment that
 breaks the bridge ↔ verifier ↔ stake reference cycle by deriving
 addresses from `(deployer, salt)` only).  Solidity test count:
-**139** forge tests across 8 suites (CBEDecode +23,
+**156** forge tests across 8 suites (CBEDecode +23,
 SmtVerifier +18, CREATE3 +3, CanonIdentityRegistry +19,
-CanonBridge +26, CanonSequencerStake +19, CanonDisputeVerifier
-+22, CanonMigration +9).  Build commands: `cd solidity &&
+CanonBridge +33, CanonSequencerStake +19, CanonDisputeVerifier
++32, CanonMigration +9; +17 added by Workstream-E audit-1).  Build commands: `cd solidity &&
 forge build` and `cd solidity && forge test`.  Toolchain pin:
 solc 0.8.20, Foundry v1.7.0 (forge / cast / anvil).  Vendored
 deps: OpenZeppelin v5.0.2, forge-std v1.9.4 (installable via
@@ -1668,6 +1668,97 @@ predicted address.  The `CanonMigration` test fixtures use
 direct `new ...(...)` deployment so constructor reverts
 propagate verbatim; production deployment scripts that need
 richer revert info must use a bespoke proxy.
+
+**Workstream-E audit-1 hardening (this branch).**  A deep
+post-landing audit identified eight defects across the five
+contracts; all are now closed.  Test count grew from 139 to
+**156** (+17 audit-fix tests across `disputes-verifier` and
+`bridge` suites).
+
+  * **Critical: `_signerToAddress` was a stub** that broke
+    `checkSignatureInvalid`.  The pre-audit code synthesized
+    an "address" from a uint64 signer-id by zero-padding,
+    which never matched any registered address — so the
+    verifier always returned `INCONCLUSIVE`.  Fix: removed
+    the stub; `checkSignatureInvalid` now takes an explicit
+    `address signerHint` parameter (the dispute filer
+    supplies the actor-id ↔ address resolution from the
+    runtime adaptor's L1 ingestor).  Added
+    `MissingSignerHint` revert for finalisation paths.
+  * **Critical: EIP-712 domain mismatch in
+    `checkSignatureInvalid`.** The pre-audit code used
+    `("CanonDisputeVerifier", "1")` as the domain when
+    recomputing the digest, but users sign actions against
+    `("CanonAction", "1")` per the integration plan.  Fix:
+    added `ACTION_DOMAIN_NAME = "CanonAction"` and
+    `VERDICT_DOMAIN_NAME = "CanonDisputeVerifier"` as
+    distinct constants, mirroring Lean's
+    `signedActionDomain` / `verdictDomain` split.
+  * **Critical: `verdictHash` was an unbound free
+    parameter** in `finalizeUpheld` / `finalizeRejected`.
+    Adjudicators signed an arbitrary `bytes32 verdictHash`;
+    a signature for verdict X could be replayed as a
+    verdict for dispute Y.  Fix: contract now derives the
+    canonical digest on-chain via `verdictDigest(disputeId,
+    outcome)` and adjudicators must sign that exact value.
+    `verdictDigest` binds `(disputeId, outcome,
+    deploymentId)` via EIP-712 wrap; replay across disputes
+    is structurally impossible.
+  * **High: `revertToPriorRoot` had an O(N) loop** over
+    state-root submissions.  A malicious sequencer with
+    millions of submitted roots could DoS the dispute
+    finalisation by exhausting the block gas budget.  Fix:
+    replaced with O(1) `lowestRevertedLogIndexHigh` floor
+    tracking; per-record `reverted` status is computed
+    on-the-fly via `_isReverted(idx) := idx >=
+    lowestRevertedLogIndexHigh`.  Added
+    `isStateRootReverted(idx)` view.  Renamed event from
+    `StateRootReverted_` (underscore due to error-name
+    collision) to `StateRootRangeReverted` carrying the new
+    floor.
+  * **High: `signers[]` array unbounded** in
+    `_countVerifiedSignatures`.  A malicious caller could
+    pass a 100k-element array, DoS-ing finalisation via
+    memory allocation.  Fix: added `MAX_VERDICT_SIGNERS =
+    64` constant; `finalizeUpheld` / `finalizeRejected`
+    revert with `TooManySigners` above the bound.
+  * **High: `evidenceBlob` unbounded** in `fileDispute`.  A
+    griefer could submit huge blobs to inflate gas costs.
+    Fix: added `MAX_EVIDENCE_BLOB_BYTES = 100_000`
+    constant; `fileDispute` reverts with
+    `EvidenceBlobTooLarge` above the bound.
+  * **Med: `evidenceBlob` stored in state but never read at
+    finalisation.** Finalisation uses a fresh
+    `reEvidenceBlob` calldata argument; the file-time blob
+    was wasted gas (~640k for a 50KB blob).  Fix: removed
+    `bytes evidenceBlob` from the `DisputeRecord` struct;
+    emit it in the `DisputeFiled` event instead (events
+    are ~60× cheaper than storage per byte).
+  * **Med: `InvariantViolation_DisputeWindowVsRedemption`
+    error reused** for a TVL-accounting underflow check.
+    Wrong / misleading error name made the failure mode
+    hard to diagnose.  Fix: added a separate
+    `BridgeAccountingMismatch(uint256 totalLockedValue,
+    uint256 amountRequested)` error for the underflow case;
+    the dispute-window-vs-redemption error is reserved for
+    the constructor-time invariant check.
+
+The audit also identified several **low-severity items
+investigated but not changed**: (i) `receive()` reverts on
+all bridge contracts, but ETH can still be selfdestructed
+into them — documented limitation that doesn't break
+correctness because the contracts use `totalLockedValue`
+rather than `address(this).balance` for accounting; (ii)
+the `hasOpenDisputeOlderThan` predicate is conservative
+(returns `true` if any state root is within the dispute
+window, regardless of actual open-dispute count) —
+documented; the dispute verifier can be extended to
+maintain a per-state-root open-dispute index in a
+follow-up; (iii) the `withdrawWithProof` recipient could
+revert on `receive()` causing self-DoS on their own
+withdrawal — accepted as a known property of
+`Address.sendValue` semantics; users avoid by using EOAs
+or known-good contract recipients.
 
 **Ethereum Workstream D (withdrawal proofs) summary.**  Workstream D
 adds the user-facing withdrawal redemption flow: a sparse Merkle
