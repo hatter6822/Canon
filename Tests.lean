@@ -59,6 +59,7 @@ import LegalKernel.Test.Authority.SignedActionHappyPath
 import LegalKernel.Test.MockCrypto
 import LegalKernel.Test.Property
 import LegalKernel.Test.Properties.Encoding
+import LegalKernel.Test.Properties.Bridge
 import LegalKernel.Test.Encoding.CBOR
 import LegalKernel.Test.Encoding.Encodable
 import LegalKernel.Test.Encoding.Action
@@ -167,6 +168,8 @@ def main : IO UInt32 := do
                                     Disputes.WitnessHelpers.tests)
   failed := failed + (← runAll "property-encoding"
                                     Properties.Encoding.tests)
+  failed := failed + (← runAll "property-bridge"
+                                    Properties.Bridge.tests)
   failed := failed + (← runAll "bridge-verify-adaptor"
                                     Bridge.VerifyAdaptorTests.tests)
   failed := failed + (← runAll "bridge-hash-adaptor"
