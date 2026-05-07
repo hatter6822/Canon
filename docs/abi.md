@@ -582,7 +582,265 @@ derived from the identifier (`true` iff the identifier ≠
 `canon-replay`) read it at startup to decide whether to emit
 the fallback warning or fail-fast.
 
-## 12. References
+## 12. Solidity-side ABI surface (Workstream E)
+
+Workstream E ships the L1 Solidity mirror of the kernel as five
+immutable contracts in `solidity/`.  Each contract's external
+ABI is its public Solidity interface (`solidity/src/interfaces/
+ICanon*.sol`); the integration plan §9 lists the per-contract
+critical correctness obligations.  This section documents the
+ABI invariants that downstream consumers (deployment scripts,
+indexers, off-chain watchers) can rely on.
+
+### 12.1 Cross-contract reference shape
+
+Every Canon Solidity contract exposes:
+
+  * `function deploymentId() external view returns (bytes32)` —
+    `keccak256(abi.encode(block.chainid, address(this),
+    canonVersionTag))`.  Computed in the constructor; immutable.
+    Mirror of the Lean §8.8.5 `deploymentId`.
+
+`CanonBridge`, `CanonDisputeVerifier`, `CanonSequencerStake`
+each additionally expose:
+
+  * `attestor() / disputeVerifier() / sequencerStake() /
+    bridge() / migration()` getters returning the immutable
+    addresses set in the constructor.  No setter exists.
+  * `assertConsistent() external view returns (bool)` — checks
+    the symmetric cross-contract reference (e.g.
+    verifier.bridge().disputeVerifier() == address(this)).  This
+    is the post-deploy auditor surface; it cannot revert.
+
+### 12.2 Custom-error catalogue
+
+Every revert path uses a typed custom error (no string
+reverts).  Selectors are stable across deployments because the
+error names are part of the contract's frozen surface:
+
+  * `CanonBridge`: `NotAttestor`, `NotDisputeVerifier`,
+    `AttestationStale`, `DisputeCooldown`, `TvlCapReached`,
+    `MigrationActivated`, `NonMonotonic`, `UnknownStateRoot`,
+    `StateRootReverted`, `PreFinalisation`, `AlreadyRedeemed`,
+    `InvalidProof`, `InvalidLeafSizeForResource`,
+    `UnsupportedResource`, `EthValueMismatch`,
+    `InvariantViolation_DisputeWindowVsRedemption`,
+    `BridgeAccountingMismatch(uint256 totalLockedValue, uint256 amountRequested)`
+    (added by audit-1; reserved specifically for the TVL
+    underflow check at withdrawal time, distinct from the
+    constructor-time invariant check),
+    `InvalidSignatureLength`,
+    `ZeroSequencerStake` (added by audit-2),
+    `DuplicateResourceToken(address token)` (added by audit-2),
+    `TransferAmountMismatch(uint256 declared, uint256 received)`
+    (added by audit-2; rejects fee-on-transfer / rebasing
+    ERC-20s),
+    `InvalidRecipient` (added by audit-3; rejects withdrawals
+    to address(0)).
+  * `CanonDisputeVerifier`: `NotApprovedAdjudicator`,
+    `UnknownDispute`, `AlreadyDecided`, `NotOpen`,
+    `QuorumNotMet`, `EvidenceNotUpheld`, `EvidenceNotRejected`,
+    `SelfClaimInvalid`, `InvalidClaimVariant`,
+    `MaxPrefixLenExceeded`, `PrefixSignerMissing`,
+    `InvalidSignatureLength`, `VerifierBridgeMismatch`,
+    `ZeroAddress`, `QuorumThresholdOutOfRange`, `VerdictReplay`,
+    `EvidenceBlobTooLarge(uint256 actual, uint256 maxBytes)`
+    (added by audit-1), `TooManySigners(uint256 supplied,
+    uint256 maxAllowed)` (added by audit-1),
+    `MissingSignerHint` (added by audit-1),
+    `DoubleApplyConcatBadCount(uint64 declared, uint64 expected)`
+    (added by audit-3; rejects malformed
+    `_runDoubleApplyFromConcat` blobs).
+  * `CanonIdentityRegistry`: `PubkeyAddressMismatch`,
+    `WrongPubkeyLength`, `NotEip1271Conforming`,
+    `AlreadyRegistered`, `NotRegistered`.
+  * `CanonSequencerStake`: `NotSequencer`,
+    `NotDisputeVerifier`, `InsufficientStake`,
+    `WithdrawDuringOpenDispute`, `AlreadySlashed`,
+    `SlashRatioOutOfRange`, `ZeroAddress`, `EthSendFailed`.
+  * `CanonMigration`: `ZeroAddress`, `SelfMigration`,
+    `GraceTooShort`, `SameDeploymentId`,
+    `PredecessorDoesNotReferenceThisMigration` (renamed from
+    `SuccessorDoesNotReferenceThisMigration` in audit-3 to
+    reflect the corrected semantics — the migration freezes the
+    PREDECESSOR's state-shaping calls, so the predecessor must
+    pre-commit to be retired by THIS migration via its own
+    `migration` immutable),
+    `AttestationInvalid`, `AlreadyActivated`, `GraceNotElapsed`,
+    `InvalidSignatureLength`.
+
+### 12.3 Frozen claim-variant indices (CanonDisputeVerifier)
+
+Per the integration plan §9.2.1 / §9.2.4, dispute claim variants
+have frozen `uint8` indices that mirror Lean's
+`Disputes.Types.DisputeClaim` constructor order.  Adding a
+new variant requires a new dispute-verifier deployment plus a
+`CanonMigration` handoff (no in-place extension path).
+
+  * `0` — `CLAIM_PRECONDITION_FALSE` (deferred to v2)
+  * `1` — `CLAIM_SIGNATURE_INVALID` (E.2.2; MVP)
+  * `2` — `CLAIM_NONCE_MISMATCH` (E.2.3; MVP)
+  * `3` — `CLAIM_ORACLE_MISREPORTED` (deferred to v2)
+  * `4` — `CLAIM_DOUBLE_APPLY` (E.2.4; MVP)
+
+Verdict outcomes (frozen):
+
+  * `0` — `VERDICT_UPHELD`
+  * `1` — `VERDICT_REJECTED`
+  * `2` — `VERDICT_INCONCLUSIVE`
+
+Dispute statuses (frozen):
+
+  * `0` — `STATUS_OPEN`
+  * `1` — `STATUS_UPHELD`
+  * `2` — `STATUS_REJECTED`
+  * `3` — `STATUS_INCONCLUSIVE`
+  * `4` — `STATUS_WITHDRAWN`
+
+### 12.4 Withdrawal proof on-chain shape
+
+The `CanonBridge.withdrawWithProof(uint64 atLogIndexHigh,
+bytes proofBlob, bytes leafBlob)` function expects:
+
+  * `leafBlob` — CBE-encoded `PendingWithdrawal`:
+      uint  resourceId    (CBE: 9 bytes)
+      bytes recipientL1   (CBE: 1 tag + 8 length + 20 payload = 29 bytes)
+      uint  amount        (9 bytes)
+      uint  l2LogIndex    (9 bytes)
+      → total: 56 bytes (audit-2 lossless 20-byte address encoding).
+  * `proofBlob` — CBE encoding of the `WithdrawalProof`
+    (post-audit-2; mirrors Lean's `WithdrawalProof` shape
+    with variable-size leaf and siblings):
+      bytes leaf          (CBE bytes; mirrors Lean's
+                            `WithdrawalProof.leaf : ByteArray` —
+                            ≈ 56 bytes for populated, 32 for
+                            sentinel; equals leafBlob byte-for-byte
+                            for canonical proofs)
+      uint  index         (9 bytes)
+      array siblings[64]  (CBE array head + 64 × CBE bytes; each
+                            sibling is variable-size — typically
+                            32 bytes for the 32-byte default-hash
+                            values, but can be ~56 bytes for the
+                            leaf-adjacent sibling in the
+                            dense-pair case).
+      → typical sparse total: ≈ 2700 bytes; dense-pair total:
+        ≈ 2725 bytes.
+
+The pre-audit-2 design used `bytes32 leafHash` and 64 fixed
+32-byte siblings; this was incompatible with Lean's
+variable-size `WithdrawalProof.leaf : ByteArray` and broke
+cross-stack equivalence in the dense-pair case.  The
+post-audit-2 design uses variable-size bytes throughout,
+matching Lean exactly.
+
+The Solidity-side `SmtVerifier.recomputeRoot(idx, leaf,
+siblings)` mirrors `LegalKernel.Bridge.WithdrawalRoot.verifyProofRec`
+line-for-line.  The cross-stack F.1.5 fixture (workstream F)
+asserts byte-equivalence across 64 randomised inputs.
+
+### 12.5 Verdict signature shape (post-audit-1)
+
+`CanonDisputeVerifier.finalizeUpheld` /
+`finalizeRejected` expect adjudicator signatures over the
+on-chain-derived verdict digest:
+
+  digest = `verdictDigest(disputeId, outcome)` =
+    keccak256(0x1901 ‖ domainSeparator ‖ structHash) where
+    domainSeparator = keccak256(EIP712Domain(
+        "CanonDisputeVerifier", "1", chainId, 0,
+        canonDisputeVerifierAddress
+    ))
+    structHash = keccak256(Verdict(
+        disputeId,            // uint64 → uint256
+        outcome,              // uint8  → uint256
+        deploymentId          // bytes32 verbatim
+    ))
+
+The `verdictDigest(uint64, uint8)` view is exposed publicly so
+off-chain tooling can reproduce the digest before signing.
+
+The previous design accepted a `bytes32 verdictHash`
+parameter from the caller and trusted it; this allowed
+adjudicator signatures to be replayed across disputes (sign
+once, replay for ANY dispute).  The audit-1 fix removes the
+parameter and derives the digest from `(disputeId, outcome,
+deploymentId)`.
+
+### 12.6 signatureInvalid claim signature shape
+
+`CanonDisputeVerifier.checkSignatureInvalid(logEntryBlob,
+signerHint)` reconstructs the digest the user signed when
+producing the impugned `LogEntry`:
+
+  domainSeparator = keccak256(EIP712Domain(
+      "CanonAction", "1", chainId, 0,
+      bridgeAddress
+  ))
+  structHash = `actionStructHash(actionHash, signer, nonce,
+      bridge.deploymentId())`
+  digest = keccak256(0x1901 ‖ domainSeparator ‖ structHash)
+
+The `signerHint` argument is the L1 address corresponding
+to the LogEntry's `uint64 signer` actor-id.  The runtime
+adaptor's L1 ingestor (workstream B.2) provides the
+resolution; the on-chain `CanonIdentityRegistry` keys
+records by address, so the dispute filer must supply the
+mapping.
+
+### 12.7 Migration attestation shape
+
+The `CanonMigration` constructor's
+`_attestorSig` argument is a 65-byte ECDSA signature over the
+EIP-712 wrap:
+
+  domainSeparator = keccak256(EIP712Domain(
+      "Canon", "1", chainId, 0, migrationContractAddress
+  ))
+  structHash = keccak256(CanonMigration(
+      predecessorDeploymentId,
+      successorDeploymentId,
+      migrationStateRoot,
+      migrationStateRootLogIdx,
+      graceWindowBlocks
+  ))
+  digest = keccak256(0x1901 ‖ domainSeparator ‖ structHash)
+
+The attestor signs the digest off-chain; the Solidity
+constructor recovers the signer via OpenZeppelin's `ECDSA.recover`
+(low-s canonicalisation enforced by OZ).
+
+### 12.8 EIP-712 sign-input shape (state root attestations)
+
+`CanonBridge.submitStateRoot(bytes32 root, uint64 logIndexHigh,
+bytes attestorSig)` expects a 65-byte ECDSA signature over:
+
+  domainSeparator = keccak256(EIP712Domain(
+      "CanonBridge", "1", chainId, 0, bridgeAddress
+  ))
+  structHash = keccak256(StateRoot(
+      root,
+      logIndexHigh,
+      deploymentId
+  ))
+  digest = keccak256(0x1901 ‖ domainSeparator ‖ structHash)
+
+This shape is the on-chain mirror of Lean's `signedActionDomain`.
+
+### 12.9 Deployment-time contract addresses
+
+Per workstream E (and the integration plan §9), production
+deployments use `CREATE3` with deterministic salts so the bridge
+↔ verifier ↔ stake reference cycle can be resolved before
+deployment (each contract's predicted address depends only on
+`(deployer, salt)`, independent of init-code).  The
+`solidity/test/utils/Deployer.sol` reference implementation uses
+salts `keccak256("canon-bridge-salt")`,
+`keccak256("canon-dispute-verifier-salt")`, and
+`keccak256("canon-sequencer-stake-salt")`.  Mainnet deployments
+should pick deployment-specific salts (e.g.
+`keccak256(abi.encode(deploymentId, "bridge"))`).
+
+## 13. References
 
   * `LegalKernel/Encoding/CBOR.lean` — CBE primitive layer.
   * `LegalKernel/Encoding/Action.lean` — Action encoding.
@@ -593,6 +851,13 @@ the fallback warning or fail-fast.
   * `LegalKernel/Runtime/LogFile.lean` — frame layout +
     crash-consistency.
   * `LegalKernel/Runtime/Snapshot.lean` — snapshot format.
+  * `solidity/README.md` — Workstream E developer guide.
+  * `solidity/src/contracts/*.sol` — five immutable Solidity
+    contracts (E.1 – E.5).
+  * `solidity/src/lib/{CBEDecode, SmtVerifier, CanonEip712,
+    CREATE3}.sol` — the cross-cutting libraries.
   * Genesis Plan §8.7 (Persistence and Logging)
   * Genesis Plan §8.8 (Canonical Encoding)
   * Genesis Plan §13.2 (Repository Layout — for the file paths above)
+  * `docs/ethereum_integration_plan.md` §9 (Workstream E spec).
+  * `docs/ethereum_integration_plan.md` §20 (Immutability amendment).

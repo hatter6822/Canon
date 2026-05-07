@@ -202,6 +202,11 @@ lake exe stub_audit                 # Audit-3.8: stub-detection gate
 .lake/build/bin/canon info
 .lake/build/bin/canon bootstrap /tmp/test.log
 .lake/build/bin/canon-replay /tmp/test.log
+
+# Workstream E (Solidity contracts) — see solidity/README.md
+cd solidity && ./scripts/vendor-deps.sh   # one-time: pull OZ + forge-std
+cd solidity && forge build                # via_ir + solc 0.8.20
+cd solidity && forge test                 # 139 tests across 8 suites
 ```
 
 **Toolchain:** Lean 4 v4.29.1 (pinned in `lean-toolchain`; the
@@ -868,6 +873,24 @@ canon/
 │   └── CountSorries.lean          -- WU 1.12 sorry-counting CI gate.
 ├── scripts/
 │   └── setup.sh                   -- SHA-256-verified toolchain installer.
+├── solidity/                      -- Workstream E: L1 mirror of the
+│   │                                 kernel.  Five immutable contracts
+│   │                                 (CanonBridge, CanonDisputeVerifier,
+│   │                                 CanonIdentityRegistry,
+│   │                                 CanonSequencerStake, CanonMigration)
+│   │                                 + four cross-cutting libraries
+│   │                                 (CBEDecode, SmtVerifier, CanonEip712,
+│   │                                 CREATE3) + 8 forge test suites.
+│   │                                 See solidity/README.md.
+│   ├── foundry.toml               -- toolchain (solc 0.8.20, via_ir, OZ
+│   │                                 remappings).
+│   ├── src/contracts/             -- the five contracts (E.1.* / E.2.* /
+│   │                                 E.3 / E.4 / E.5 deliverables).
+│   ├── src/interfaces/            -- shared interfaces.
+│   ├── src/lib/                   -- CBE decoder, SMT verifier, EIP-712,
+│   │                                 CREATE3.
+│   ├── test/                      -- 139 forge tests across 8 suites.
+│   └── scripts/vendor-deps.sh     -- pinned OZ + forge-std installer.
 ├── .github/workflows/
 │   └── ci.yml                     -- lake build + test + count_sorries +
 │                                     tcb_audit on PR / push.
@@ -1585,12 +1608,290 @@ every match before submission.
 
 **Current Phase:** Phases 0 – 6 Complete; Audit-3 hardening
 complete; Ethereum-integration Workstreams A (cryptographic
-adaptors), B (identity and authority), C (bridge laws), and
-D (withdrawal proofs) complete.  Workstreams E – G of the
-Ethereum integration plan (`docs/ethereum_integration_plan.md`)
-and Phase 7 (Advanced Capabilities of the original Genesis Plan)
-are the next scoped work; both are open-ended and per-WU
-chartered.
+adaptors), B (identity and authority), C (bridge laws),
+D (withdrawal proofs), and E (Solidity contracts) complete.
+Workstreams F (cross-stack verification) and G (documentation
++ amendment) are the next scoped work; both are open-ended and
+per-WU chartered, plus Phase 7 (Advanced Capabilities of the
+original Genesis Plan).
+
+**Ethereum Workstream E (Solidity contracts) summary.**  Workstream E
+ships the L1 mirror of Canon's kernel as five immutable contracts
+in `solidity/`: `CanonBridge.sol` (E.1.1 – E.1.5), `CanonDispute
+Verifier.sol` (E.2.1 – E.2.5), `CanonIdentityRegistry.sol` (E.3),
+`CanonSequencerStake.sol` (E.4), and `CanonMigration.sol` (E.5).
+The implementation follows the §20 immutability amendment of the
+integration plan: no proxies, no `initialize` functions, no admin
+roles, no `Pausable.pause()`.  Recovery from sequencer / attestor
+misbehaviour uses the dispute pipeline (`applyVerdict (.upheld)`
+calls `revertToPriorRoot` via the immutable `disputeVerifier`
+reference); recovery from buggy contract code uses an attested
+one-shot handoff to a successor deployment via `CanonMigration.sol`
+with a `MIN_GRACE_WINDOW_BLOCKS = 216_000` (≈ 30 days) Solidity
+`constant` baked into the bytecode.  Whole-system halts use the
+four §9.1.4 automatic circuit breakers (`AttestationStale`,
+`DisputeCooldown`, `TvlCapReached`, `MigrationActivated`) which
+fire on observable state predicates with no privileged caller.
+Cross-cutting libraries: `solidity/src/lib/CBEDecode.sol` (CBE
+byte decoder mirroring `LegalKernel.Encoding.cborHeadDecode`);
+`solidity/src/lib/SmtVerifier.sol` (SMT verifier mirroring
+`LegalKernel.Bridge.WithdrawalRoot.verifyProof` line-for-line);
+`solidity/src/lib/CanonEip712.sol` (EIP-712 wrap helpers); and
+`solidity/src/lib/CREATE3.sol` (proxy-factory deployment that
+breaks the bridge ↔ verifier ↔ stake reference cycle by deriving
+addresses from `(deployer, salt)` only).  Solidity test count:
+**166** forge tests across 8 suites (CBEDecode +23,
+SmtVerifier +20, CREATE3 +3, CanonIdentityRegistry +19,
+CanonBridge +39, CanonSequencerStake +19, CanonDisputeVerifier
++34, CanonMigration +9; +17 from audit-1, +8 from audit-2,
++2 from audit-3).  Build commands: `cd solidity &&
+forge build` and `cd solidity && forge test`.  Toolchain pin:
+solc 0.8.20, Foundry v1.7.0 (forge / cast / anvil).  Vendored
+deps: OpenZeppelin v5.0.2, forge-std v1.9.4 (installable via
+`scripts/vendor-deps.sh`).  TCB unchanged; no Lean theorems
+altered; no new axioms.  See `solidity/README.md` for the
+day-to-day Solidity developer guide.
+
+The Solidity-side `CanonDisputeVerifier` MVP ports three of
+the five Lean `Disputes.Evidence` claim variants
+(`signatureInvalid`, `nonceMismatch`, `doubleApply`); the
+remaining two (`preconditionFalse`, `oracleMisreported`) are
+deferred to v2 per the integration plan §9.2.  Adding either
+requires a new dispute-verifier deployment + a `CanonMigration`
+handoff (no in-place extension path; matches the kernel's
+append-only frozen-index discipline).
+
+The Solidity port deliberately does **not** include a
+production-ready CREATE3 inner-revert propagation: standard
+CREATE3 proxy bytecode (used by Solady, Solmate, and our impl)
+returns 0 from CREATE on inner failure, leaving no code at the
+predicted address.  The `CanonMigration` test fixtures use
+direct `new ...(...)` deployment so constructor reverts
+propagate verbatim; production deployment scripts that need
+richer revert info must use a bespoke proxy.
+
+**Workstream-E audit-3 hardening (this branch).**  A third deep
+audit found one HIGH-severity semantic bug that broke the
+migration mechanism's intent (freezing the wrong bridge), plus
+several smaller defensive fixes.  Test count grew from 164 to
+**166** (+2 new audit-3 tests; one existing test refactored to
+verify post-activation successor operability).
+
+  * **HIGH (audit-3): CanonMigration constructor's
+    bidirectional consent check was inverted.**  The pre-audit-3
+    code asserted `successor.migration() == address(this)`,
+    which silently FROZE THE SUCCESSOR (the OPPOSITE of the
+    intended user-exit behaviour) on activation.  The
+    integration plan §20 specifies the predecessor is what
+    freezes; the successor remains operational so users can
+    interact with it post-migration.
+    FIX: swap the check to `predecessor.migration() ==
+    address(this)`.  Renamed error from
+    `SuccessorDoesNotReferenceThisMigration` to
+    `PredecessorDoesNotReferenceThisMigration`.  The
+    predecessor must be pre-committed via its `migration`
+    immutable to be frozen by THIS migration's activation;
+    without this commitment, the migration's `activated()`
+    flag has no effect.  The new lifecycle test asserts
+    BOTH that predecessor freezes AND that successor
+    remains operational (`successor.depositETH` succeeds
+    post-activation).
+  * **LOW: missing zero-recipient check in
+    `withdrawWithProof`.**  The L2-side leaf could in
+    principle name `address(0)` as the recipient.
+    `Address.sendValue(payable(0), x)` reverts on most L1
+    forks but `safeTransfer(token, address(0), x)` is
+    silent for some non-conforming ERC-20s.
+    FIX: explicit `InvalidRecipient()` revert before the
+    proof check.
+  * **LOW: `_runDoubleApplyFromConcat` decoder didn't
+    assert fully-consumed and didn't validate array
+    count.**  A malformed evidence blob (count ≠ 2 or
+    trailing bytes) was silently accepted.
+    FIX: assert `count == 2` (`DoubleApplyConcatBadCount`
+    revert) and call `assertFullyConsumed` post-decode.
+  * **LOW: redundant length check in `withdrawWithProof`.**
+    `proofLeaf.length != leafBlob.length` was checked
+    explicitly, but the subsequent `keccak256(proofLeaf)
+    != leafHash` check already subsumes it under
+    collision-resistance.
+    FIX: removed the redundant check; documented that
+    keccak256 equality covers length equality.
+  * **Test coverage gaps closed:**
+    - Added `test_audit3_checkSignatureInvalid_rejected_when_signature_is_valid`
+      (REJECTED-path test that audit-2 missed).
+    - Added `test_audit3_checkSignatureInvalid_upheld_on_signature_for_wrong_signer`
+      (cross-signer mismatch path).
+    - Added `test_audit3_constructor_reverts_on_predecessor_does_not_reference`
+      (audit-3 fix-1 regression test).
+    - The lifecycle test now verifies the SUCCESSOR remains
+      operational after migration activation (audit-3 fix-1
+      semantic correctness).
+
+**Workstream-E audit-2 hardening (this branch).**  A second
+deep audit found six additional defects (one critical) that the
+first audit missed; all are now closed.  Test count grew from
+156 to 164 (+8 audit-2 tests; SmtVerifier suite refactored
+from 18 to 20 tests using the new variable-size API).
+
+  * **CRITICAL: SMT cross-stack leaf-format mismatch.**  The
+    pre-audit-2 Solidity `SmtVerifier.recomputeRoot` accepted
+    `bytes32 leaf` and `bytes32[] siblings`, but Lean's
+    `WithdrawalProof.leaf : ByteArray` is variable-size (raw
+    `leafBytes wd` ≈ 56 bytes for a populated cell, 32 for the
+    empty sentinel) and `Vector ByteArray smtHeight` allows
+    each sibling to be variable-size.  In the dense-pair case
+    (sequentially-assigned WithdrawalIds 0 and 1 share a
+    deepest pair, the leaf-adjacent sibling for id 0 is
+    `leafBytes wd_1` ≈ 56 bytes, NOT 32), the Solidity
+    verifier could not represent the sibling.  Cross-stack
+    F.1.5 fixtures would have caught this; the Solidity port
+    silently broke withdrawal-proof verification for any tree
+    with adjacent populated cells.
+    FIX: SmtVerifier now takes `bytes memory leaf` and
+    `bytes[] memory siblings` (each variable-size).  The
+    bridge's `_decodeWithdrawalProof` reads the proof's
+    `leaf` field as variable-size bytes (mirroring Lean's
+    `WithdrawalProof.leaf`); the proof structure on the wire
+    contains the leaf bytes directly, NOT a leafHash.  The
+    bridge cross-checks that the proof's leaf bytes equal the
+    separately-supplied leafBlob.  Added
+    `emptyProofSiblings()` convenience for tests.
+  * **HIGH: `revertToPriorRoot` floor-only design auto-reverted
+    every post-revert submission.**  The pre-audit-2 code
+    tracked only `lowestRevertedLogIndexHigh` as a floor;
+    `isStateRootReverted(idx) := idx >= floor` meant that
+    after `revertToPriorRoot(N)`, EVERY future submission at
+    idx >= N was auto-marked reverted, breaking the bridge's
+    ability to recover from a dispute.
+    FIX: track the (floor, ceiling) pair.  On revert, the
+    ceiling rises to `latestSubmittedLogIndexHigh` (the
+    highest existing root at revert time).  Future
+    submissions land at idx > ceiling, so they are NOT in
+    the reverted range.  `isStateRootReverted(idx) := floor
+    <= idx <= ceiling`.  Event signature updated to carry
+    both floor and ceiling.
+  * **HIGH: missing zero-address check on `sequencerStake`
+    in CanonBridge constructor.**  The pre-audit-2 code
+    rejected zero attestor / disputeVerifier but silently
+    accepted zero `sequencerStake`, allowing misconfigured
+    deployments.
+    FIX: added `ZeroSequencerStake()` revert.
+  * **MEDIUM: duplicate token addresses allowed in resource
+    map.**  Two distinct resourceIds could be mapped to the
+    same ERC-20 token, splitting accounting at the L2 level.
+    FIX: quadratic uniqueness check in the constructor;
+    `DuplicateResourceToken(token)` revert.
+  * **MEDIUM: fee-on-transfer / rebasing ERC-20s would
+    desync L2 credit from L1 lock.**  The pre-audit-2 code
+    used the declared `amount` for accounting; if the actual
+    received amount differed (FoT tokens), L2 would be
+    over-credited.
+    FIX: balance-delta accounting (measure pre/post
+    `balanceOf` and assert exact equality with declared
+    `amount`); `TransferAmountMismatch(declared, received)`
+    revert.
+  * **MEDIUM: missing `nonReentrant` on `finalizeUpheld` /
+    `finalizeRejected` (defense-in-depth).**  The functions
+    use CEI ordering correctly (status → STATUS_UPHELD before
+    external calls), but a reentry from a malicious
+    challenger via `slash`'s `Address.sendValue` could call
+    other dispute-verifier entry points (e.g. file new
+    disputes) during the slash.  Not a current security
+    issue but a future-proofing concern.
+    FIX: import OZ ReentrancyGuard; mark both functions
+    `nonReentrant`.
+
+**Workstream-E audit-1 hardening (this branch).**  The first
+audit identified eight defects (also closed).  Cumulative
+test count grew from 139 to **164** (+17 audit-1 + +8
+audit-2 fix tests; SmtVerifier suite refactored from 18 to
+20 tests using the new variable-size API).
+
+  * **Critical: `_signerToAddress` was a stub** that broke
+    `checkSignatureInvalid`.  The pre-audit code synthesized
+    an "address" from a uint64 signer-id by zero-padding,
+    which never matched any registered address — so the
+    verifier always returned `INCONCLUSIVE`.  Fix: removed
+    the stub; `checkSignatureInvalid` now takes an explicit
+    `address signerHint` parameter (the dispute filer
+    supplies the actor-id ↔ address resolution from the
+    runtime adaptor's L1 ingestor).  Added
+    `MissingSignerHint` revert for finalisation paths.
+  * **Critical: EIP-712 domain mismatch in
+    `checkSignatureInvalid`.** The pre-audit code used
+    `("CanonDisputeVerifier", "1")` as the domain when
+    recomputing the digest, but users sign actions against
+    `("CanonAction", "1")` per the integration plan.  Fix:
+    added `ACTION_DOMAIN_NAME = "CanonAction"` and
+    `VERDICT_DOMAIN_NAME = "CanonDisputeVerifier"` as
+    distinct constants, mirroring Lean's
+    `signedActionDomain` / `verdictDomain` split.
+  * **Critical: `verdictHash` was an unbound free
+    parameter** in `finalizeUpheld` / `finalizeRejected`.
+    Adjudicators signed an arbitrary `bytes32 verdictHash`;
+    a signature for verdict X could be replayed as a
+    verdict for dispute Y.  Fix: contract now derives the
+    canonical digest on-chain via `verdictDigest(disputeId,
+    outcome)` and adjudicators must sign that exact value.
+    `verdictDigest` binds `(disputeId, outcome,
+    deploymentId)` via EIP-712 wrap; replay across disputes
+    is structurally impossible.
+  * **High: `revertToPriorRoot` had an O(N) loop** over
+    state-root submissions.  A malicious sequencer with
+    millions of submitted roots could DoS the dispute
+    finalisation by exhausting the block gas budget.  Fix:
+    replaced with O(1) `lowestRevertedLogIndexHigh` floor
+    tracking; per-record `reverted` status is computed
+    on-the-fly via `_isReverted(idx) := idx >=
+    lowestRevertedLogIndexHigh`.  Added
+    `isStateRootReverted(idx)` view.  Renamed event from
+    `StateRootReverted_` (underscore due to error-name
+    collision) to `StateRootRangeReverted` carrying the new
+    floor.
+  * **High: `signers[]` array unbounded** in
+    `_countVerifiedSignatures`.  A malicious caller could
+    pass a 100k-element array, DoS-ing finalisation via
+    memory allocation.  Fix: added `MAX_VERDICT_SIGNERS =
+    64` constant; `finalizeUpheld` / `finalizeRejected`
+    revert with `TooManySigners` above the bound.
+  * **High: `evidenceBlob` unbounded** in `fileDispute`.  A
+    griefer could submit huge blobs to inflate gas costs.
+    Fix: added `MAX_EVIDENCE_BLOB_BYTES = 100_000`
+    constant; `fileDispute` reverts with
+    `EvidenceBlobTooLarge` above the bound.
+  * **Med: `evidenceBlob` stored in state but never read at
+    finalisation.** Finalisation uses a fresh
+    `reEvidenceBlob` calldata argument; the file-time blob
+    was wasted gas (~640k for a 50KB blob).  Fix: removed
+    `bytes evidenceBlob` from the `DisputeRecord` struct;
+    emit it in the `DisputeFiled` event instead (events
+    are ~60× cheaper than storage per byte).
+  * **Med: `InvariantViolation_DisputeWindowVsRedemption`
+    error reused** for a TVL-accounting underflow check.
+    Wrong / misleading error name made the failure mode
+    hard to diagnose.  Fix: added a separate
+    `BridgeAccountingMismatch(uint256 totalLockedValue,
+    uint256 amountRequested)` error for the underflow case;
+    the dispute-window-vs-redemption error is reserved for
+    the constructor-time invariant check.
+
+The audit also identified several **low-severity items
+investigated but not changed**: (i) `receive()` reverts on
+all bridge contracts, but ETH can still be selfdestructed
+into them — documented limitation that doesn't break
+correctness because the contracts use `totalLockedValue`
+rather than `address(this).balance` for accounting; (ii)
+the `hasOpenDisputeOlderThan` predicate is conservative
+(returns `true` if any state root is within the dispute
+window, regardless of actual open-dispute count) —
+documented; the dispute verifier can be extended to
+maintain a per-state-root open-dispute index in a
+follow-up; (iii) the `withdrawWithProof` recipient could
+revert on `receive()` causing self-DoS on their own
+withdrawal — accepted as a known property of
+`Address.sendValue` semantics; users avoid by using EOAs
+or known-good contract recipients.
 
 **Ethereum Workstream D (withdrawal proofs) summary.**  Workstream D
 adds the user-facing withdrawal redemption flow: a sparse Merkle
