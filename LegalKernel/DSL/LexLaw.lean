@@ -313,7 +313,11 @@ private def parseClause (clause : Syntax) (acc : ParsedLaw) :
           s!"lex law: unknown registry-effect kind `{effStr}`; admissible kinds are `none`, `replaceKey`, `registerIdentity`, `localPolicy`"
     return { acc with registryEffectClause := some kind }
   | _ =>
-    throwError "lex law: unknown clause `{clause}`"
+    -- Audit-5: anchor the diagnostic at the offending clause node so
+    -- the editor's red squiggle points at the right location.  Pre-fix
+    -- the bare `throwError` anchored at the macro's parent, surfacing
+    -- a confusing "macro stack" trace.
+    throwErrorAt clause "lex law: unknown clause `{clause}`"
 
 /-! ## Required-clause validation (L001 / L002 / L009) -/
 
@@ -442,11 +446,34 @@ private def paramSpecsFromBinder (binder : Syntax) :
     return []
 
 /-- Walk every captured `bracketedBinder` and produce the flattened
-    list of `ParamSpec`s for the JSON sidecar. -/
+    list of `ParamSpec`s for the JSON sidecar.
+
+    Audit-5: post-flatten pass disambiguates duplicate `name = "_"`
+    entries (anonymous instance binders) by appending a
+    positional `_<index>` suffix.  Pre-fix multiple `[T]`
+    parameters all collapsed to `name := "_"`, breaking the JSON
+    sidecar's invariant that the `params` list is a per-binder
+    record.  The first `_`-named entry is preserved verbatim
+    (legacy behaviour: a single anonymous instance binder still
+    serialises as `name := "_"`); subsequent entries become
+    `_2`, `_3`, ... -/
 private def paramSpecsFromBinders
     (binders : Array (TSyntax ``Lean.Parser.Term.bracketedBinder)) :
-    List LegalKernel.Tools.Lex.ParamSpec :=
-  binders.toList.flatMap (fun b => paramSpecsFromBinder b.raw)
+    List LegalKernel.Tools.Lex.ParamSpec := Id.run do
+  let raw : List LegalKernel.Tools.Lex.ParamSpec :=
+    binders.toList.flatMap (fun b => paramSpecsFromBinder b.raw)
+  -- Disambiguate `_`-named entries with a positional index.
+  let mut anonCount : Nat := 0
+  let mut out : List LegalKernel.Tools.Lex.ParamSpec := []
+  for p in raw do
+    if p.name == "_" then
+      anonCount := anonCount + 1
+      let disambiguated : String :=
+        if anonCount == 1 then "_" else s!"_{anonCount}"
+      out := out ++ [{ p with name := disambiguated }]
+    else
+      out := out ++ [p]
+  pure out
 
 /-- Build a `Tools.Lex.LawDecl` value from a fully-validated
     `ParsedLaw`.  The result is what gets serialised into the

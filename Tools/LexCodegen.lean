@@ -390,18 +390,41 @@ def renderActionFieldsBounded (decls : List LawDecl) : String :=
   let lines := emitted.map (fun d => s!"  | .{ctorOf d.identifier} => True")
   String.intercalate "\n" lines
 
-/-- Render the body of the `Action.encode` fence. -/
+/-- Render the body of the `Action.encode` fence.
+
+    Audit-5 forward-protection: the M1 skeleton emits only the
+    constructor tag, which is correct for parameterless laws but
+    silently DROPS field encodings for parameterised laws.  If a
+    future author flips `requiresEmission := true` for a
+    parameterised law without rewriting this body, the resulting
+    on-wire format would be ambiguous (two distinct values would
+    encode to the same bytes).
+
+    Defence: when `params` is non-empty, emit a deliberately-
+    illegal Lean token so the next `--check` build (or the next
+    target-file rebuild) fails immediately with a parse error —
+    forcing the author to revisit this renderer rather than
+    discovering the bug only via a cross-stack mismatch. -/
 def renderActionEncode (decls : List LawDecl) : String :=
   let emitted := emittedDecls decls
   let lines := emitted.map (fun d =>
-    s!"  | .{ctorOf d.identifier} => Encodable.encode (T := Nat) {d.actionIndex}")
+    if d.params.isEmpty then
+      s!"  | .{ctorOf d.identifier} => Encodable.encode (T := Nat) {d.actionIndex}"
+    else
+      s!"  | .{ctorOf d.identifier} => -- AUDIT-5 FORWARD-PROTECTION: parameterised law `{d.identifier}` requires an M2 encode body; the M1 skeleton drops fields\n      M2_RENDERER_TODO_PARAMETERIZED_ENCODE_{ctorOf d.identifier}")
   String.intercalate "\n" lines
 
-/-- Render the body of the `Action.decode` fence. -/
+/-- Render the body of the `Action.decode` fence.
+
+    Audit-5 forward-protection: same hazard as `renderActionEncode`
+    — the skeleton's reverse path drops fields silently. -/
 def renderActionDecode (decls : List LawDecl) : String :=
   let emitted := emittedDecls decls
   let lines := emitted.map (fun d =>
-    s!"  | .ok ({d.actionIndex}, s₁) => .ok (.{ctorOf d.identifier}, s₁)")
+    if d.params.isEmpty then
+      s!"  | .ok ({d.actionIndex}, s₁) => .ok (.{ctorOf d.identifier}, s₁)"
+    else
+      s!"  | .ok ({d.actionIndex}, _s₁) => -- AUDIT-5 FORWARD-PROTECTION: parameterised law `{d.identifier}` requires an M2 decode body; the M1 skeleton drops fields\n      M2_RENDERER_TODO_PARAMETERIZED_DECODE_{ctorOf d.identifier}")
   String.intercalate "\n" lines
 
 /-! ### LX.19 — Events + SignedAction renderers -/
@@ -421,14 +444,25 @@ def renderActionEvents (decls : List LawDecl) : String :=
 
 /-- Render the body of the `applyActionToRegistry` fence.  Emits
     a per-arm dispatch only for laws whose `registryEffect` is
-    non-`none_`.  M1: returns `""`. -/
+    non-`none_`.  M1: returns `""`.
+
+    Audit-5 forward-protection: for `replaceKey` / `registerIdentity`
+    effects the skeleton's emitted text references identifiers
+    (`<ctor>_actor`, `<ctor>_newKey`, `<ctor>_pk`) that don't
+    exist as Lean values — they would have to be replaced with
+    field-projections on the constructor's bound parameters.
+    Until M2 supplies that projection logic, emit a deliberately-
+    illegal token so the next `--check` build fails immediately
+    rather than silently producing broken Lean. -/
 def renderApplyActionToRegistry (decls : List LawDecl) : String :=
   let emitted := emittedDecls decls
   let lines := emitted.filterMap (fun d =>
     match d.registryEffect with
     | .none_           => none  -- registry preserved by catch-all `_`
-    | .replaceKey      => some s!"  | .{ctorOf d.identifier} => kr.insert {(ctorOf d.identifier)}_actor {(ctorOf d.identifier)}_newKey"
-    | .registerIdentity => some s!"  | .{ctorOf d.identifier} => kr.insert {(ctorOf d.identifier)}_actor {(ctorOf d.identifier)}_pk"
+    | .replaceKey      =>
+      some s!"  | .{ctorOf d.identifier} => -- AUDIT-5 FORWARD-PROTECTION: M2 must project this ctor's actor/key fields; the M1 skeleton refers to undefined identifiers\n      M2_RENDERER_TODO_REGISTRY_REPLACE_{ctorOf d.identifier}"
+    | .registerIdentity =>
+      some s!"  | .{ctorOf d.identifier} => -- AUDIT-5 FORWARD-PROTECTION: M2 must project this ctor's actor/pk fields; the M1 skeleton refers to undefined identifiers\n      M2_RENDERER_TODO_REGISTRY_REGISTER_{ctorOf d.identifier}"
     | .localPolicy     => none  -- local-policy effects live in `applyActionToLocalPolicies`
   )
   String.intercalate "\n" lines
@@ -613,14 +647,23 @@ def withFileLock {α : Type} (path : FilePath) (body : IO α) :
   let acquired ← tryAcquireLock path
   if !acquired then
     return none
+  -- Audit-5: a transient IO error during cleanup (e.g., a concurrent
+  -- process beating us to `removeFile` between our `pathExists` and
+  -- `removeFile` calls) must not propagate over the user's IO result.
+  -- Both release sites swallow `IO.Error` so the body's outcome is
+  -- preserved verbatim.  `releaseLock` is already idempotent for the
+  -- normal case (missing-file branch); this `try` only guards the
+  -- TOCTOU-race window.
+  let safeRelease : IO Unit :=
+    try releaseLock path catch _ => pure ()
   try
     let result ← body
-    releaseLock path
+    safeRelease
     return some result
   catch e =>
     -- Always release on exception so a transient IO error doesn't
     -- leave a stale lock behind.
-    releaseLock path
+    safeRelease
     throw e
 
 /-- Rewrite a target file's fences to match the rendered output.
@@ -751,8 +794,18 @@ def emitCanonicalManifest (decls : List LawDecl) : String := Id.run do
     "# DO NOT EDIT BY HAND — re-run `lake exe lex_codegen --canonical`\n" ++
     "# to regenerate after a Lex declaration changes.\n" ++
     "\n"
+  -- Stable canonical ordering: primary key is `actionIndex`; secondary
+  -- key is `identifier` (lexicographic).  `Array.qsort` is not stable,
+  -- so two decls sharing an `actionIndex` (which is itself a registry
+  -- corruption — caught by `lex_lint`'s uniqueness check) could
+  -- otherwise produce a non-deterministic manifest order, breaking
+  -- the §LX.20 byte-stability claim.  A total tie-breaker eliminates
+  -- the instability under any corrupt-input scenario.
   let sortedDecls := decls.toArray.qsort
-    (fun a b => a.actionIndex < b.actionIndex)
+    (fun a b =>
+      if a.actionIndex < b.actionIndex then true
+      else if a.actionIndex > b.actionIndex then false
+      else a.identifier < b.identifier)
   for decl in sortedDecls do
     buf := buf ++ s!"## {decl.identifier} (action_index = {decl.actionIndex})\n"
     buf := buf ++ s!"version: {decl.version}\n"

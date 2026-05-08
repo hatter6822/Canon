@@ -437,6 +437,145 @@ def tests : List TestCase :=
                 aPrefix.length < (bPos.headD "").length)
           "test.a appears before test.b (sorted by action_index)"
     }
+  -- Audit-5: realistic-input canonical-manifest determinism.
+  -- The audit-3 trivial test only exercised empty input; this
+  -- test loads the actual 17 kernel-built-in law sidecars and
+  -- verifies byte-stability across multiple regeneration runs.
+  , { name := "audit-5: emitCanonicalManifest is byte-stable on real M2 corpus"
+    , body := do
+        match (← loadCodegenInputs codegenInputsDir) with
+        | .ok decls =>
+          assert (decls.length ≥ 17)
+            s!"expected ≥ 17 codegen inputs, got {decls.length}"
+          let m1 := emitCanonicalManifest decls
+          let m2 := emitCanonicalManifest decls
+          let m3 := emitCanonicalManifest decls
+          assert (m1 == m2) "manifest is deterministic (1 vs 2)"
+          assert (m2 == m3) "manifest is deterministic (2 vs 3)"
+          -- Manifest is non-trivially long (more than just header).
+          assert (m1.length > 1000)
+            s!"manifest should be > 1000 bytes for 17 laws, got {m1.length}"
+        | .error msg => throw (IO.userError s!"loadCodegenInputs: {msg}")
+    }
+  -- Audit-5: emitCanonicalManifest sorts by action_index even
+  -- when inputs are unsorted.  Pin this property at value level:
+  -- shuffle the input list and verify the output stays sorted.
+  , { name := "audit-5: emitCanonicalManifest sorts even when input unsorted"
+    , body := do
+        match (← loadCodegenInputs codegenInputsDir) with
+        | .ok decls =>
+          -- Reverse the input order; manifest should produce
+          -- byte-identical output.
+          let m_normal := emitCanonicalManifest decls
+          let m_reversed := emitCanonicalManifest decls.reverse
+          assertEq (expected := m_normal) (actual := m_reversed)
+            "sort is invariant under input order"
+        | .error msg => throw (IO.userError s!"loadCodegenInputs: {msg}")
+    }
+  -- Audit-5: validateAgainstRegistry catches a corrupted sidecar.
+  -- This is the lex_codegen --check failure path.  Pin at value
+  -- level by constructing a synthetic decl with a wrong
+  -- action_index and verifying the violation message.
+  , { name := "audit-5: validateAgainstRegistry catches mismatched action_index"
+    , body := do
+        let decl : LawDecl :=
+          { schemaVersion := 1
+          , identifier := "legalkernel.transfer"
+          , version := "1.0.0"
+          , actionIndex := 999  -- Wrong; registry says 0.
+          , intent := "synthetic"
+          , params := []
+          , signedBy := { name := "x" }
+          , authorizedBy := { expr := "x" }
+          , preExpr := ""
+          , implBlock := ""
+          , satisfies := []
+          , eventsBlock := "[]"
+          , registryEffect := .none_
+          , proofOverrides := []
+          , sourceLocation := { fileName := "x", startPos := { line := 0, column := 0 } }
+          }
+        let regContents ← IO.FS.readFile registryPath
+        match parseRegistry regContents with
+        | .ok entries =>
+          let violations := validateAgainstRegistry [decl] entries
+          assert (violations.length ≥ 1)
+            "expected ≥ 1 violation for mismatched action_index"
+          -- Verify the diagnostic mentions the wrong index.
+          let v := violations.headD ""
+          let parts := v.splitOn "999"
+          assert (parts.length > 1) s!"violation should mention 999: {v}"
+        | .error errs => throw (IO.userError s!"registry parse failed: {errs}")
+    }
+  -- Audit-5 (H1): emitCanonicalManifest must produce a totally
+  -- ordered sort even when two decls share an actionIndex.  Pre-fix
+  -- `Array.qsort` was the underlying sort and is NOT stable, so a
+  -- corrupt input (two laws on the same frozen index — itself a
+  -- registry-validity bug, but still a possible input shape) would
+  -- produce non-deterministic manifest order, breaking the
+  -- byte-stability claim asserted by `--check`.  The fix: tie-break
+  -- on `identifier` so the order is total.
+  , { name := "audit-5: emitCanonicalManifest is deterministic on shared-index input"
+    , body := do
+        let base : LawDecl :=
+          { schemaVersion := 1, identifier := "alpha.law",
+            version := "v1.0.0", actionIndex := 7, intent := "shared-index test",
+            params := [], signedBy := { name := "x" },
+            authorizedBy := { expr := "x" },
+            preExpr := "", implBlock := "",
+            satisfies := [], eventsBlock := "[]",
+            registryEffect := .none_, proofOverrides := [],
+            sourceLocation := { fileName := "x", startPos := { line := 0, column := 0 } } }
+        let declA : LawDecl := base
+        let declB : LawDecl := { base with identifier := "zeta.law" }
+        let declC : LawDecl := { base with identifier := "mu.law" }
+        -- All three share actionIndex = 7.  Verify the manifest output
+        -- is byte-identical across three different input orderings.
+        let m1 := emitCanonicalManifest [declA, declB, declC]
+        let m2 := emitCanonicalManifest [declC, declB, declA]
+        let m3 := emitCanonicalManifest [declB, declA, declC]
+        assertEq (expected := m1) (actual := m2)
+          "shared-index manifest is order-invariant (1 vs 2)"
+        assertEq (expected := m2) (actual := m3)
+          "shared-index manifest is order-invariant (2 vs 3)"
+        -- And the secondary key is lexicographic identifier:
+        -- alpha < mu < zeta, so they should appear in that order.
+        let alphaIdx := (m1.splitOn "alpha.law").headD ""
+        let muIdx    := (m1.splitOn "mu.law").headD ""
+        let zetaIdx  := (m1.splitOn "zeta.law").headD ""
+        assert (alphaIdx.length < muIdx.length)
+          "alpha.law appears before mu.law in lexicographic order"
+        assert (muIdx.length < zetaIdx.length)
+          "mu.law appears before zeta.law in lexicographic order"
+    }
+  -- Audit-5: validateAgainstRegistry catches an unknown identifier.
+  , { name := "audit-5: validateAgainstRegistry catches unknown identifier"
+    , body := do
+        let decl : LawDecl :=
+          { schemaVersion := 1
+          , identifier := "unknown.identifier_not_in_registry"
+          , version := "1.0.0"
+          , actionIndex := 999
+          , intent := "synthetic"
+          , params := []
+          , signedBy := { name := "x" }
+          , authorizedBy := { expr := "x" }
+          , preExpr := ""
+          , implBlock := ""
+          , satisfies := []
+          , eventsBlock := "[]"
+          , registryEffect := .none_
+          , proofOverrides := []
+          , sourceLocation := { fileName := "x", startPos := { line := 0, column := 0 } }
+          }
+        let regContents ← IO.FS.readFile registryPath
+        match parseRegistry regContents with
+        | .ok entries =>
+          let violations := validateAgainstRegistry [decl] entries
+          assert (violations.length ≥ 1)
+            "expected ≥ 1 violation for unknown identifier"
+        | .error errs => throw (IO.userError s!"registry parse failed: {errs}")
+    }
   ]
 
 end LegalKernel.Test.Tools.LexCodegen

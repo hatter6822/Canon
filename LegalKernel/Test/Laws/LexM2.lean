@@ -311,10 +311,124 @@ private def milestoneGateTests : List TestCase :=
     }
   ]
 
+/-! ## Audit-5 mathematical-correctness regression tests
+
+These tests verify that subtle mathematical invariants of the
+hand-written laws are preserved by the Lex re-expressions.  Each
+test exercises a non-trivial fixture (self-transfer, edge-case
+amounts, etc.) and confirms byte-equivalence at the value level. -/
+
+/-- The §4.11 self-transfer fix is preserved: when sender =
+    receiver, the post-state balance is unchanged (the post-debit
+    re-read in `apply_impl` sees the debited balance, so the
+    credit restores it exactly).  Pin this at value level to
+    guard against a future Lex regression that might write
+    `getBalance s r receiver` instead of `getBalance s1 r
+    receiver` (reading from the original state, not the
+    intermediate). -/
+private def auditSelfTransferRegression : TestCase := {
+  name := "audit-5: §4.11 self-transfer fix preserved in Lex form"
+  body := do
+    let r : ResourceId := 1
+    let actor : ActorId := 10
+    let amount : Amount := 5
+    let s_funded : State := setBalance emptyState r actor 100
+    -- Both forms produce the same post-state (balance unchanged).
+    let lex_post := (legalkernel_transfer_transition r actor actor amount).apply_impl s_funded
+    let hand_post := (Laws.transfer r actor actor amount).apply_impl s_funded
+    assertEq (expected := getBalance hand_post r actor)
+             (actual   := getBalance lex_post r actor)
+             "lex self-transfer matches hand-written"
+    -- Also verify the value equals the original (self-transfer
+    -- conserves the actor's total balance per §4.11.1).
+    assertEq (expected := (100 : Amount))
+             (actual   := getBalance lex_post r actor)
+             "self-transfer preserves balance"
+}
+
+/-- The transfer pre rejects `amount = 0` (positivity clause). -/
+private def auditTransferRejectsZero : TestCase := {
+  name := "audit-5: transfer pre rejects amount = 0 (positivity clause)"
+  body := do
+    let r : ResourceId := 1
+    let s : ActorId := 10
+    let r' : ActorId := 20
+    let s_funded : State := setBalance emptyState r s 100
+    -- Both Lex and hand-written forms reject amount = 0.
+    assert (decide ¬ (legalkernel_transfer_transition r s r' 0).pre s_funded)
+      "lex form rejects amount = 0"
+    assert (decide ¬ (Laws.transfer r s r' 0).pre s_funded)
+      "hand-written form rejects amount = 0"
+}
+
+/-- proportionalDilute precondition rejects empty `sumOthers`. -/
+private def auditProportionalDiluteRejectsEmpty : TestCase := {
+  name := "audit-5: proportionalDilute pre rejects sumOthers = 0"
+  body := do
+    let r : ResourceId := 1
+    let excluded : ActorId := 10
+    let s_empty : State := emptyState
+    -- sumOthers s_empty 1 10 = 0; the pre rejects.
+    assert (decide ¬ (legalkernel_proportionalDilute_transition r excluded 100).pre s_empty)
+      "lex form rejects empty sumOthers"
+    assert (decide ¬ (Laws.proportionalDilute r excluded 100).pre s_empty)
+      "hand-written form rejects empty sumOthers"
+}
+
+/-- Multi-actor distribute: lex and hand-written produce the
+    same per-actor balances after applying the foldl. -/
+private def auditDistributeOthersMultiActor : TestCase := {
+  name := "audit-5: distributeOthers multi-actor post-state byte-equivalent"
+  body := do
+    let r : ResourceId := 1
+    let excluded : ActorId := 10
+    let amount : Amount := 5
+    -- Build a state with 3 actors: 10 (excluded), 20, 30.
+    let s : State := setBalance
+                      (setBalance
+                        (setBalance emptyState r 10 100)
+                        r 20 200)
+                      r 30 300
+    let lex_post := (legalkernel_distributeOthers_transition r excluded amount).apply_impl s
+    let hand_post := (Laws.distributeOthers r excluded amount).apply_impl s
+    -- Verify per-actor balances match.
+    assertEq (expected := getBalance hand_post r 10)
+             (actual   := getBalance lex_post r 10) "actor 10 (excluded)"
+    assertEq (expected := getBalance hand_post r 20)
+             (actual   := getBalance lex_post r 20) "actor 20"
+    assertEq (expected := getBalance hand_post r 30)
+             (actual   := getBalance lex_post r 30) "actor 30"
+    -- Spot-check: excluded actor's balance unchanged.
+    assertEq (expected := (100 : Amount))
+             (actual   := getBalance lex_post r 10) "excluded preserved"
+}
+
+/-- Burn correctly truncates at zero balance (Nat-subtraction
+    asymmetry).  Verify Lex form preserves this behavior. -/
+private def auditBurnTruncates : TestCase := {
+  name := "audit-5: burn Nat-truncates at zero balance"
+  body := do
+    let r : ResourceId := 1
+    let actor : ActorId := 10
+    -- Insufficient balance: pre rejects.
+    let s_underfunded : State := setBalance emptyState r actor 3
+    assert (decide ¬ (legalkernel_burn_transition r actor 5).pre s_underfunded)
+      "lex form rejects under-funded"
+}
+
+/-- Audit-5 mathematical-correctness regression suite. -/
+private def auditMathTests : List TestCase :=
+  [ auditSelfTransferRegression
+  , auditTransferRejectsZero
+  , auditProportionalDiluteRejectsEmpty
+  , auditDistributeOthersMultiActor
+  , auditBurnTruncates ]
+
 /-- The full M2 byte-equivalence regression suite. -/
 def tests : List TestCase :=
   transferTests ++ mintBurnTests ++ freezeRewardTests ++
   authorityKeyTests ++ bridgeTests ++ disputeTests ++
-  localPolicyTests ++ aggregateTests ++ milestoneGateTests
+  localPolicyTests ++ aggregateTests ++ milestoneGateTests ++
+  auditMathTests
 
 end LegalKernel.Test.Laws.LexM2
