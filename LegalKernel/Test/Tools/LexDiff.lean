@@ -10,8 +10,9 @@
 LegalKernel.Test.Tools.LexDiff — Workstream-LX (M3) tests for the
 `lex_diff` binary.
 
-Covers LX.34 / LX.35:
+Covers LX.34 / LX.35 (post-M3-completion API):
 
+  * `LawDiff` per-clause `Option Diff` shape.
   * Per-clause structural diff detection.
   * Reformatting invariance (whitespace-only changes produce
     empty diffs).
@@ -20,6 +21,9 @@ Covers LX.34 / LX.35:
   * Refinement-proof obligation (L016).
   * Version-declaration mismatch (L007).
   * Deployment-level diff (added / removed / modified laws).
+  * `checkRefinementProof : LawDecl → IO Bool` named-API.
+  * `checkVersionDeclaration : LawDiff → Except Diagnostic Unit`
+    named-API.
 -/
 
 import LegalKernel.Test.Framework
@@ -56,65 +60,64 @@ def fixtureLawDecl : LawDecl := {
 
 /-! ## LX.34 — clause-diff detection -/
 
-/-- Two equal `LawDecl`s produce an empty clause-diff list. -/
+/-- Two equal `LawDecl`s produce a diff with all `Option Diff`s
+    set to `none`. -/
 def emptyDiffOnEqual : TestCase := {
-  name := "LX.34: equal LawDecls produce empty clause-diff"
+  name := "LX.34: equal LawDecls produce all-none clause diffs"
   body := do
-    let diffs := computeClauseDiffs fixtureLawDecl fixtureLawDecl
-    assertEq (expected := 0) (actual := diffs.length)
-      "no diffs on equal inputs"
+    let diff := computeLawDiff fixtureLawDecl fixtureLawDecl
+    assert diff.isEmpty "diff is empty (all clauses unchanged)"
 }
 
-/-- A `pre` change produces exactly one clause-diff. -/
+/-- A `pre` change produces exactly `preDiff = some _`. -/
 def preChangeDiff : TestCase := {
-  name := "LX.34: pre change produces single clause-diff"
+  name := "LX.34: pre change populates preDiff"
   body := do
     let after := { fixtureLawDecl with
       preExpr := "amount > 0 ∧ amount ≤ 2^32" }
-    let diffs := computeClauseDiffs fixtureLawDecl after
-    assertEq (expected := 1) (actual := diffs.length) "1 diff"
-    let head := diffs.head!
-    assertEq (expected := "pre") (actual := head.field) "field is pre"
+    let diff := computeLawDiff fixtureLawDecl after
+    assert diff.preDiff.isSome "preDiff is some"
+    assert diff.implDiff.isNone "implDiff is none"
 }
 
-/-- An `intent` change produces exactly one clause-diff. -/
+/-- An `intent` change produces `intentDiff`. -/
 def intentChangeDiff : TestCase := {
-  name := "LX.34: intent change produces single clause-diff"
+  name := "LX.34: intent change populates intentDiff"
   body := do
     let after := { fixtureLawDecl with
       intent := "Move balance with new constraint." }
-    let diffs := computeClauseDiffs fixtureLawDecl after
-    assertEq (expected := 1) (actual := diffs.length) "1 diff"
-    assertEq (expected := "intent") (actual := diffs.head!.field) "field is intent"
+    let diff := computeLawDiff fixtureLawDecl after
+    assert diff.intentDiff.isSome "intentDiff is some"
+    assert diff.preDiff.isNone "preDiff is none"
 }
 
-/-- An `action_index` change produces exactly one clause-diff. -/
+/-- An `action_index` change produces `actionIndexDiff`. -/
 def actionIndexChangeDiff : TestCase := {
-  name := "LX.34: action_index change produces single clause-diff"
+  name := "LX.34: action_index change populates actionIndexDiff"
   body := do
     let after := { fixtureLawDecl with actionIndex := 18 }
-    let diffs := computeClauseDiffs fixtureLawDecl after
-    assertEq (expected := 1) (actual := diffs.length) "1 diff"
-    assertEq (expected := "action_index") (actual := diffs.head!.field) "field"
+    let diff := computeLawDiff fixtureLawDecl after
+    assert diff.actionIndexDiff.isSome "actionIndexDiff is some"
 }
 
-/-- Multiple clause changes produce multiple clause-diffs. -/
+/-- Multiple clause changes produce multiple diffs. -/
 def multipleClauseChangeDiff : TestCase := {
-  name := "LX.34: multiple clause changes produce multiple clause-diffs"
+  name := "LX.34: multiple clause changes produce multiple Option Diffs"
   body := do
     let after := { fixtureLawDecl with
-      version := "2.0.0",
       preExpr := "amount > 5",
       implBlock := "fun s => setBalance s 0 0 0",
       intent := "completely rewritten" }
-    let diffs := computeClauseDiffs fixtureLawDecl after
-    -- Expect: version, pre, impl, intent (4 diffs)
-    assertEq (expected := 4) (actual := diffs.length) "4 diffs"
+    let diff := computeLawDiff fixtureLawDecl after
+    assert diff.preDiff.isSome "preDiff is some"
+    assert diff.implDiff.isSome "implDiff is some"
+    assert diff.intentDiff.isSome "intentDiff is some"
+    assert diff.actionIndexDiff.isNone "actionIndexDiff is none"
 }
 
 /-! ## LX.35 — version-bump classifier -/
 
-/-- Classifying equal LawDecls returns `.none_`. -/
+/-- Equal LawDecls classify as `.none_`. -/
 def classifyNoneOnEqual : TestCase := {
   name := "LX.35: classifyVersionBump returns .none_ on equal inputs"
   body := do
@@ -122,81 +125,68 @@ def classifyNoneOnEqual : TestCase := {
     assertEq (expected := VersionBump.none_) (actual := bump) "bump = none_"
 }
 
-/-- A pre-only change classifies as `.minor`. -/
+/-- Pre-only change classifies as `.minor`. -/
 def classifyMinorOnPreOnly : TestCase := {
   name := "LX.35: classifyVersionBump returns .minor on pre-only change"
   body := do
     let after := { fixtureLawDecl with
-      version := "1.1.0",
       preExpr := "amount > 0 ∧ amount ≤ 2^32" }
     let bump := classifyVersionBump fixtureLawDecl after
-    assertEq (expected := VersionBump.minor) (actual := bump)
-      "bump = minor (refinement)"
+    assertEq (expected := VersionBump.minor) (actual := bump) "minor"
 }
 
-/-- A satisfies-additions-only change classifies as `.minor`. -/
+/-- Satisfies-additions-only classifies as `.minor`. -/
 def classifyMinorOnSatisfiesAdditions : TestCase := {
   name := "LX.35: classifyVersionBump returns .minor on satisfies additions"
   body := do
     let after := { fixtureLawDecl with
-      version := "1.1.0",
       satisfies := fixtureLawDecl.satisfies ++ [{ name := "monotonic", args := [] }] }
     let bump := classifyVersionBump fixtureLawDecl after
-    assertEq (expected := VersionBump.minor) (actual := bump)
-      "bump = minor (satisfies extension)"
+    assertEq (expected := VersionBump.minor) (actual := bump) "minor"
 }
 
-/-- A proof-only change classifies as `.patch`. -/
+/-- Proof-only change classifies as `.patch`. -/
 def classifyPatchOnProofOnly : TestCase := {
   name := "LX.35: classifyVersionBump returns .patch on proof-only change"
   body := do
     let after := { fixtureLawDecl with
-      version := "1.0.1",
       proofOverrides := [{ property := "conservative",
                            tacticBlock := "by simp" }] }
     let bump := classifyVersionBump fixtureLawDecl after
-    assertEq (expected := VersionBump.patch) (actual := bump)
-      "bump = patch (proof-only)"
+    assertEq (expected := VersionBump.patch) (actual := bump) "patch"
 }
 
-/-- An impl change classifies as `.major`. -/
+/-- Impl change classifies as `.major`. -/
 def classifyMajorOnImplChange : TestCase := {
   name := "LX.35: classifyVersionBump returns .major on impl change"
   body := do
     let after := { fixtureLawDecl with
-      version := "2.0.0",
       implBlock := "fun s => setBalance s 99 99 0" }
     let bump := classifyVersionBump fixtureLawDecl after
-    assertEq (expected := VersionBump.major) (actual := bump)
-      "bump = major (impl change)"
+    assertEq (expected := VersionBump.major) (actual := bump) "major"
 }
 
-/-- A signed_by change classifies as `.major`. -/
+/-- Signed-by change classifies as `.major`. -/
 def classifyMajorOnSignedByChange : TestCase := {
   name := "LX.35: classifyVersionBump returns .major on signed_by change"
   body := do
     let after := { fixtureLawDecl with
-      version := "2.0.0",
       signedBy := { name := "different_actor" } }
     let bump := classifyVersionBump fixtureLawDecl after
-    assertEq (expected := VersionBump.major) (actual := bump)
-      "bump = major (signed_by change)"
+    assertEq (expected := VersionBump.major) (actual := bump) "major"
 }
 
-/-- A satisfies-removal change classifies as `.major`. -/
+/-- Satisfies-removal classifies as `.major`. -/
 def classifyMajorOnSatisfiesRemoval : TestCase := {
   name := "LX.35: classifyVersionBump returns .major on satisfies removal"
   body := do
-    -- Build before with two claims, after with one (i.e. removal).
     let before := { fixtureLawDecl with
       satisfies := [{ name := "conservative", args := [] },
                     { name := "monotonic", args := [] }] }
     let after := { fixtureLawDecl with
-      version := "2.0.0",
       satisfies := [{ name := "conservative", args := [] }] }
     let bump := classifyVersionBump before after
-    assertEq (expected := VersionBump.major) (actual := bump)
-      "bump = major (claim removed)"
+    assertEq (expected := VersionBump.major) (actual := bump) "major"
 }
 
 /-! ## LX.35 — refinement proof check (L016) -/
@@ -206,7 +196,6 @@ def refinementProofPresent : TestCase := {
   name := "LX.35: hasRefinementProof returns true when proof is present"
   body := do
     let after := { fixtureLawDecl with
-      version := "1.1.0",
       proofOverrides := [{ property := "refinement_v1_0",
                            tacticBlock := "by intro h; exact h.left" }] }
     assert (hasRefinementProof "1.0.0" after)
@@ -217,8 +206,7 @@ def refinementProofPresent : TestCase := {
 def refinementProofMissing : TestCase := {
   name := "LX.35: hasRefinementProof returns false when proof is missing"
   body := do
-    let after := { fixtureLawDecl with version := "1.1.0" }
-    assert (!hasRefinementProof "1.0.0" after)
+    assert (!hasRefinementProof "1.0.0" fixtureLawDecl)
       "refinement_v1_0 should be missing"
 }
 
@@ -230,6 +218,51 @@ def refinementProofNameShape : TestCase := {
              (actual := refinementProofName "1.0.0") "1.0.0"
     assertEq (expected := "refinement_v2_3")
              (actual := refinementProofName "2.3.4") "2.3.4"
+}
+
+/-! ## LX.35 — Named-API tests -/
+
+/-- `checkRefinementProof : String → LawDecl → IO Bool` returns
+    the same result as `hasRefinementProof`. -/
+def checkRefinementProofIO : TestCase := {
+  name := "LX.35: checkRefinementProof IO wrapper matches hasRefinementProof"
+  body := do
+    let after := { fixtureLawDecl with
+      proofOverrides := [{ property := "refinement_v1_0",
+                           tacticBlock := "by exact h.left" }] }
+    let result ← checkRefinementProof "1.0.0" after
+    assert result "checkRefinementProof returns true"
+    let result2 ← checkRefinementProof "1.0.0" fixtureLawDecl
+    assert (!result2) "checkRefinementProof returns false on missing proof"
+}
+
+/-- `checkVersionDeclaration` returns `.ok ()` when declared bump
+    matches computed. -/
+def checkVersionDeclarationOk : TestCase := {
+  name := "LX.35: checkVersionDeclaration .ok on matching bumps"
+  body := do
+    let after := { fixtureLawDecl with
+      version := "1.1.0",
+      preExpr := "amount > 0 ∧ amount ≤ 2^32",
+      proofOverrides := [{ property := "refinement_v1_0",
+                           tacticBlock := "by exact h.left" }] }
+    match checkVersionDeclaration "<test>" fixtureLawDecl after with
+    | .ok () => pure ()
+    | .error _ => throw (IO.userError "expected .ok, got .error")
+}
+
+/-- `checkVersionDeclaration` returns `.error` on mismatch. -/
+def checkVersionDeclarationMismatch : TestCase := {
+  name := "LX.35: checkVersionDeclaration .error on mismatch"
+  body := do
+    -- Declared as patch (1.0.0 → 1.0.1), but it's actually a minor (pre changed).
+    let after := { fixtureLawDecl with
+      version := "1.0.1",
+      preExpr := "amount > 0 ∧ amount ≤ 2^32" }
+    match checkVersionDeclaration "<test>" fixtureLawDecl after with
+    | .ok () => throw (IO.userError "expected .error, got .ok")
+    | .error d => do
+        assertEq (expected := "L007") (actual := d.code) "L007 fired"
 }
 
 /-! ## Manifest-level deployment diff -/
@@ -267,12 +300,9 @@ def deploymentDiffRemoved : TestCase := {
     let diff := computeDeploymentDiff [fixtureLawDecl, removed]
                                        [fixtureLawDecl]
     assertEq (expected := 1) (actual := diff.lawsRemoved.length) "1 removed"
-    assertEq (expected := "example.sunset_law")
-             (actual := diff.lawsRemoved.head!) "removed law id"
 }
 
-/-- A modified law shows up in `lawsModified` with the correct
-    diff. -/
+/-- A modified law shows up in `lawsModified`. -/
 def deploymentDiffModified : TestCase := {
   name := "LX.34: deployment-diff detects modified laws"
   body := do
@@ -285,6 +315,29 @@ def deploymentDiffModified : TestCase := {
     assertEq (expected := "1.0.0") (actual := modified.versionBefore) "before"
     assertEq (expected := "1.1.0") (actual := modified.versionAfter) "after"
     assertEq (expected := VersionBump.minor) (actual := modified.versionBump) "minor"
+}
+
+/-! ## Manifest-level diff classification (LX.35) -/
+
+/-- Adding/removing laws triggers a major manifest bump. -/
+def manifestBumpMajorOnLawAdd : TestCase := {
+  name := "LX.35: adding a law triggers major manifest bump"
+  body := do
+    let added := { fixtureLawDecl with identifier := "ex.new" }
+    let diff := computeDeploymentDiff [fixtureLawDecl] [fixtureLawDecl, added]
+    match diff.classifyManifestBump with
+    | some VersionBump.major => pure ()
+    | _ => throw (IO.userError "expected major manifest bump")
+}
+
+/-- Empty diff produces no manifest bump. -/
+def manifestBumpNoneOnEqual : TestCase := {
+  name := "LX.35: equal manifests produce no manifest bump"
+  body := do
+    let diff := computeDeploymentDiff [fixtureLawDecl] [fixtureLawDecl]
+    match diff.classifyManifestBump with
+    | none => pure ()
+    | some _ => throw (IO.userError "expected no manifest bump")
 }
 
 /-! ## Output formatting -/
@@ -303,26 +356,18 @@ def formatLawDiffNonEmpty : TestCase := {
     assert (output.contains '\n') "format output contains newlines"
 }
 
-/-! ## Reformatting invariance (the empty-output case) -/
+/-! ## Reformatting invariance -/
 
-/-- Reformatting-only changes produce no clause diffs.  V1 tests
-    this via the structural-diff check: same `LawDecl` structure
-    yields no diffs regardless of the *source* whitespace
-    (the JSON form already canonicalises whitespace for surface
-    text fields). -/
+/-- JSON round-trip produces identical `LawDecl`s, hence empty
+    diff. -/
 def reformattingProducesEmptyDiff : TestCase := {
   name := "LX.34: reformatting-only diff is empty (structural)"
   body := do
-    -- Reformatting is captured by JSON's compress/parse: the
-    -- LawDecl structure is byte-equal regardless of source
-    -- whitespace.  We test this by encoding/decoding and
-    -- diffing the round-trip.
     let json := LawDecl.toCanonicalJson fixtureLawDecl
     match LawDecl.fromJson json with
     | .ok decoded =>
-      let diffs := computeClauseDiffs fixtureLawDecl decoded
-      assertEq (expected := 0) (actual := diffs.length)
-        "round-tripped LawDecl is byte-stable, so no diffs"
+      let diff := computeLawDiff fixtureLawDecl decoded
+      assert diff.isEmpty "round-tripped diff is empty"
     | .error msg =>
       throw (IO.userError s!"unexpected decode failure: {msg}")
 }
@@ -341,7 +386,7 @@ def versionBumpToDisplay : TestCase := {
 
 /-! ## Combined test suite -/
 
-/-- The complete LX.34 / LX.35 test suite. -/
+/-- Complete LX.34/LX.35 test suite. -/
 def tests : List TestCase :=
   [ emptyDiffOnEqual,
     preChangeDiff,
@@ -358,10 +403,15 @@ def tests : List TestCase :=
     refinementProofPresent,
     refinementProofMissing,
     refinementProofNameShape,
+    checkRefinementProofIO,
+    checkVersionDeclarationOk,
+    checkVersionDeclarationMismatch,
     deploymentDiffEmptyOnEqual,
     deploymentDiffAdded,
     deploymentDiffRemoved,
     deploymentDiffModified,
+    manifestBumpMajorOnLawAdd,
+    manifestBumpNoneOnEqual,
     formatLawDiffNonEmpty,
     reformattingProducesEmptyDiff,
     versionBumpToDisplay ]

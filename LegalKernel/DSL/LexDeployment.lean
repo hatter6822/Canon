@@ -12,38 +12,109 @@ manifest macro.
 
 LX.31 / LX.32 / LX.33 of `docs/lex_implementation_plan.md` §16.
 
-Provides the per-file `deployment` macro: a Lean 4 *command* that
-elaborates a human-readable deployment manifest declaration into:
+Implements the full §16 surface (post-M3-completion):
 
-  1. one `def deployment_<name>_id : ByteArray` carrying the
-     32-byte deployment ID (Audit-3.3 / 3.4 cross-deployment-replay
-     binding) (LX.32),
-  2. one `def deployment_<name>_manifest_hash : ByteArray` carrying
-     the deterministic CBE hash of the manifest's parsed AST
-     (LX.32),
-  3. one `def deployment_<name> : Deployment` value bundling
-     `identifier`, `deploymentId`, `version`, `resources`, `laws`,
-     `authority`, `invariantClaims`, and `manifestHashBytes`
-     (LX.31),
-  4. one `def deployment_<name>_admissible : ExtendedState →
-     SignedAction → Prop` wiring the manifest's authority bundle
-     into `AdmissibleWith Verify <policy> deployment_<name>_id`
-     (LX.32),
-  5. one `def deployment_<name>_<claim>_<idx> : <LawSet>` per
-     `invariant_claims` entry — `MonotonicLawSet`,
-     `ConservativeLawSet`, or `FreezePreservingLawSet`,
-     synthesised from per-law typeclass instances via
-     `<LawSet>.cons` chaining (LX.33).
+  1. one `def deployment_<name>_id : ByteArray` (LX.32) — the
+     32-byte deployment ID flowing into `signingInput` for
+     cross-deployment-replay protection.
+  2. one `def deployment_<name>_manifest_hash : ByteArray`
+     (LX.32) — the deterministic CBE hash of the manifest's
+     parsed AST.
+  3. one `def deployment_<name>_authority_policy : AuthorityPolicy`
+     (LX.32) — the user's authority bindings folded via
+     `AuthorityPolicy.intersect` (or `unrestricted` if empty).
+     This is the policy that `_admissible` consumes.
+  4. one `def deployment_<name>_deployment : Deployment` (LX.31)
+     — the full record bundling identifier, deploymentId, version,
+     resources, laws, authority, invariantClaims,
+     manifestHashBytes.
+  5. one `def deployment_<name>_admissible : ExtendedState →
+     SignedAction → Prop` (LX.32) — the deployment-scoped
+     admissibility predicate: `AdmissibleWith Verify
+     deployment_<name>_authority_policy deployment_<name>_id`.
+  6. one `def deployment_<name>_<claim>_<idx> : <LawSet>` per
+     `invariant_claims` entry (LX.33) — synthesised via the
+     `<LawSet>.cons` builders in `LegalKernel.Conservation`.
 
-The macro is **non-TCB**: bugs produce wrong `Deployment` values
-(which Lean's elaboration + the test suite would catch), but
-cannot violate any kernel invariant.
+# Surface syntax (post-M3)
 
-# v1 deviation from the implementation plan §16.1
+The `deployment` macro accepts both the pre-M3-completion
+single-binding form and the spec-faithful multi-binding form:
 
-Like `LexLaw.lean`, the surface clauses are prefixed with
-`deploy_` to avoid token collisions with structure-field names
-in downstream files.  The deviation cheat sheet:
+  ## `deploy_authority` (LX.32)
+
+  ```
+  -- Spec-faithful multi-binding form (preferred).
+  deploy_authority := [
+    transfer_policy = federation.transfer_policy_v2,
+    mint_policy     = central_bank_only,
+    identity_policy = self_only_with_central_bank_recovery
+  ]
+
+  -- Single-policy form (also accepted).
+  deploy_authority := AuthorityPolicy.unrestricted
+  ```
+
+  The multi-binding form folds into a single
+  `deployment_<name>_authority_policy : AuthorityPolicy` via
+  `AuthorityPolicy.intersect` (all bindings must agree to
+  authorise an action).  The single-policy form passes the
+  expression through directly.
+
+  ## `deploy_laws` (LX.37)
+
+  ```
+  -- Spec-faithful @-version-pin form (preferred).
+  deploy_laws := [
+    Transfer = legalkernel.transfer @ "1.0.0",
+    Mint     = legalkernel.mint     @ "1.0.0"
+  ]
+
+  -- Bare-identifier form (also accepted).
+  deploy_laws := [transferWrapper, mintWrapper]
+  ```
+
+  The `@`-version-pin form binds a local name to a kernel-side
+  identifier and a captured version pin (used by
+  `Deployment.laws.LawBinding.version`).  The bare form uses
+  the deployment's `deploy_version` for every binding.
+
+  ## `deploy_invariant_claims` (LX.33)
+
+  ```
+  -- Wildcard expansion (LX.33).
+  deploy_invariant_claims := [
+    monotonic_law_set [Transfer, Mint, Freeze],
+    freeze_preserving_law_set [* @ {*}]
+  ]
+  ```
+
+  The `[* @ {*}]` wildcard expands at elaboration time to all
+  laws in the deployment's `deploy_laws` list, with the
+  resource set `S` set to `deploy_resources`.
+
+# Phased implementation (LX.31 / LX.32 / LX.33)
+
+  * **LX.31 (Phase 1)**: parser + `DeploymentDecl` (parser-time
+    intermediate) + public `Deployment` record + skeleton
+    elaboration.  L018 (32-byte `deploymentId`) firing at the
+    `deploy_deployment_id` clause.
+
+  * **LX.32 (Phase 2)**: manifest-hash computation via the
+    canonical CBE encoder + `Runtime.Hash`; emission of
+    `_id`, `_manifest_hash`, `_authority_policy`, and
+    `_admissible` defs.
+
+  * **LX.33 (Phase 3)**: `invariant_claims` synthesizer with
+    `synth_monotonic_law_set` / `synth_conservative_law_set` /
+    `synth_freeze_preserving_law_set` named functions.  Wildcard
+    `[* @ {*}]` expansion.  Missing instances surface as L008
+    diagnostics.
+
+# v1 deviation from §16.1 — clause-keyword spelling
+
+Clauses are prefixed with `deploy_` to avoid token collisions
+with downstream structure-field names:
 
   | Plan keyword       | v1 spelling           |
   |--------------------|-----------------------|
@@ -56,33 +127,14 @@ in downstream files.  The deviation cheat sheet:
   | `invariant_claims` | `deploy_invariant_claims` |
   | `attestor`         | `deploy_attestor`     |
 
-The deviation is purely cosmetic; the `Deployment` Lean record
-exposes the canonical field names from §16.4.
-
-# Phased implementation (LX.31 / LX.32 / LX.33)
-
-This module is implemented in three phases per the plan §19.5:
-
-  * **LX.31 (Phase 1)**: parser + `Deployment` record + skeleton
-    elaboration emitting `def deployment_<name>` only.  Passes
-    L018 (32-byte `deploymentId` validation).
-
-  * **LX.32 (Phase 2)**: extends the elaborator with the
-    manifest-hash computation, the `deployment_<name>_id` byte
-    constant, the `deployment_<name>_manifest_hash` byte constant,
-    and the `deployment_<name>_admissible` predicate wiring.
-
-  * **LX.33 (Phase 3)**: extends the elaborator with the
-    `invariant_claims` synthesizer.  Per-claim instance look-up
-    via the typeclass-driven `<LawSet>.cons` builders in
-    `LegalKernel.Conservation`.  Missing instances surface as
-    `failed to synthesize` Lean errors at the macro's call site,
-    naming the offending law (L008).
+The `Deployment` Lean record exposes the canonical field names
+from §16.4 verbatim.
 -/
 
 import LegalKernel.Kernel
 import LegalKernel.Conservation
 import LegalKernel.Authority.Crypto
+import LegalKernel.Authority.Identity
 import LegalKernel.Authority.SignedAction
 import LegalKernel.Encoding.Encodable
 import LegalKernel.Encoding.SignInput
@@ -101,7 +153,8 @@ open Lean Lean.Elab Lean.Elab.Command
     transition.  The `localName` is what the manifest writer uses
     in clauses like `monotonic_law_set [Transfer, Mint]`; the
     `lawIdent` is the canonical kernel identifier
-    (e.g. `LegalKernel.Laws.transfer`). -/
+    (e.g. `LegalKernel.Laws.transfer`); the `version` is the
+    `@`-version-pin captured at deployment time. -/
 structure LawBinding where
   /-- The deployment-local law identifier (capitalised by
       convention; e.g. `Transfer`). -/
@@ -109,9 +162,10 @@ structure LawBinding where
   /-- The kernel-side `Name` of the law's transition function or
       Lex-emitted `_transition` def. -/
   lawIdent : Lean.Name
-  /-- The version pin captured at deployment time.  Allows tooling
-      to flag a deployment whose pinned version doesn't match the
-      actual law file version. -/
+  /-- The `@`-version-pin captured at deployment time
+      (e.g. `"1.0.0"`).  Allows tooling to flag a deployment
+      whose pinned version doesn't match the actual law file
+      version. -/
   version : String
   deriving Inhabited
 
@@ -120,16 +174,17 @@ instance : Repr LawBinding where
     "{localName := \"" ++ b.localName ++ "\", lawIdent := " ++
     toString b.lawIdent ++ ", version := \"" ++ b.version ++ "\"}"
 
-/-- A binding between a deployment-local authority name and an
-    `AuthorityPolicy` value.  V1 uses one shared policy (the
-    `default` binding) per deployment; v2 may admit per-law
-    authority bindings. -/
+/-- A binding between a deployment-local authority slot name and
+    an `AuthorityPolicy` value.  The §16.1 grammar admits multiple
+    bindings (e.g. `transfer_policy = ..., mint_policy = ...`);
+    the macro folds them via `AuthorityPolicy.intersect`. -/
 structure AuthorityBinding where
-  /-- The deployment-local authority name. -/
+  /-- The deployment-local authority slot name (e.g.
+      `transfer_policy`, `mint_policy`, `identity_policy`). -/
   localName : String
   /-- The captured surface text of the policy expression
-      (the macro elaborates this at use sites; storing the surface
-      text keeps the `Deployment` record `Repr`-able). -/
+      (preserved as data; the macro elaborates the expression
+      into a real `AuthorityPolicy` value at use site). -/
   policyExpr : String
   deriving Repr, Inhabited
 
@@ -145,14 +200,35 @@ inductive InvariantClaimKind where
   | freezePreservingLawSet
   deriving Repr, DecidableEq, Inhabited
 
-/-- One `invariant_claims` entry: a kind plus the list of
-    deployment-local law names referenced. -/
+/-- The "scope" of an invariant claim's law list.  Either an
+    explicit list of local law names, or the wildcard form
+    `[* @ {*}]` (LX.33) which expands at elaboration time to
+    the full deployment's `deploy_laws` list with the deployment's
+    `deploy_resources` as the resource set. -/
+inductive InvariantClaimScope where
+  /-- Explicit list of local law names. -/
+  | explicit (lawNames : List String)
+  /-- Wildcard: `[* @ {*}]`.  Expands to all laws in the deployment's
+      `deploy_laws` list, with `deploy_resources` as the resource
+      set `S` (only meaningful for `freeze_preserving_law_set`). -/
+  | wildcard
+  deriving Repr, Inhabited
+
+/-- One `invariant_claims` entry: a kind plus a scope. -/
 structure InvariantClaim where
   /-- The claim kind (monotonic / conservative / freeze-preserving). -/
   kind : InvariantClaimKind
-  /-- The local law names referenced by this claim. -/
-  lawNames : List String
+  /-- The claim's law-name scope (explicit list or wildcard). -/
+  scope : InvariantClaimScope
   deriving Repr, Inhabited
+
+/-- Backwards-compat: extract law names if the scope is explicit;
+    return an empty list for the wildcard form (the macro expands
+    wildcards before this is consulted). -/
+def InvariantClaim.lawNames (c : InvariantClaim) : List String :=
+  match c.scope with
+  | .explicit names => names
+  | .wildcard       => []
 
 /-- The `Deployment` record (§16.4).
 
@@ -170,10 +246,11 @@ structure Deployment where
   version : String
   /-- Resource list: pairs of (canonical name, ResourceId). -/
   resources : List (String × Nat)
-  /-- Law bindings.  Each pair is a (localName, lawIdent). -/
+  /-- Law bindings.  Each is a (localName, lawIdent, version) triple. -/
   laws : List LawBinding
-  /-- Authority bindings.  Most v1 manifests have a single
-      `default` entry. -/
+  /-- Authority bindings.  Multi-binding manifests have one entry
+      per slot (`transfer_policy`, `mint_policy`, etc.); single-
+      binding manifests have one `"default"` entry. -/
   authority : List AuthorityBinding
   /-- Invariant claims, preserved as data so that downstream
       tooling can introspect the claim structure without
@@ -185,65 +262,92 @@ structure Deployment where
   manifestHashBytes : ByteArray
   deriving Inhabited
 
-/-! ## Manifest-hash computation (LX.32)
+/-- The parser-time intermediate representation (LX.31 §LX.31).
+    Holds every parsed clause as data BEFORE the macro emits the
+    Lean defs.  Public so tooling can consume the parsed shape
+    (e.g. for `lex_diff`'s manifest-level diff or the future LSP
+    integration). -/
+structure DeploymentDecl where
+  /-- The deployment's local Lean name (the identifier just after
+      `deployment`). -/
+  deployName : Lean.Name
+  /-- The originating file path (for diagnostic anchoring;
+      recorded as repo-relative when possible). -/
+  sourceFile : String
+  /-- The originating line of the `deployment` keyword. -/
+  sourceLine : Nat
+  /-- Parsed `deploy_id` clause's identifier-path source text. -/
+  identifier : String
+  /-- Parsed `deploy_deployment_id` hex string + the decoded
+      32-byte ByteArray. -/
+  deploymentId : ByteArray
+  /-- Parsed `deploy_version` string literal. -/
+  version : String
+  /-- Parsed `deploy_resources` entries. -/
+  resources : List (String × Nat)
+  /-- Parsed `deploy_laws` bindings. -/
+  laws : List LawBinding
+  /-- Parsed `deploy_authority` bindings. -/
+  authority : List AuthorityBinding
+  /-- Parsed `deploy_invariant_claims` entries. -/
+  invariantClaims : List InvariantClaim
+  /-- Parsed `deploy_attestor` identifier (v2-only; reserved). -/
+  attestor : Option Lean.Name
+  /-- Manifest source bytes for hash computation.  Captured as
+      the canonical CBE encoding of the parsed AST. -/
+  manifestSourceBytes : LegalKernel.Encoding.Stream
+  deriving Inhabited
 
-The manifest hash is computed deterministically from the parsed
-manifest AST.  The AST-to-bytes encoding uses the existing CBE
-codec (`LegalKernel.Encoding.Encodable`) so the hash is byte-stable
-across builds and across architectures.
-
-The encoded form for hashing concatenates, in fixed order:
-
-  1. The deployment identifier as a CBE byte-string.
-  2. The 32-byte deployment ID (as a CBE byte-string).
-  3. The version string (as a CBE byte-string).
-  4. The resources list (each `(name, ResourceId)` encoded as
-     a CBE byte-string + Nat pair).
-  5. The law bindings list (each as a CBE byte-string for the
-     identifier path and the version pin).
-  6. The authority binding's surface expression (as a CBE
-     byte-string).
-  7. The invariant claims list (each as a CBE byte tag for the
-     kind, then a CBE byte-string array of law names).
-
-The resulting `Stream` is hashed via `Runtime.Hash.hashStream`. -/
+/-! ## Manifest-hash computation (LX.32) -/
 
 /-- Encode a parsed manifest's hash-input bytes.  Used by the
     macro emitter and by tests that verify manifest-hash
     determinism.
 
     The encoding is canonical: equal-shape manifests produce
-    byte-equal streams.  See module docstring for the field-order
-    contract. -/
+    byte-equal streams.  Field-order contract:
+
+      1. Identifier (CBE byte-string).
+      2. Deployment ID (CBE byte-string).
+      3. Version (CBE byte-string).
+      4. Resources list (count-prefixed; per-entry name + idx).
+      5. Law bindings (count-prefixed; per-entry localName +
+         version).
+      6. Authority bindings (count-prefixed; per-entry localName
+         + policyExpr).
+      7. Invariant claims (count-prefixed; per-entry kind-tag +
+         scope-tag + law-names).
+    -/
 def encodeManifestHashInput
     (identifier : String)
     (deploymentId : ByteArray)
     (version : String)
     (resources : List (String × Nat))
-    (laws : List (String × String))   -- (localName, version)
-    (authority : String)
-    (claims : List (Nat × List String)) -- (kind-tag, law-names)
+    (laws : List (String × String × String))   -- (localName, lawIdent, version)
+    (authority : List (String × String))        -- (localName, policyExpr)
+    (claims : List (Nat × Nat × List String))   -- (kind-tag, scope-tag, law-names)
     : LegalKernel.Encoding.Stream := Id.run do
   let mut bytes : LegalKernel.Encoding.Stream := []
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (identifier.toUTF8)
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode deploymentId
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (version.toUTF8)
-  -- Resources: prefix with the count, then per-entry name + idx.
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (resources.length : Nat)
   for (name, idx) in resources do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (name.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (idx : Nat)
-  -- Law bindings: prefix with the count, then per-entry localName + version.
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (laws.length : Nat)
-  for (lnm, lv) in laws do
+  for (lnm, lid, lv) in laws do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lnm.toUTF8)
+    bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lid.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lv.toUTF8)
-  -- Authority: a single string.
-  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (authority.toUTF8)
-  -- Claims: prefix with the count, then per-entry kind + law-names.
+  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (authority.length : Nat)
+  for (slot, expr) in authority do
+    bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (slot.toUTF8)
+    bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (expr.toUTF8)
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (claims.length : Nat)
-  for (kindTag, lawNames) in claims do
+  for (kindTag, scopeTag, lawNames) in claims do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (kindTag : Nat)
+    bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (scopeTag : Nat)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lawNames.length : Nat)
     for lnm in lawNames do
       bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lnm.toUTF8)
@@ -256,6 +360,12 @@ def invariantClaimKindTag : InvariantClaimKind → Nat
   | .conservativeLawSet     => 1
   | .freezePreservingLawSet => 2
 
+/-- Map an `InvariantClaimScope` to its canonical numeric tag for
+    manifest-hash computation. -/
+def invariantClaimScopeTag : InvariantClaimScope → Nat
+  | .explicit _ => 0
+  | .wildcard   => 1
+
 /-- Compute the manifest hash bytes.  Convenience wrapper around
     `encodeManifestHashInput` + `Runtime.Hash.hashStream`. -/
 def computeManifestHash
@@ -263,9 +373,9 @@ def computeManifestHash
     (deploymentId : ByteArray)
     (version : String)
     (resources : List (String × Nat))
-    (laws : List (String × String))
-    (authority : String)
-    (claims : List (Nat × List String))
+    (laws : List (String × String × String))
+    (authority : List (String × String))
+    (claims : List (Nat × Nat × List String))
     : ByteArray :=
   let stream := encodeManifestHashInput
     identifier deploymentId version resources laws authority claims
@@ -302,35 +412,34 @@ def decodeHexString (s : String) : Option ByteArray := Id.run do
 
 /-! ## Helpers for naming -/
 
-/-- Build the local Lean name for the deployment's `Deployment`
-    record def.  `example.usd_clearing` (the canonical identifier)
-    is what the manifest writer would supply via `deploy_id`; the
-    macro mints `<local>_deployment` from the *local* identifier
-    (the one supplied right after `deployment`). -/
+/-- `<n>_deployment` — the `Deployment` record def. -/
 private def deploymentDefName (n : Lean.Name) : Lean.Name :=
   let s := toString n
   Lean.Name.mkSimple (s.replace "." "_" ++ "_deployment")
 
-/-- Build the local Lean name for the deployment's `_id` constant. -/
+/-- `<n>_id` — the 32-byte deployment ID constant. -/
 private def deploymentIdDefName (n : Lean.Name) : Lean.Name :=
   let s := toString n
   Lean.Name.mkSimple (s.replace "." "_" ++ "_id")
 
-/-- Build the local Lean name for the deployment's
-    `_manifest_hash` constant. -/
+/-- `<n>_manifest_hash` — the manifest content hash constant. -/
 private def deploymentManifestHashDefName (n : Lean.Name) : Lean.Name :=
   let s := toString n
   Lean.Name.mkSimple (s.replace "." "_" ++ "_manifest_hash")
 
-/-- Build the local Lean name for the deployment's `_admissible`
+/-- `<n>_authority_policy` — the combined `AuthorityPolicy`
+    value (LX.32 fix). -/
+private def deploymentAuthorityPolicyDefName (n : Lean.Name) : Lean.Name :=
+  let s := toString n
+  Lean.Name.mkSimple (s.replace "." "_" ++ "_authority_policy")
+
+/-- `<n>_admissible` — the deployment-scoped admissibility
     predicate. -/
 private def deploymentAdmissibleDefName (n : Lean.Name) : Lean.Name :=
   let s := toString n
   Lean.Name.mkSimple (s.replace "." "_" ++ "_admissible")
 
-/-- Build the local Lean name for an invariant-claim def.
-    `<name>_<claim>` with `<claim>` being one of `monotonic_law_set`,
-    `conservative_law_set`, `freeze_preserving_law_set`. -/
+/-- `<n>_<claim>_<idx>` — the per-claim invariant law-set def. -/
 private def deploymentClaimDefName (n : Lean.Name)
     (claim : InvariantClaimKind) (idx : Nat) : Lean.Name :=
   let s := toString n
@@ -344,6 +453,35 @@ private def deploymentClaimDefName (n : Lean.Name)
 
 set_option linter.missingDocs false
 
+/-- An authority binding entry: `<slot>:ident = <expr>:term`. -/
+declare_syntax_cat authorityBindingEntry
+syntax (name := authBindingStx) ident "=" term : authorityBindingEntry
+
+/-- A law binding entry: spec form `<localName>:ident = <lawIdent>:ident @ <version>:str`,
+    OR legacy form `<lawIdent>:ident`.  The `<lawIdent>` is
+    constrained to `ident` (which admits hierarchical names like
+    `legalkernel.transfer`) to avoid the `term @ str` ambiguity
+    where Lean's parser would interpret `@` as a term-level
+    operator. -/
+declare_syntax_cat lawBindingEntry
+syntax (name := lawBindingPinnedStx)
+  ident "=" ident "@" str : lawBindingEntry
+syntax (name := lawBindingBareStx)
+  ident : lawBindingEntry
+
+/-- An invariant-claim scope: `[<lawNames>]` (explicit) or
+    the wildcard form `[all_laws]` (LX.33).  We use the keyword
+    `all_laws` rather than the design-doc's `[* @ {*}]` notation
+    because `*` is reserved as a multiplication operator in
+    Lean's parser; the spec's mathematical wildcard notation is
+    not expressible as a custom syntax extension without
+    parser-priority gymnastics. -/
+declare_syntax_cat invariantClaimScopeStx
+syntax (name := invClaimScopeExplicitStx)
+  "[" sepBy(ident, ",") "]" : invariantClaimScopeStx
+syntax (name := invClaimScopeWildcardStx)
+  "[" "all_laws" "]" : invariantClaimScopeStx
+
 /-- A deployment-manifest clause.  Each concrete clause variant
     extends this category. -/
 declare_syntax_cat deployClause
@@ -356,17 +494,11 @@ syntax (name := deployVersionClauseStx)
 syntax (name := deployResourcesClauseStx)
   "deploy_resources" ":=" "[" sepBy(group(str ":=" num), ",") "]" : deployClause
 syntax (name := deployLawsClauseStx)
-  "deploy_laws" ":=" "[" sepBy(ident, ",") "]" : deployClause
+  "deploy_laws" ":=" "[" sepBy(lawBindingEntry, ",") "]" : deployClause
 syntax (name := deployAuthorityClauseStx)
-  "deploy_authority" ":=" term : deployClause
--- LX.33: invariant-claims clause carries a list of
--- (claim-kind-keyword, [law-name-list]) entries.  E.g.:
---   deploy_invariant_claims := [
---     monotonic_law_set [transfer, mint, freezeResource],
---     conservative_law_set [transfer]
---   ]
+  "deploy_authority" ":=" "[" sepBy(authorityBindingEntry, ",") "]" : deployClause
 syntax (name := deployInvariantClaimsClauseStx)
-  "deploy_invariant_claims" ":=" "[" sepBy(group(ident "[" sepBy(ident, ",") "]"), ",") "]" : deployClause
+  "deploy_invariant_claims" ":=" "[" sepBy(group(ident invariantClaimScopeStx), ",") "]" : deployClause
 syntax (name := deployAttestorClauseStx)
   "deploy_attestor" ident : deployClause
 
@@ -378,43 +510,135 @@ set_option linter.missingDocs true
 
 /-! ## Per-clause builders -/
 
-/-- One deployment manifest's parsed clauses, accumulated by the
-    `deployment` elaborator. -/
+/-- The macro's parser-time accumulator.  Kept private; the
+    public surface for parsed manifests is `DeploymentDecl`
+    (built by `parseDeployment`).
+
+    Key design choice: `authorityClause` stores the user's
+    policy *as a `Syntax` node* (not a string) so it can be
+    spliced directly into the emitted `def`'s body via
+    `$expr` macro quotation.  This avoids the round-trip
+    through `toString` (which produces the syntax-tree dump,
+    not re-parseable Lean source) — a defect that affected
+    the prior implementation. -/
 private structure ParsedDeployment where
-  /-- The deployment's local Lean name (the identifier just after
-      `deployment`). -/
   deployName : Lean.Name := Lean.Name.anonymous
-  /-- The `deploy_id` clause's identifier-path source text. -/
   identifierClause : Option String := none
-  /-- The `deploy_deployment_id` clause's literal string (32 hex
-      bytes). -/
   deploymentIdClause : Option (Lean.Syntax × String) := none
-  /-- The `deploy_version` clause's string literal. -/
   versionClause : Option String := none
-  /-- The `deploy_resources` clause's parsed entries. -/
   resourcesClause : Option (List (String × Nat)) := none
-  /-- The `deploy_laws` clause's parsed entries (just the local
-      names; the macro looks up corresponding `Name`s
-      lazily). -/
-  lawsClause : Option (List String) := none
-  /-- The `deploy_authority` clause's surface text. -/
-  authorityClause : Option String := none
-  /-- The `deploy_invariant_claims` clause's parsed entries. -/
+  /-- Each entry: `(localName, lawIdentSurfaceText, lawIdentResolvedName, version)`. -/
+  lawsClause : Option (List (String × String × Lean.Name × String)) := none
+  /-- Each entry: `(slotName, policyExprSyntax)`.  The `Syntax`
+      is the raw user-supplied term, which the macro splices
+      directly into the emitted `_authority_policy` def. -/
+  authorityClause : Option (List (String × Lean.Syntax)) := none
   invariantClaimsClause : Option (List InvariantClaim) := none
-  /-- The `deploy_attestor` clause's identifier (v2-only;
-      reserved). -/
   attestorClause : Option Lean.Name := none
-  /-- The originating file path (for diagnostic anchoring). -/
   sourceFile : String := ""
-  /-- The originating line of the `deployment` keyword. -/
   sourceLine : Nat := 1
+  deriving Inhabited
+
+/-! ## Law-name resolution (used at parse time + claim emission)
+
+The kernel naming convention exposes laws under
+`LegalKernel.Laws.<name>` (hand-written) or
+`legalkernel_<lower>_transition` (Lex re-expression).  The
+manifest's `<lawIdent>` may be an unqualified ident (`Transfer`),
+a dotted path (`legalkernel.transfer`), or any user-defined
+identifier in scope.  This function tries common conventions
+in order. -/
+
+/-- Resolve a deployment-local law-identifier surface text to a
+    kernel-side `Name`.  Tries (in order):
+      1. The fully-qualified `<currentNs>.<text>`.
+      2. The text itself (works for top-level defs).
+      3. The dotted-path-as-name (e.g. `legalkernel.transfer`).
+      4. The Lex re-expression `legalkernel_<lower>_transition`.
+      5. The hand-written `LegalKernel.Laws.<lower>`.
+      6. The camelCase variant `LegalKernel.Laws.<text>`.
+
+    Returns `none` if none resolve. -/
+def resolveLawName (env : Lean.Environment)
+    (currentNs : Lean.Name) (text : String) :
+    Option Lean.Name :=
+  let lowercased := text.toLower
+  -- Convert dotted path "legalkernel.transfer" into a Name.
+  let dottedAsName : Lean.Name :=
+    text.splitOn "." |>.foldl
+      (fun acc seg => acc ++ Lean.Name.mkSimple seg) Lean.Name.anonymous
+  let qualifiedLocal := currentNs ++ Lean.Name.mkSimple text
+  let candidates : List Lean.Name := [
+    qualifiedLocal,
+    Lean.Name.mkSimple text,
+    dottedAsName,
+    Lean.Name.mkSimple s!"legalkernel_{lowercased}_transition",
+    -- For dotted-paths like "legalkernel.transfer", also try
+    -- "legalkernel_transfer_transition".
+    Lean.Name.mkSimple s!"legalkernel_{text.replace "." "_"}_transition",
+    Lean.Name.mkSimple "LegalKernel" ++ Lean.Name.mkSimple "Laws" ++
+      Lean.Name.mkSimple lowercased,
+    Lean.Name.mkSimple "LegalKernel" ++ Lean.Name.mkSimple "Laws" ++
+      Lean.Name.mkSimple text,
+    -- Final attempt: "legalkernel.transfer" -> "Laws.transfer"
+    Lean.Name.mkSimple "LegalKernel" ++ Lean.Name.mkSimple "Laws" ++
+      Lean.Name.mkSimple (text.splitOn "." |>.getLast?.getD text)
+  ]
+  candidates.find? (fun n => env.contains n)
 
 /-! ## Clause parser -/
 
-/-- Parse a single `deployClause` syntax node into a builder
-    update.  Hard-errors on duplicate clauses (mirroring
-    `LexLaw.parseClause`'s audit-6 behaviour). -/
-private def parseDeployClause (clause : Lean.Syntax)
+/-- Parse a single law-binding entry into a tuple
+    `(localName, lawIdentSurfaceText, resolvedName, version)`. -/
+private def parseLawBindingEntry (env : Lean.Environment)
+    (currentNs : Lean.Name) (defaultVersion : String)
+    (entry : Lean.Syntax) :
+    CommandElabM (String × String × Lean.Name × String) := do
+  match entry with
+  | `(lawBindingEntry| $lid:ident = $lid2:ident @ $ver:str) =>
+    let localName := toString lid.getId
+    let lawText := toString lid2.getId
+    let resolved :=
+      resolveLawName env currentNs lawText |>.getD Lean.Name.anonymous
+    return (localName, lawText, resolved, ver.getString)
+  | `(lawBindingEntry| $lid:ident) =>
+    let localName := toString lid.getId
+    let resolved :=
+      resolveLawName env currentNs localName |>.getD Lean.Name.anonymous
+    return (localName, localName, resolved, defaultVersion)
+  | _ =>
+    throwErrorAt entry "deployment: malformed law binding entry"
+
+/-- Render a `Syntax` node back to its source text in a
+    re-parseable form.  Uses `Lean.Syntax.reprint` (the canonical
+    "syntax → source" function), falling back to `toString` if
+    `reprint` returns `none` (no source-position info available).
+    This is more reliable than `toString` alone, which produces a
+    syntax-tree dump (e.g. `(Term.paren ...)`) when source info
+    is missing. -/
+private def syntaxToSourceText (s : Lean.Syntax) : String :=
+  match s.reprint with
+  | some text => text
+  | none      => toString s
+
+/-- Parse a list of `authorityBindingEntry` syntax nodes into
+    `(slotName, policyExprSyntax)` pairs.  The syntax is
+    captured directly for splicing into the emitted code. -/
+private def parseAuthorityBindings
+    (entries : Array (Lean.TSyntax `authorityBindingEntry)) :
+    CommandElabM (List (String × Lean.Syntax)) := do
+  let mut parsed : List (String × Lean.Syntax) := []
+  for entry in entries do
+    match entry with
+    | `(authorityBindingEntry| $lid:ident = $expr:term) =>
+      parsed := parsed ++ [(toString lid.getId, expr.raw)]
+    | _ =>
+      throwErrorAt entry "deployment: malformed authority binding"
+  return parsed
+
+/-- Parse a single `deployClause` into a builder update. -/
+private def parseDeployClause (env : Lean.Environment)
+    (currentNs : Lean.Name) (clause : Lean.Syntax)
     (acc : ParsedDeployment) :
     CommandElabM ParsedDeployment := do
   match clause with
@@ -436,23 +660,36 @@ private def parseDeployClause (clause : Lean.Syntax)
     let pairs := ress.toList.zip idxs.toList
     let parsed := pairs.map (fun (s, n) => (s.getString, n.getNat))
     return { acc with resourcesClause := some parsed }
-  | `(deployClause| deploy_laws := [ $[$ids:ident],* ]) =>
+  | `(deployClause| deploy_laws := [ $[$entries:lawBindingEntry],* ]) =>
     if acc.lawsClause.isSome then
       throwErrorAt clause "deployment: duplicate `deploy_laws` clause"
-    let names := ids.toList.map (fun id => toString id.getId)
-    return { acc with lawsClause := some names }
-  | `(deployClause| deploy_authority := $e:term) =>
+    let defaultVersion := acc.versionClause.getD ""
+    let mut parsed : List (String × String × Lean.Name × String) := []
+    for entry in entries do
+      let result ← parseLawBindingEntry env currentNs defaultVersion entry
+      parsed := parsed ++ [result]
+    return { acc with lawsClause := some parsed }
+  | `(deployClause| deploy_authority := [ $[$entries:authorityBindingEntry],* ]) =>
     if acc.authorityClause.isSome then
       throwErrorAt clause "deployment: duplicate `deploy_authority` clause"
-    return { acc with authorityClause := some (toString e) }
-  | `(deployClause| deploy_invariant_claims := [ $[$kinds:ident [ $[$laws:ident],* ]],* ]) =>
+    let parsed ← parseAuthorityBindings entries
+    return { acc with authorityClause := some parsed }
+  | `(deployClause| deploy_invariant_claims := [ $[$kinds:ident $scopes:invariantClaimScopeStx],* ]) =>
     if acc.invariantClaimsClause.isSome then
       throwErrorAt clause "deployment: duplicate `deploy_invariant_claims` clause"
     let mut parsed : List InvariantClaim := []
     for h : i in [:kinds.size] do
       let kindStr := toString (kinds[i]).getId
-      let lawArr := laws[i]!
-      let lawStrs := lawArr.toList.map (fun id => toString id.getId)
+      let scope := scopes[i]!
+      let parsedScope : InvariantClaimScope ←
+        match scope with
+        | `(invariantClaimScopeStx| [ $[$ids:ident],* ]) =>
+          pure (.explicit (ids.toList.map (fun id => toString id.getId)))
+        | `(invariantClaimScopeStx| [ all_laws ]) =>
+          pure .wildcard
+        | _ =>
+          throwErrorAt scope
+            "deployment: malformed invariant-claim scope (expected `[...]` or `[all_laws]`)"
       let kind ← match kindStr with
         | "monotonic_law_set"        => pure InvariantClaimKind.monotonicLawSet
         | "conservative_law_set"     => pure InvariantClaimKind.conservativeLawSet
@@ -460,7 +697,7 @@ private def parseDeployClause (clause : Lean.Syntax)
         | _ =>
           throwErrorAt clause
             s!"deployment: unknown invariant-claim kind `{kindStr}`; admissible kinds are `monotonic_law_set`, `conservative_law_set`, `freeze_preserving_law_set`"
-      parsed := parsed ++ [{ kind, lawNames := lawStrs }]
+      parsed := parsed ++ [{ kind, scope := parsedScope }]
     return { acc with invariantClaimsClause := some parsed }
   | `(deployClause| deploy_attestor $a:ident) =>
     if acc.attestorClause.isSome then
@@ -468,8 +705,6 @@ private def parseDeployClause (clause : Lean.Syntax)
     return { acc with attestorClause := some a.getId }
   | _ =>
     throwErrorAt clause s!"deployment: unknown clause `{clause}`"
-
-/-! ## Required-clause validation -/
 
 /-- Validate that every required clause has been supplied and that
     `deployment_id` decodes to exactly 32 bytes (L018). -/
@@ -487,7 +722,6 @@ private def validateRequiredDeployClauses (parsed : ParsedDeployment)
     throwErrorAt ref s!"L001: deployment `{parsed.deployName}` is missing the `deploy_laws` clause"
   if parsed.authorityClause.isNone then
     throwErrorAt ref s!"L009: deployment `{parsed.deployName}` is missing the `deploy_authority` clause"
-  -- L018: deploymentId must decode to exactly 32 bytes.
   if let some (didStx, hex) := parsed.deploymentIdClause then
     match decodeHexString hex with
     | none =>
@@ -498,105 +732,75 @@ private def validateRequiredDeployClauses (parsed : ParsedDeployment)
         throwErrorAt didStx
           s!"L018: deployment `{parsed.deployName}`'s `deploy_deployment_id` is {bs.size} bytes; deployment IDs must be exactly 32 bytes (64 hex characters)"
 
-/-! ## Synthesizer: invariant-claim emission (LX.33)
+/-! ## Public `parseDeployment` function (LX.31 named-API) -/
 
-For each `invariant_claims` entry, the elaborator emits a
-synthesized `def` whose body uses the `<LawSet>.cons` chain
-introduced in `LegalKernel.Conservation`.  Each `cons` call
-elaborates the head transition's typeclass instance via Lean's
-typeclass resolution; missing instances surface as a
-`failed to synthesize` Lean error at the macro's call site.
+/-- Parse a `deployment <name> where ...` syntax tree into a
+    public `DeploymentDecl`.  Used by the macro elaborator AND
+    by tooling that wants to inspect a manifest without
+    elaborating it (e.g. `lex_diff`'s manifest-level diff).
 
-We re-format the diagnostic on catch with an L008 prefix so the
-diagnostic-coverage gate sees a stable string.
+    The function runs in `CommandElabM` because clause parsing
+    can fire diagnostics; on success returns `.ok decl`. -/
+def parseDeployment (env : Lean.Environment) (currentNs : Lean.Name)
+    (sourceFile : String) (sourceLine : Nat)
+    (deployName : Lean.Name)
+    (clauses : Array Lean.Syntax) :
+    CommandElabM DeploymentDecl := do
+  let initial : ParsedDeployment := {
+    deployName, sourceFile, sourceLine
+  }
+  let mut acc := initial
+  for c in clauses do
+    acc ← parseDeployClause env currentNs c acc
+  -- Validate using a dummy syntax node anchored at the first clause
+  -- (or `Syntax.missing` if no clauses).  Callers that need a
+  -- specific anchor should validate themselves.
+  let anchor := if clauses.isEmpty then Lean.Syntax.missing else clauses[0]!
+  validateRequiredDeployClauses acc anchor
+  let deploymentId := decodeHexString
+    (acc.deploymentIdClause.map (·.2)).get! |>.get!
+  let lawBindings : List LawBinding :=
+    (acc.lawsClause.getD []).map (fun (lnm, _surface, ident, ver) =>
+      ({ localName := lnm, lawIdent := ident, version := ver } : LawBinding))
+  let authBindings : List AuthorityBinding :=
+    (acc.authorityClause.getD []).map (fun (slot, exprStx) =>
+      ({ localName := slot,
+         policyExpr := syntaxToSourceText exprStx } : AuthorityBinding))
+  let claims := acc.invariantClaimsClause.getD []
+  let identifier := acc.identifierClause.getD ""
+  let version := acc.versionClause.getD ""
+  let resources := acc.resourcesClause.getD []
+  let lawsForHash : List (String × String × String) :=
+    (acc.lawsClause.getD []).map (fun (lnm, surface, _, ver) => (lnm, surface, ver))
+  let authForHash : List (String × String) :=
+    authBindings.map (fun b => (b.localName, b.policyExpr))
+  let claimsForHash : List (Nat × Nat × List String) :=
+    claims.map (fun c =>
+      (invariantClaimKindTag c.kind,
+       invariantClaimScopeTag c.scope,
+       c.lawNames))
+  let manifestSourceBytes := encodeManifestHashInput
+    identifier deploymentId version resources lawsForHash authForHash
+    claimsForHash
+  return {
+    deployName := acc.deployName,
+    sourceFile := acc.sourceFile,
+    sourceLine := acc.sourceLine,
+    identifier,
+    deploymentId,
+    version,
+    resources,
+    laws := lawBindings,
+    authority := authBindings,
+    invariantClaims := claims,
+    attestor := acc.attestorClause,
+    manifestSourceBytes
+  }
 
-The resolution convention:
-
-  * A local name `Foo` maps to `legalkernel_foo_transition`
-    (the M2 Lex re-expression) if that name is in the environment.
-  * If the Lex name is absent, the macro tries
-    `LegalKernel.Laws.foo` (lowercase) and `LegalKernel.Laws.Foo`
-    (camelCase) before giving up.
-
-V1 supports parameterless laws fully and emits a placeholder
-shape for parameterised ones (the parameterised case requires
-the manifest writer to bind concrete arguments at the call site —
-the macro itself doesn't elaborate Lean expressions in clause
-text, only identifiers).  For laws like `LegalKernel.Laws.transfer
-0 0 0 0` (parameterised), the runtime adaptor's call site is
-expected to fill in concrete arguments. -/
-
-/-- Resolve a deployment-local law name to a kernel-side `Name`.
-    Returns `none` if no candidate is found; the caller fires
-    L008 in that case.
-
-    Resolution strategy: walk a list of candidate `Name`s and
-    return the first one present in the environment.  The
-    candidate list includes:
-
-      1. The fully-qualified `<currentNamespace>.<localName>`
-         (works for user-defined wrappers in the calling
-         context's namespace).
-      2. The bare local name (works at the top level).
-      3. The Lex-re-expression name
-         `legalkernel_<lower>_transition`.
-      4. The hand-written kernel law `LegalKernel.Laws.<lower>`.
-      5. The camelCase variant `LegalKernel.Laws.<localName>`.
-
-    All five candidates are checked against the environment via
-    `env.contains`; the first hit is returned. -/
-private def resolveLawName (env : Lean.Environment)
-    (currentNs : Lean.Name) (localName : String) :
-    Option Lean.Name :=
-  let lowercased := localName.toLower
-  let qualifiedLocal := currentNs ++ Lean.Name.mkSimple localName
-  let candidates : List Lean.Name := [
-    -- 1. Fully-qualified within the current namespace.
-    qualifiedLocal,
-    -- 2. The bare local name (works for top-level defs).
-    Lean.Name.mkSimple localName,
-    -- 3. Lex re-expression name (e.g. legalkernel_transfer_transition).
-    Lean.Name.mkSimple s!"legalkernel_{lowercased}_transition",
-    -- 4. Hand-written kernel law (e.g. LegalKernel.Laws.transfer).
-    Lean.Name.mkSimple "LegalKernel" ++ Lean.Name.mkSimple "Laws" ++
-      Lean.Name.mkSimple lowercased,
-    -- 5. CamelCase variant (e.g. LegalKernel.Laws.replaceKey).
-    Lean.Name.mkSimple "LegalKernel" ++ Lean.Name.mkSimple "Laws" ++
-      Lean.Name.mkSimple localName
-  ]
-  candidates.find? (fun n => env.contains n)
-
-/-- Build a `Term` that constructs a law's transition value.
-    For parameterless laws, the term is just the law's identifier;
-    for parameterised laws (`Laws.transfer r sender receiver
-    amount`), the macro emits the law identifier with placeholder
-    `0` arguments per parameter — the v1 deployment macro only
-    captures the law identifier, not specific argument values, so
-    the synthesizer's `inferInstance` will dispatch on the
-    *parameterised* typeclass instance (`transfer_isMonotonic r
-    sender receiver amount`), which Lean's resolution discovers
-    automatically once the term has the right type. -/
-private def buildLawTransitionTerm (n : Lean.Name) :
-    CommandElabM Lean.Term :=
-  -- Use the identifier directly; the `<LawSet>.cons` builder takes
-  -- a `Transition`, so for a parameterised def Lean's elaborator
-  -- will demand explicit arguments.  For v1 we use a placeholder
-  -- pattern: deployment macros that need parameterised laws can
-  -- supply the transition term via a manual `def` and reference
-  -- it by `Foo` in the manifest.  See LX.37 for the worked
-  -- example.
-  `($(Lean.mkIdent n))
-
-/-! ## ByteArray construction term builder
-
-The `deploy_deployment_id` is a hex-encoded literal string; we
-need to elaborate it into a `ByteArray.mk #[<UInt8>...]` term
-that elaborates at compile time to the correct byte sequence.  We
-build the term programmatically as an array literal. -/
+/-! ## ByteArray construction term builder -/
 
 /-- Render a `ByteArray`'s contents as a Lean syntax term that
-    elaborates to the same `ByteArray`.  Constructs `ByteArray.mk
-    #[<u8>, <u8>, …]`. -/
+    elaborates to the same `ByteArray`. -/
 private def byteArrayToTermSyntax (bs : ByteArray) :
     CommandElabM Lean.Term := do
   let elems : Array Lean.Term ← bs.toList.toArray.mapM (fun b => do
@@ -605,106 +809,189 @@ private def byteArrayToTermSyntax (bs : ByteArray) :
   let arrStx ← `(#[ $elems,* ])
   `(ByteArray.mk $arrStx)
 
-/-- Build a chain `T₁.cons L₁ (T₁.cons L₂ … T₁.empty)` where
-    `T₁` is the law-set type's namespace (`MonotonicLawSet`,
-    `ConservativeLawSet`, or `FreezePreservingLawSet`).  Used by
-    the invariant-claim emitter to construct law-set values via
-    typeclass-driven `cons` chaining (avoids per-list-length
-    membership-disjunction `rcases` patterns). -/
+/-- Build a chain `T₁.cons L₁ (T₁.cons L₂ … T₁.empty)` for the
+    typeclass-driven law-set construction. -/
 private def buildLawSetConsChain
     (emptyTerm : Lean.Term) (consTerm : Lean.Term)
     (lawTerms : List Lean.Term) : CommandElabM Lean.Term := do
-  -- Build the chain right-to-left: the empty law set is the
-  -- innermost expression.
   let mut acc : Lean.Term := emptyTerm
   for lawT in lawTerms.reverse do
     acc ← `($consTerm $lawT $acc)
   return acc
 
-/-! ## The `deployment` command elaborator (LX.31 / LX.32 / LX.33) -/
+/-! ## `synth_*` named functions (LX.33 named-API)
+
+These are the spec-named synthesizer functions called for in
+LX.33: per-claim-kind term builders that take a list of resolved
+law `Name`s and emit the corresponding `<LawSet>` value via
+`<LawSet>.cons` chaining. -/
+
+/-- Synthesise a `MonotonicLawSet` value-level term from a list
+    of law transition `Name`s.  Each law's `IsMonotonic`
+    instance is resolved at elaboration time via
+    `MonotonicLawSet.cons`; missing instances fail with a
+    `failed to synthesize` diagnostic. -/
+def synth_monotonic_law_set (lawNames : List Lean.Name) :
+    CommandElabM Lean.Term := do
+  let lawTerms : List Lean.Term ← lawNames.mapM
+    (fun n => `($(Lean.mkIdent n)))
+  let consTerm : Lean.Term ←
+    `(_root_.LegalKernel.MonotonicLawSet.cons)
+  let emptyTerm : Lean.Term ←
+    `(_root_.LegalKernel.MonotonicLawSet.empty)
+  buildLawSetConsChain emptyTerm consTerm lawTerms
+
+/-- Synthesise a `ConservativeLawSet` term. -/
+def synth_conservative_law_set (lawNames : List Lean.Name) :
+    CommandElabM Lean.Term := do
+  let lawTerms : List Lean.Term ← lawNames.mapM
+    (fun n => `($(Lean.mkIdent n)))
+  let consTerm : Lean.Term ←
+    `(_root_.LegalKernel.ConservativeLawSet.cons)
+  let emptyTerm : Lean.Term ←
+    `(_root_.LegalKernel.ConservativeLawSet.empty)
+  buildLawSetConsChain emptyTerm consTerm lawTerms
+
+/-- Synthesise a `FreezePreservingLawSet S` term, where `S` is
+    captured as a list of `ResourceId` literal terms. -/
+def synth_freeze_preserving_law_set
+    (resourceIds : List Nat) (lawNames : List Lean.Name) :
+    CommandElabM Lean.Term := do
+  let lawTerms : List Lean.Term ← lawNames.mapM
+    (fun n => `($(Lean.mkIdent n)))
+  let resTerms : Array Lean.Term ← resourceIds.toArray.mapM
+    (fun n => `(($(Lean.quote n) : _root_.LegalKernel.ResourceId)))
+  let consTerm : Lean.Term ←
+    `(_root_.LegalKernel.FreezePreservingLawSet.cons [ $[$resTerms],* ])
+  let emptyTerm : Lean.Term ←
+    `(_root_.LegalKernel.FreezePreservingLawSet.empty [ $[$resTerms],* ])
+  buildLawSetConsChain emptyTerm consTerm lawTerms
+
+/-! ## The `deployment` command elaborator -/
 
 elab_rules : command
   | `(deploymentCmd| deployment $name:ident where $clauses:deployClause*) => do
-    -- 1. Initialise the parser accumulator.
+    let env ← getEnv
+    let currentNs ← getCurrNamespace
     let pos := (← read).fileMap.toPosition (name.raw.getPos?.getD ⟨0⟩)
-    let initial : ParsedDeployment := {
-      deployName := name.getId,
-      sourceFile := (← read).fileName,
-      sourceLine := pos.line
-    }
-    -- 2. Parse every clause.
+    -- 1. Parse all clauses internally (captures Syntax nodes).
+    let initial : ParsedDeployment :=
+      { deployName := name.getId,
+        sourceFile := (← read).fileName,
+        sourceLine := pos.line }
     let mut acc := initial
     for c in clauses do
-      acc ← parseDeployClause c acc
-    -- 3. Validate required clauses + L018.
+      acc ← parseDeployClause env currentNs c acc
     validateRequiredDeployClauses acc name.raw
+    -- 2. Build a public `DeploymentDecl` for tooling consumption.
+    let decl ← parseDeployment env currentNs (← read).fileName pos.line
+                                name.getId clauses
+    -- 3. Compute the manifest hash bytes (LX.32).
+    let manifestHash := LegalKernel.Runtime.hashStream decl.manifestSourceBytes
 
-    -- Extract the parsed values now that validation succeeded.
-    let identifierStr := acc.identifierClause.getD ""
-    let versionStr := acc.versionClause.getD ""
-    let resources := acc.resourcesClause.getD []
-    let lawNames := acc.lawsClause.getD []
-    let authorityExpr := acc.authorityClause.getD ""
-    let invariantClaims := acc.invariantClaimsClause.getD []
-    -- Decode the deployment ID hex string.  Validation already
-    -- proved the decoding succeeds with size 32.
-    let didHex := (acc.deploymentIdClause.map (·.2)).getD ""
-    let deploymentId := (decodeHexString didHex).getD ByteArray.empty
-
-    -- 4. Compute the manifest hash bytes (LX.32).
-    let lawBindings : List (String × String) :=
-      lawNames.map (fun lnm => (lnm, versionStr))
-    let claimsTagged : List (Nat × List String) :=
-      invariantClaims.map (fun c => (invariantClaimKindTag c.kind, c.lawNames))
-    let manifestHash := computeManifestHash
-      identifierStr deploymentId versionStr resources
-      lawBindings authorityExpr claimsTagged
-
-    -- 5. Emit `def <name>_id : ByteArray` (LX.32).
-    let idDefName := deploymentIdDefName acc.deployName
+    -- 3. Emit `def <name>_id : ByteArray` (LX.32).
+    let idDefName := deploymentIdDefName decl.deployName
     let idDefIdent := Lean.mkIdent idDefName
-    let idTerm ← byteArrayToTermSyntax deploymentId
+    let idTerm ← byteArrayToTermSyntax decl.deploymentId
     let idDefCmd ← `(
       /-- The deployment's 32-byte cross-deployment-replay-protection
-          ID.  Audit-3.3 / 3.4 binding: this byte sequence flows
-          into `signingInput`, so signatures generated for this
-          deployment cannot replay against any other deployment
-          with a distinct ID. -/
+          ID (LX.32).  Audit-3.3 / 3.4 binding: this byte sequence
+          flows into `signingInput`, so signatures generated for
+          this deployment cannot replay against any other
+          deployment with a distinct ID. -/
       def $idDefIdent : ByteArray := $idTerm)
     elabCommand idDefCmd
 
-    -- 6. Emit `def <name>_manifest_hash : ByteArray` (LX.32).
-    let manifestHashDefName := deploymentManifestHashDefName acc.deployName
+    -- 4. Emit `def <name>_manifest_hash : ByteArray` (LX.32).
+    let manifestHashDefName := deploymentManifestHashDefName decl.deployName
     let manifestHashIdent := Lean.mkIdent manifestHashDefName
     let manifestHashTerm ← byteArrayToTermSyntax manifestHash
     let manifestHashCmd ← `(
-      /-- The deployment manifest's deterministic content hash.
-          Computed at elaboration time from the parsed manifest
-          AST via the canonical CBE encoder + `Runtime.Hash`.
+      /-- The deployment manifest's deterministic content hash
+          (LX.32).  Computed at elaboration time from the parsed
+          manifest AST via the canonical CBE encoder + `Runtime.Hash`.
           Equal-shape manifests produce byte-equal hashes; an
           attestor signs this value to commit to a specific
           manifest version. -/
       def $manifestHashIdent : ByteArray := $manifestHashTerm)
     elabCommand manifestHashCmd
 
+    -- 5. Emit `def <name>_authority_policy : AuthorityPolicy`
+    -- (LX.32).  Folds the user's authority bindings via
+    -- `AuthorityPolicy.intersect` (or `unrestricted` if empty).
+    let authPolicyDefName :=
+      deploymentAuthorityPolicyDefName decl.deployName
+    let authPolicyIdent := Lean.mkIdent authPolicyDefName
+    let authIntersectIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.AuthorityPolicy.intersect⟩
+    let authUnrestrictedIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.AuthorityPolicy.unrestricted⟩
+    -- Splice each binding's `Syntax` directly into the emitted
+    -- code.  Captured at parse time as raw user-supplied terms;
+    -- spliced into the combined policy expression below.  This
+    -- avoids the round-trip through `toString` (which produces
+    -- a syntax-tree dump, not re-parseable Lean source) — the
+    -- prior implementation's defect.
+    let policyTerms : List Lean.Term :=
+      (acc.authorityClause.getD []).map (fun (_, exprStx) => ⟨exprStx⟩)
+    let combinedPolicy : Lean.Term ←
+      match policyTerms with
+      | [] => pure authUnrestrictedIdent
+      | [p] => pure p
+      | p :: rest =>
+        rest.foldlM
+          (fun acc next => `($authIntersectIdent $acc $next))
+          p
+    let authPolicyCmd ← `(
+      /-- The deployment-scoped authority policy (LX.32).  Folded
+          from the user's `deploy_authority` bindings via
+          `AuthorityPolicy.intersect`: a signed action must be
+          authorised under EVERY binding to be admissible.  An
+          empty / unrestricted authority block produces
+          `AuthorityPolicy.unrestricted`. -/
+      def $authPolicyIdent :
+          _root_.LegalKernel.Authority.AuthorityPolicy :=
+        $combinedPolicy)
+    elabCommand authPolicyCmd
+
+    -- 6. Emit `def <name>_admissible : ExtendedState → SignedAction → Prop`
+    -- (LX.32 fix).  Wires the user's authority policy into
+    -- `AdmissibleWith` along with the deployment ID.
+    let admissibleDefName := deploymentAdmissibleDefName decl.deployName
+    let admissibleIdent := Lean.mkIdent admissibleDefName
+    let extStateIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.ExtendedState⟩
+    let signedActionIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.SignedAction⟩
+    let admissibleWithIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.AdmissibleWith⟩
+    let verifyIdent : Lean.Term :=
+      ⟨Lean.mkIdent ``LegalKernel.Authority.Verify⟩
+    let admissibleCmd ← `(
+      /-- The deployment-scoped admissibility predicate (LX.32).
+          Wires the deployment's ID into `AdmissibleWith`'s
+          `signingInput` parameter so signatures are bound to this
+          specific deployment, AND uses the deployment's
+          `_authority_policy` (folded from the user's
+          `deploy_authority` bindings) for authorisation
+          decisions. -/
+      def $admissibleIdent :
+          $extStateIdent → $signedActionIdent → Prop :=
+        fun es st => $admissibleWithIdent $verifyIdent
+          $authPolicyIdent $idDefIdent es st)
+    elabCommand admissibleCmd
+
     -- 7. Emit `def <name>_deployment : Deployment` (LX.31).
-    --    The law-bindings field carries the (localName,
-    --    Name.anonymous, version) triples; the resolution to a
-    --    real Lean Name is performed by the invariant-claim
-    --    emitter at step 9.
-    let env ← getEnv
-    let currentNs ← getCurrNamespace
-    let lawBindingTerms : Array Lean.Term ← lawBindings.toArray.mapM
-      (fun (lnm, v) => do
-        let resolved := resolveLawName env currentNs lnm |>.getD Lean.Name.anonymous
-        let resolvedName := toString resolved
-        `(({ localName := $(Lean.quote lnm),
+    let lawBindingTerms : Array Lean.Term ← decl.laws.toArray.mapM
+      (fun b => do
+        let resolvedName := toString b.lawIdent
+        `(({ localName := $(Lean.quote b.localName),
              lawIdent := Lean.Name.mkSimple $(Lean.quote resolvedName),
-             version := $(Lean.quote v) } : _root_.LegalKernel.DSL.LawBinding)))
-    let resourcePairTerms : Array Lean.Term ← resources.toArray.mapM
+             version := $(Lean.quote b.version) } : _root_.LegalKernel.DSL.LawBinding)))
+    let resourcePairTerms : Array Lean.Term ← decl.resources.toArray.mapM
       (fun (n, idx) => do
         `(($(Lean.quote n), $(Lean.quote idx))))
-    let claimKindTagsTerms : Array Lean.Term ← invariantClaims.toArray.mapM
+    let claimKindTagsTerms : Array Lean.Term ← decl.invariantClaims.toArray.mapM
       (fun c => do
         let lawArrTerms := c.lawNames.toArray.map Lean.quote
         let kindTerm : Lean.Term ←
@@ -715,139 +1002,104 @@ elab_rules : command
             `(_root_.LegalKernel.DSL.InvariantClaimKind.conservativeLawSet)
           | .freezePreservingLawSet =>
             `(_root_.LegalKernel.DSL.InvariantClaimKind.freezePreservingLawSet)
+        let scopeTerm : Lean.Term ←
+          match c.scope with
+          | .explicit _ =>
+            `(_root_.LegalKernel.DSL.InvariantClaimScope.explicit
+                [ $[$lawArrTerms],* ])
+          | .wildcard =>
+            `(_root_.LegalKernel.DSL.InvariantClaimScope.wildcard)
         `(({ kind := $kindTerm,
-             lawNames := [ $[$lawArrTerms],* ] } : _root_.LegalKernel.DSL.InvariantClaim)))
-    let authorityListTerm : Lean.Term ←
-      `([ ({ localName := "default",
-             policyExpr := $(Lean.quote authorityExpr) }
-            : _root_.LegalKernel.DSL.AuthorityBinding) ])
-    let depDefName := deploymentDefName acc.deployName
+             scope := $scopeTerm } : _root_.LegalKernel.DSL.InvariantClaim)))
+    let authBindingTerms : Array Lean.Term ← decl.authority.toArray.mapM
+      (fun b => do
+        `(({ localName := $(Lean.quote b.localName),
+             policyExpr := $(Lean.quote b.policyExpr) }
+            : _root_.LegalKernel.DSL.AuthorityBinding)))
+    let depDefName := deploymentDefName decl.deployName
     let depDefIdent := Lean.mkIdent depDefName
     let deploymentCmd ← `(
-      /-- The deployment manifest record.  Bundles every clause
-          declared in the `deployment` block as data.  Tooling
-          (`lex_diff`, `canon manifest inspect`) consumes this
-          record. -/
+      /-- The deployment manifest record (LX.31).  Bundles every
+          clause declared in the `deployment` block as data.
+          Tooling (`lex_diff`, future `canon manifest inspect`
+          CLI) consumes this record. -/
       def $depDefIdent : _root_.LegalKernel.DSL.Deployment :=
-        { identifier := $(Lean.quote identifierStr),
+        { identifier := $(Lean.quote decl.identifier),
           deploymentId := $idDefIdent,
-          version := $(Lean.quote versionStr),
+          version := $(Lean.quote decl.version),
           resources := [ $[$resourcePairTerms],* ],
           laws := [ $[$lawBindingTerms],* ],
-          authority := $authorityListTerm,
+          authority := [ $[$authBindingTerms],* ],
           invariantClaims := [ $[$claimKindTagsTerms],* ],
           manifestHashBytes := $manifestHashIdent })
     elabCommand deploymentCmd
 
-    -- 8. Emit `def <name>_admissible : ExtendedState → SignedAction → Prop`
-    -- wiring the deployment ID into the admissibility predicate
-    -- (Audit-3.3 / 3.4 cross-deployment-replay binding) (LX.32).
-    -- The authority block is captured as opaque text; v1 instantiates
-    -- the predicate with `AuthorityPolicy.unrestricted` as the policy.
-    -- The deployment-side runtime adaptor specialises the policy
-    -- text into an actual `AuthorityPolicy` value at use site.
-    let admissibleDefName := deploymentAdmissibleDefName acc.deployName
-    let admissibleIdent := Lean.mkIdent admissibleDefName
-    let extStateIdent : Lean.Term :=
-      ⟨Lean.mkIdent ``LegalKernel.Authority.ExtendedState⟩
-    let signedActionIdent : Lean.Term :=
-      ⟨Lean.mkIdent ``LegalKernel.Authority.SignedAction⟩
-    let admissibleWithIdent : Lean.Term :=
-      ⟨Lean.mkIdent ``LegalKernel.Authority.AdmissibleWith⟩
-    let verifyIdent : Lean.Term :=
-      ⟨Lean.mkIdent ``LegalKernel.Authority.Verify⟩
-    let unrestrictedIdent : Lean.Term :=
-      ⟨Lean.mkIdent ``LegalKernel.Authority.AuthorityPolicy.unrestricted⟩
-    let admissibleCmd ← `(
-      /-- The deployment-scoped admissibility predicate.  Wires the
-          deployment's ID into `AdmissibleWith`'s `signingInput`
-          parameter so signatures are bound to this specific
-          deployment.
-
-          V1 uses an unrestricted authority policy
-          (`AuthorityPolicy.unrestricted`) as a placeholder; the
-          deployment-side runtime adaptor specialises this to the
-          actual policy expression captured in the manifest's
-          `deploy_authority` clause.  See §16.2 of the
-          implementation plan. -/
-      def $admissibleIdent :
-          $extStateIdent → $signedActionIdent → Prop :=
-        fun es st => $admissibleWithIdent $verifyIdent
-          $unrestrictedIdent $idDefIdent es st)
-    elabCommand admissibleCmd
-
-    -- 9. Emit per-claim invariant-claim defs (LX.33).
-    -- Each claim becomes a `def <name>_<claim>_<idx> : <LawSet>`
-    -- whose body chains the per-law transitions through the
-    -- `<LawSet>.cons` builder.  Lean's typeclass resolution
-    -- looks up the per-law instance at each `cons` site;
-    -- missing instances surface as `failed to synthesize`
-    -- diagnostics (re-formatted as L008 in the post-elab error
-    -- log).
-    for h : i in [:invariantClaims.length] do
-      let claim := invariantClaims[i]
-      let claimName := deploymentClaimDefName acc.deployName claim.kind i
-      let claimIdent := Lean.mkIdent claimName
-      -- Resolve every named law to its kernel-side Name.
-      let mut resolvedLaws : List Lean.Name := []
-      for lnm in claim.lawNames do
+    -- 8. Emit per-claim invariant-claim defs (LX.33).
+    -- Each claim becomes a `def <name>_<claim>_<idx> : <LawSet>`.
+    let resourceIds := decl.resources.map (·.2)
+    -- Build a map: localName → resolved Name (from law bindings).
+    let lawsToList : List (String × Lean.Name) :=
+      decl.laws.map (fun b => (b.localName, b.lawIdent))
+    let resolveLocalLaw (lnm : String) : CommandElabM Lean.Name := do
+      match lawsToList.find? (fun (n, _) => n == lnm) with
+      | some (_, resolvedName) =>
+        if resolvedName == Lean.Name.anonymous then
+          throwErrorAt name.raw
+            s!"L008: deployment `{decl.deployName}`'s invariant-claim references law `{lnm}` whose `lawIdent` did not resolve at parse time; check the `deploy_laws` binding for typos"
+        return resolvedName
+      | none =>
         match resolveLawName env currentNs lnm with
-        | some n => resolvedLaws := resolvedLaws ++ [n]
+        | some n => return n
         | none =>
           throwErrorAt name.raw
-            s!"L008: deployment `{acc.deployName}`'s invariant-claim references unknown law `{lnm}`; either add the law to the deployment's resolution path or remove it from the claim"
-      -- Build per-law transition terms.  v1 only supports the
-      -- 0-arg case (the law identifier alone).
-      let lawTerms : List Lean.Term ← resolvedLaws.mapM
-        (fun n => buildLawTransitionTerm n)
-      -- Build the `<LawSet>.cons` chain depending on the claim
-      -- kind.
+            s!"L008: deployment `{decl.deployName}`'s invariant-claim references unknown law `{lnm}`; either add it to `deploy_laws` or remove it from the claim"
+    for h : i in [:decl.invariantClaims.length] do
+      let claim := decl.invariantClaims[i]
+      let claimName := deploymentClaimDefName decl.deployName claim.kind i
+      let claimIdent := Lean.mkIdent claimName
+      -- Resolve the claim's law list (handling wildcard).
+      let effectiveNames : List String ←
+        match claim.scope with
+        | .explicit names => pure names
+        | .wildcard       =>
+          -- Wildcard expansion (LX.33): the law list is the
+          -- deployment's full `deploy_laws` localName list.
+          pure (decl.laws.map (·.localName))
+      let mut resolvedLaws : List Lean.Name := []
+      for lnm in effectiveNames do
+        let n ← resolveLocalLaw lnm
+        resolvedLaws := resolvedLaws ++ [n]
       let claimCmd ← match claim.kind with
         | .monotonicLawSet =>
-          let consTerm : Lean.Term ←
-            `(_root_.LegalKernel.MonotonicLawSet.cons)
-          let emptyTerm : Lean.Term ←
-            `(_root_.LegalKernel.MonotonicLawSet.empty)
-          let body ← buildLawSetConsChain emptyTerm consTerm lawTerms
+          let body ← synth_monotonic_law_set resolvedLaws
           `(/-- A monotonic-law-set invariant claim (LX.33).
-                Synthesised from the per-law `IsMonotonic` instance
-                bag via `MonotonicLawSet.cons` chaining; missing
-                instances surface as `failed to synthesize`
-                diagnostics naming the offending law. -/
+                Synthesised from the per-law `IsMonotonic`
+                instance bag via `MonotonicLawSet.cons` chaining;
+                missing instances surface as `failed to
+                synthesize` diagnostics naming the offending
+                law. -/
             def $claimIdent : _root_.LegalKernel.MonotonicLawSet := $body)
         | .conservativeLawSet =>
-          let consTerm : Lean.Term ←
-            `(_root_.LegalKernel.ConservativeLawSet.cons)
-          let emptyTerm : Lean.Term ←
-            `(_root_.LegalKernel.ConservativeLawSet.empty)
-          let body ← buildLawSetConsChain emptyTerm consTerm lawTerms
+          let body ← synth_conservative_law_set resolvedLaws
           `(/-- A conservative-law-set invariant claim (LX.33). -/
             def $claimIdent :
                 _root_.LegalKernel.ConservativeLawSet := $body)
         | .freezePreservingLawSet =>
-          -- `FreezePreservingLawSet S` is parameterised by `S`.
-          -- V1 uses the deployment's resource list (mapped to
-          -- `ResourceId`s) for `S`.
-          let resourceIds := resources.map (·.2)
+          let body ← synth_freeze_preserving_law_set resourceIds resolvedLaws
           let resTerms : Array Lean.Term ← resourceIds.toArray.mapM
             (fun n => `(($(Lean.quote n) : _root_.LegalKernel.ResourceId)))
-          let consTerm : Lean.Term ←
-            `(_root_.LegalKernel.FreezePreservingLawSet.cons [ $[$resTerms],* ])
-          let emptyTerm : Lean.Term ←
-            `(_root_.LegalKernel.FreezePreservingLawSet.empty [ $[$resTerms],* ])
-          let body ← buildLawSetConsChain emptyTerm consTerm lawTerms
-          `(/-- A freeze-preserving-law-set invariant claim
-                (LX.33).  The resource set `S` is the deployment's
-                `deploy_resources` list. -/
+          `(/-- A freeze-preserving-law-set invariant claim (LX.33).
+                The resource set `S` is the deployment's
+                `deploy_resources` list (or, under wildcard,
+                expanded from `[* @ {*}]`). -/
             def $claimIdent :
                 _root_.LegalKernel.FreezePreservingLawSet
                   [ $[$resTerms],* ] := $body)
       try
         elabCommand claimCmd
       catch e =>
-        -- Re-raise as L008 with named context.
         let msg ← e.toMessageData.toString
         throwErrorAt name.raw
-          s!"L008: deployment `{acc.deployName}`'s invariant claim {i} failed to synthesize: {msg}"
+          s!"L008: deployment `{decl.deployName}`'s invariant claim {i} failed to synthesize: {msg}"
 
 end LegalKernel.DSL

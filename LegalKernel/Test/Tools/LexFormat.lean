@@ -27,6 +27,7 @@ namespace LegalKernel.Test.Tools
 namespace LexFormatTests
 
 open LegalKernel.Test
+open LegalKernel.Tools.Lex
 open LegalKernel.Tools.Lex.Format
 
 /-! ## Trailing whitespace + final newline -/
@@ -70,11 +71,14 @@ def singleTrailingNewline : TestCase := {
 
 /-! ## Empty-events canonicalisation -/
 
-/-- `lex_events := do pure ()` → `lex_events := []`. -/
+/-- `lex_events := do pure ()` → `lex_events := []`.  Empty-events
+    canonicalisation operates on clause-bodies inside `lexlaw …
+    where` blocks, so the test fixture wraps the empty-events
+    line in a minimal block. -/
 def canonicaliseEventsPureUnit : TestCase := {
   name := "LX.36: lex_events := do pure () canonicalises to lex_events := []"
   body := do
-    let input := "  lex_events := do pure ()\n"
+    let input := "lexlaw t where\n  lex_events := do pure ()\n"
     let output := formatLexSource input
     assert (output.contains '[' && output.contains ']')
       "output contains `[]`"
@@ -86,12 +90,10 @@ def canonicaliseEventsPureUnit : TestCase := {
 def canonicaliseEventsDoNothing : TestCase := {
   name := "LX.36: lex_events := do nothing canonicalises to lex_events := []"
   body := do
-    let input := "  lex_events := do nothing\n"
+    let input := "lexlaw t where\n  lex_events := do nothing\n"
     let output := formatLexSource input
     assert (output.contains '[' && output.contains ']')
       "output contains `[]`"
-    -- Check that the output doesn't contain "nothing" — the
-    -- canonical form has eliminated the do-nothing pattern.
     let containsNothing :=
       "nothing".isPrefixOf output ||
       (output.splitOn "nothing").length > 1
@@ -211,6 +213,173 @@ def crlfHandling : TestCase := {
       "output contains no CR characters"
 }
 
+/-! ## LX.36 — Clause-order canonicalisation -/
+
+/-- Out-of-order clauses are reordered to canonical sequence. -/
+def clauseOrderCanonicalisation : TestCase := {
+  name := "LX.36: clauses reordered to canonical sequence"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_satisfies := []\n" ++
+      "  lex_intent \"foo\"\n" ++
+      "  lex_id legalkernel.t\n" ++
+      "  lex_version \"1.0\"\n"
+    let output := formatLexSource input
+    -- Verify lex_id appears before lex_version, which appears before
+    -- lex_intent, which appears before lex_satisfies.
+    let lines := output.splitOn "\n"
+    let idIdx :=
+      lines.idxOf? "  lex_id legalkernel.t" |>.getD 999
+    let versionIdx :=
+      lines.idxOf? "  lex_version \"1.0\"" |>.getD 999
+    let intentIdx :=
+      lines.idxOf? "  lex_intent \"foo\"" |>.getD 999
+    let satIdx :=
+      lines.idxOf? "  lex_satisfies := []" |>.getD 999
+    assert (idIdx < versionIdx) s!"lex_id at {idIdx} should precede lex_version at {versionIdx}"
+    assert (versionIdx < intentIdx) s!"lex_version should precede lex_intent"
+    assert (intentIdx < satIdx) s!"lex_intent should precede lex_satisfies"
+}
+
+/-- Idempotency on a multi-clause out-of-order input. -/
+def clauseOrderIdempotent : TestCase := {
+  name := "LX.36: clause-order canonicalisation is idempotent"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_satisfies := []\n" ++
+      "  lex_id legalkernel.t\n" ++
+      "  lex_version \"1.0\"\n"
+    let once := formatLexSource input
+    let twice := formatLexSource once
+    assertEq (expected := once) (actual := twice)
+      "idempotent on out-of-order input"
+}
+
+/-! ## LX.36 — Comment preservation -/
+
+/-- A comment immediately preceding a clause moves WITH the
+    clause during reordering. -/
+def commentPreservationOnReorder : TestCase := {
+  name := "LX.36: comments move with clauses during reordering"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_version \"1.0\"\n" ++
+      "  -- comment for lex_id\n" ++
+      "  lex_id legalkernel.t\n"
+    let output := formatLexSource input
+    -- After reordering, lex_id is first; the comment should
+    -- appear immediately before lex_id.
+    let lines := output.splitOn "\n"
+    let commentIdx :=
+      lines.idxOf? "  -- comment for lex_id" |>.getD 999
+    let idIdx :=
+      lines.idxOf? "  lex_id legalkernel.t" |>.getD 999
+    assert (commentIdx + 1 == idIdx)
+      s!"comment at {commentIdx} should immediately precede lex_id at {idIdx}"
+}
+
+/-- Free-floating comments before the first clause are
+    preserved as preludeLines. -/
+def commentPreludePreserved : TestCase := {
+  name := "LX.36: comments before first clause are preserved as prelude"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  -- prelude comment\n" ++
+      "  lex_id legalkernel.t\n" ++
+      "  lex_version \"1.0\"\n"
+    let output := formatLexSource input
+    assert (output.contains '-')
+      "output preserves comment characters"
+    let containsPrelude :=
+      ("prelude comment".splitOn output.toList.toString).length > 1 ||
+      (output.splitOn "prelude").length > 1
+    assert containsPrelude
+      "output contains the prelude comment"
+}
+
+/-! ## LX.36 — Multi-line empty-events -/
+
+/-- Multi-line `lex_events := do\n  pure ()` → `lex_events := []`. -/
+def multiLineEmptyEventsPureUnit : TestCase := {
+  name := "LX.36: multi-line lex_events do pure () canonicalises"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_events := do\n" ++
+      "    pure ()\n"
+    let output := formatLexSource input
+    assert (output.contains '[' && output.contains ']')
+      "output contains `[]`"
+    let outputLines := output.splitOn "\n"
+    let hasEventsCanonical := outputLines.any
+      (fun line => stripWhitespace line == "lex_events := []")
+    assert hasEventsCanonical
+      "output has canonicalised lex_events := []"
+}
+
+/-- Multi-line `lex_events := do\n  nothing` → `lex_events := []`. -/
+def multiLineEmptyEventsNothing : TestCase := {
+  name := "LX.36: multi-line lex_events do nothing canonicalises"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_events := do\n" ++
+      "    nothing\n"
+    let output := formatLexSource input
+    let outputLines := output.splitOn "\n"
+    let hasEventsCanonical := outputLines.any
+      (fun line => stripWhitespace line == "lex_events := []")
+    assert hasEventsCanonical
+      "output has canonicalised lex_events := []"
+}
+
+/-! ## LX.36 — Indentation preservation -/
+
+/-- Multi-line clause continuations preserve their relative
+    indentation. -/
+def indentationPreserved : TestCase := {
+  name := "LX.36: continuation indentation preserved"
+  body := do
+    let input :=
+      "lexlaw t where\n" ++
+      "  lex_id legalkernel.t\n" ++
+      "  lex_pre := fun s =>\n" ++
+      "    True ∧ True\n"
+    let output := formatLexSource input
+    -- Verify the continuation line starts with 4+ spaces (indented
+    -- relative to the leader).
+    let outputLines := output.splitOn "\n"
+    let hasIndentedContinuation := outputLines.any
+      (fun line => line.startsWith "    True")
+    assert hasIndentedContinuation
+      "continuation line preserved with its indentation"
+}
+
+/-! ## LX.36 — Block-aware behaviour -/
+
+/-- Lines outside any `lexlaw`/`deployment` block are preserved
+    verbatim. -/
+def nonBlockContentPreserved : TestCase := {
+  name := "LX.36: non-block content preserved verbatim"
+  body := do
+    let input :=
+      "import Foo\n\nnamespace Bar\n\nlexlaw t where\n  lex_id x\n\nend Bar\n"
+    let output := formatLexSource input
+    assert (output.contains 'i' && output.contains 'B')
+      "import + namespace preserved"
+    let lines := output.splitOn "\n"
+    let hasImport := lines.any (fun l => l == "import Foo")
+    let hasNamespace := lines.any (fun l => l == "namespace Bar")
+    let hasEnd := lines.any (fun l => l == "end Bar")
+    assert hasImport "import preserved"
+    assert hasNamespace "namespace preserved"
+    assert hasEnd "end preserved"
+}
+
 /-- The complete LX.36 test suite. -/
 def tests : List TestCase :=
   [ trailingWhitespaceStripped,
@@ -225,7 +394,16 @@ def tests : List TestCase :=
     extractClauseKeywordTest,
     emptyInputProducesNewline,
     cleanInputUnchanged,
-    crlfHandling ]
+    crlfHandling,
+    -- New M3-completion tests:
+    clauseOrderCanonicalisation,
+    clauseOrderIdempotent,
+    commentPreservationOnReorder,
+    commentPreludePreserved,
+    multiLineEmptyEventsPureUnit,
+    multiLineEmptyEventsNothing,
+    indentationPreserved,
+    nonBlockContentPreserved ]
 
 end LexFormatTests
 end LegalKernel.Test.Tools

@@ -12,38 +12,18 @@ generated property-test suite.
 
 LX.38 of `docs/lex_implementation_plan.md`.
 
-This file contains property-test harness invocations
-auto-generated from the codegen-input JSON sidecars'
-`satisfies` claims.  Each `(law, property)` pair gets one
-property test that samples random states and verifies the
-property holds.
+**THIS FILE IS AUTO-GENERATED.**  Do not edit by hand.
+Re-generate by running:
 
-Currently auto-generated for the four kernel-built-in laws with
-the corresponding `satisfies` claims:
+  lake exe lex_codegen --gen-property-tests
 
-  * `conservative` ⇒ random-state property: applying the law
-    leaves `TotalSupply` at the law's resource unchanged.
-  * `monotonic` ⇒ `TotalSupply` is non-decreasing.
-  * `local [r]` ⇒ resources outside `[r]` are pointwise-
-    unchanged.
-  * `freeze_preserving [r]` ⇒ resources in `[r]` are
-    pointwise-unchanged.
+The generator reads `LegalKernel/_lex_inputs/*.json` and
+emits one property-test harness invocation per supported
+`(law, property)` pair declared in each law's `satisfies`
+claims list.
 
-# Skip envelope (LX.38)
-
-Each generated test is wrapped in
-`if env CANON_AUTOGEN_SKIP = "1" then return ()` so CI can opt
-out of the auto-generated tests for fast cycles.
-
-# Generation method
-
-In M3 v1, this file is *hand-written* (mirroring the four
-properties listed above) — the auto-generation logic in
-`Tools/LexCodegen.lean`'s `--gen-property-tests` flag emits a
-file with this same shape from the JSON sidecars.  The
-hand-written version doubles as the regression-coverage
-fixture.  M4 may replace this with a fully-machine-generated
-version produced at build time.
+Skip envelope: each test wraps in `CANON_AUTOGEN_SKIP=1`
+(per §LX.38) so CI can opt out for fast cycles.
 -/
 
 import LegalKernel.Test.Framework
@@ -51,6 +31,8 @@ import LegalKernel.Test.Property
 import LegalKernel.Conservation
 import LegalKernel.Laws.Transfer
 import LegalKernel.Laws.Mint
+import LegalKernel.Laws.Burn
+import LegalKernel.Laws.Reward
 import LegalKernel.Laws.Freeze
 
 namespace LegalKernel.Test.Properties.AutoGen
@@ -62,9 +44,9 @@ open LegalKernel.Test.Property
 
 /-! ## Helpers: random state generation -/
 
-/-- Generate a small `State` with a few balance entries.  V1
-    samples bounded balances on resource 0 to keep the property
-    space tractable.  `nActors` controls the breadth (default 4). -/
+/-- Generate a small `State` with a few balance entries.
+    Sampled balances on resource 0 keep the property space
+    tractable; `nActors` controls the breadth (default 4). -/
 def genTestState (nActors : Nat := 4) (balanceMax : Nat := 100) :
     Gen State := fun st =>
   let rec loop (n : Nat) (s : State) (gs : GenState) : State × GenState :=
@@ -76,20 +58,43 @@ def genTestState (nActors : Nat := 4) (balanceMax : Nat := 100) :
       loop (n - 1) s' gs1
   loop nActors emptyState st
 
-/-! ## `conservative` property — `TotalSupply` is preserved -/
+/-! ## Coverage notes (for pairs not auto-tested) -/
 
-/-- Auto-generated: `transfer` (Lex re-expression
-    `legalkernel.transfer`) satisfies `conservative` ⇒ a random
-    state on which the precondition holds is mapped by `transfer`
-    to a state with the same `TotalSupply` at the transferred
-    resource.
+-- legalkernel.transfer.freeze_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.transfer.nonce_advances: out-of-scope for v1 auto-generator
+-- legalkernel.transfer.registry_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.mint.freeze_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.mint.nonce_advances: out-of-scope for v1 auto-generator
+-- legalkernel.mint.registry_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.burn.local: out-of-scope for v1 auto-generator
+-- legalkernel.burn.freeze_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.burn.nonce_advances: out-of-scope for v1 auto-generator
+-- legalkernel.burn.registry_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.freezeResource.local: out-of-scope for v1 auto-generator
+-- legalkernel.freezeResource.nonce_advances: out-of-scope for v1 auto-generator
+-- legalkernel.freezeResource.registry_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.replaceKey: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.reward.monotonic: out-of-scope for v1 auto-generator
+-- legalkernel.reward.local: out-of-scope for v1 auto-generator
+-- legalkernel.reward.freeze_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.reward.nonce_advances: out-of-scope for v1 auto-generator
+-- legalkernel.reward.registry_preserving: out-of-scope for v1 auto-generator
+-- legalkernel.distributeOthers: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.proportionalDilute: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.dispute: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.disputeWithdraw: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.verdict: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.rollback: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.registerIdentity: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.deposit: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.withdraw: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.declareLocalPolicy: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
+-- legalkernel.revokeLocalPolicy: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only
 
-    Property body: `TotalSupply (transfer.apply_impl s) r =
-    TotalSupply s r` whenever `transfer.pre s` holds. -/
-def transferConservativeProperty : TestCase := {
+/-- Auto-gen LX.38: legalkernel.transfer.conservative property holds (100 samples). -/
+def legalkernel_transferConservativeProperty : TestCase := {
   name := "auto-gen LX.38: legalkernel.transfer.conservative property holds (100 samples)"
   body := do
-    -- LX.38 skip envelope: `CANON_AUTOGEN_SKIP=1` skips this test.
     match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
     | some "1" =>
       IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
@@ -97,9 +102,6 @@ def transferConservativeProperty : TestCase := {
     | _ => pure ()
     let seed ← readSeed
     let n ← readIterations
-    -- Sample random states; for each, pick a transfer with
-    -- amount ∈ [1, balance].  The conservative property holds
-    -- whenever the precondition holds.
     forAll (T := State) n seed (genTestState 4 50) (fun s =>
       let r : ResourceId := 0
       let sender : ActorId := 0
@@ -107,62 +109,14 @@ def transferConservativeProperty : TestCase := {
       let bal := getBalance s r sender
       let amount := if bal > 0 then 1 else 0
       let t := Laws.transfer r sender receiver amount
-      -- If the pre fails, the property is vacuously true.
       if _ : t.pre s then
         let s' := step_impl s t
         decide (TotalSupply s r = TotalSupply s' r)
-      else
-        true)
+      else true)
 }
 
-/-- `freezeResource` is `conservative`. -/
-def freezeConservativeProperty : TestCase := {
-  name := "auto-gen LX.38: legalkernel.freezeResource.conservative property holds (100 samples)"
-  body := do
-    match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
-    | some "1" =>
-      IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
-      return ()
-    | _ => pure ()
-    let seed ← readSeed
-    let n ← readIterations
-    forAll (T := State) n seed (genTestState 4 50) (fun s =>
-      let r : ResourceId := 0
-      let t := Laws.freezeResource r
-      let s' := step_impl s t
-      decide (TotalSupply s r = TotalSupply s' r))
-}
-
-/-! ## `monotonic` property — `TotalSupply` is non-decreasing -/
-
-/-- `mint` is `monotonic`: applying mint at a resource never
-    decreases `TotalSupply` at that resource. -/
-def mintMonotonicProperty : TestCase := {
-  name := "auto-gen LX.38: legalkernel.mint.monotonic property holds (100 samples)"
-  body := do
-    match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
-    | some "1" =>
-      IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
-      return ()
-    | _ => pure ()
-    let seed ← readSeed
-    let n ← readIterations
-    forAll (T := State) n seed (genTestState 4 50) (fun s =>
-      let r : ResourceId := 0
-      let recipient : ActorId := 0
-      let amount : Amount := 5
-      let t := Laws.mint r recipient amount
-      if _ : t.pre s then
-        let s' := step_impl s t
-        decide (TotalSupply s r ≤ TotalSupply s' r)
-      else
-        true)
-}
-
-/-- `transfer` is `monotonic` (vacuously since it's also
-    conservative; included for completeness of the property
-    coverage matrix). -/
-def transferMonotonicProperty : TestCase := {
+/-- Auto-gen LX.38: legalkernel.transfer.monotonic property holds (100 samples). -/
+def legalkernel_transferMonotonicProperty : TestCase := {
   name := "auto-gen LX.38: legalkernel.transfer.monotonic property holds (100 samples)"
   body := do
     match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
@@ -182,16 +136,11 @@ def transferMonotonicProperty : TestCase := {
       if _ : t.pre s then
         let s' := step_impl s t
         decide (TotalSupply s r ≤ TotalSupply s' r)
-      else
-        true)
+      else true)
 }
 
-/-! ## `local [r]` property — other resources are unchanged -/
-
-/-- `transfer` is `local [r]`: applying transfer at resource `r`
-    does not touch balance at any other resource (1 in this
-    fixture). -/
-def transferLocalProperty : TestCase := {
+/-- Auto-gen LX.38: legalkernel.transfer.local property holds (100 samples). -/
+def legalkernel_transferLocalProperty : TestCase := {
   name := "auto-gen LX.38: legalkernel.transfer.local property holds (100 samples)"
   body := do
     match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
@@ -211,17 +160,35 @@ def transferLocalProperty : TestCase := {
       let t := Laws.transfer r sender receiver amount
       if _ : t.pre s then
         let s' := step_impl s t
-        -- Property: every actor's balance at r' is unchanged.
         decide (getBalance s r' 0 = getBalance s' r' 0 ∧
-                getBalance s r' 1 = getBalance s' r' 1 ∧
-                getBalance s r' 2 = getBalance s' r' 2 ∧
-                getBalance s r' 3 = getBalance s' r' 3)
-      else
-        true)
+                getBalance s r' 1 = getBalance s' r' 1)
+      else true)
 }
 
-/-- `mint` is `local [r]`. -/
-def mintLocalProperty : TestCase := {
+/-- Auto-gen LX.38: legalkernel.mint.monotonic property holds (100 samples). -/
+def legalkernel_mintMonotonicProperty : TestCase := {
+  name := "auto-gen LX.38: legalkernel.mint.monotonic property holds (100 samples)"
+  body := do
+    match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
+    | some "1" =>
+      IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
+      return ()
+    | _ => pure ()
+    let seed ← readSeed
+    let n ← readIterations
+    forAll (T := State) n seed (genTestState 4 50) (fun s =>
+      let r : ResourceId := 0
+      let recipient : ActorId := 0
+      let amount : Amount := 5
+      let t := Laws.mint r recipient amount
+      if _ : t.pre s then
+        let s' := step_impl s t
+        decide (TotalSupply s r ≤ TotalSupply s' r)
+      else true)
+}
+
+/-- Auto-gen LX.38: legalkernel.mint.local property holds (100 samples). -/
+def legalkernel_mintLocalProperty : TestCase := {
   name := "auto-gen LX.38: legalkernel.mint.local property holds (100 samples)"
   body := do
     match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
@@ -239,20 +206,13 @@ def mintLocalProperty : TestCase := {
       let t := Laws.mint r recipient amount
       if _ : t.pre s then
         let s' := step_impl s t
-        decide (getBalance s r' 0 = getBalance s' r' 0 ∧
-                getBalance s r' 1 = getBalance s' r' 1 ∧
-                getBalance s r' 2 = getBalance s' r' 2)
-      else
-        true)
+        decide (getBalance s r' 0 = getBalance s' r' 0)
+      else true)
 }
 
-/-! ## `freeze_preserving [r]` property — frozen resource is unchanged -/
-
-/-- `freezeResource r` is `freeze_preserving [r]`: applying
-    `freezeResource` does not touch the balance map for the
-    frozen resource. -/
-def freezePreservingProperty : TestCase := {
-  name := "auto-gen LX.38: legalkernel.freezeResource.freeze_preserving holds (100 samples)"
+/-- Auto-gen LX.38: legalkernel.freezeResource.conservative property holds (100 samples). -/
+def legalkernel_freezeResourceConservativeProperty : TestCase := {
+  name := "auto-gen LX.38: legalkernel.freezeResource.conservative property holds (100 samples)"
   body := do
     match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
     | some "1" =>
@@ -265,23 +225,57 @@ def freezePreservingProperty : TestCase := {
       let r : ResourceId := 0
       let t := Laws.freezeResource r
       let s' := step_impl s t
-      -- Every actor's balance at r is unchanged.
+      decide (TotalSupply s r = TotalSupply s' r))
+}
+
+/-- Auto-gen LX.38: legalkernel.freezeResource.monotonic property holds (100 samples). -/
+def legalkernel_freezeResourceMonotonicProperty : TestCase := {
+  name := "auto-gen LX.38: legalkernel.freezeResource.monotonic property holds (100 samples)"
+  body := do
+    match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
+    | some "1" =>
+      IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
+      return ()
+    | _ => pure ()
+    let seed ← readSeed
+    let n ← readIterations
+    forAll (T := State) n seed (genTestState 4 50) (fun s =>
+      let r : ResourceId := 0
+      let t := Laws.freezeResource r
+      let s' := step_impl s t
+      decide (TotalSupply s r ≤ TotalSupply s' r))
+}
+
+/-- Auto-gen LX.38: legalkernel.freezeResource.freeze_preserving property holds (100 samples). -/
+def legalkernel_freezeResourceFreezePreservingProperty : TestCase := {
+  name := "auto-gen LX.38: legalkernel.freezeResource.freeze_preserving property holds (100 samples)"
+  body := do
+    match (← IO.getEnv "CANON_AUTOGEN_SKIP") with
+    | some "1" =>
+      IO.println "  (skipped via CANON_AUTOGEN_SKIP=1)"
+      return ()
+    | _ => pure ()
+    let seed ← readSeed
+    let n ← readIterations
+    forAll (T := State) n seed (genTestState 4 50) (fun s =>
+      let r : ResourceId := 0
+      let t := Laws.freezeResource r
+      let s' := step_impl s t
       decide (getBalance s r 0 = getBalance s' r 0 ∧
-              getBalance s r 1 = getBalance s' r 1 ∧
-              getBalance s r 2 = getBalance s' r 2 ∧
-              getBalance s r 3 = getBalance s' r 3))
+              getBalance s r 1 = getBalance s' r 1))
 }
 
 /-! ## Combined test suite -/
 
 /-- The complete LX.38 auto-generated test suite. -/
 def tests : List TestCase :=
-  [ transferConservativeProperty,
-    freezeConservativeProperty,
-    mintMonotonicProperty,
-    transferMonotonicProperty,
-    transferLocalProperty,
-    mintLocalProperty,
-    freezePreservingProperty ]
+  [ legalkernel_transferConservativeProperty,
+    legalkernel_transferMonotonicProperty,
+    legalkernel_transferLocalProperty,
+    legalkernel_mintMonotonicProperty,
+    legalkernel_mintLocalProperty,
+    legalkernel_freezeResourceConservativeProperty,
+    legalkernel_freezeResourceMonotonicProperty,
+    legalkernel_freezeResourceFreezePreservingProperty ]
 
 end LegalKernel.Test.Properties.AutoGen

@@ -2960,10 +2960,113 @@ After M3 lands:
     `lake exe lex_lint`, `lake exe lex_codegen --check`.
   * Two new CI binaries: `lake exe lex_diff <before> <after>`
     and `lake exe lex_format <file>`.
-  * Test count: 1476 → ~1530 (exact count after `lake test`
+  * Test count: 1476 → ~1570 (exact count after `lake test`
     runs).  No regressions.
   * 0 build warnings on a clean rebuild.
   * 0 sorries in TCB.
+
+**M3-completion (post-initial-landing audit).**  Following the
+initial M3 landing, a comprehensive audit identified 49
+spec-deviations / partial implementations.  The completion pass
+addresses each:
+
+  * **LX.32 #5 / #6 (authority policy elaboration)**: replaced
+    the hardcoded `AuthorityPolicy.unrestricted` placeholder with
+    the spec-faithful multi-binding `deploy_authority := [<slot>
+    = <expr>, ...]` syntax.  The macro emits
+    `deployment_<name>_authority_policy : AuthorityPolicy` as
+    the `AuthorityPolicy.intersect`-fold of all bindings (or
+    `unrestricted` if empty); this single policy is what
+    `_admissible` consumes.
+  * **LX.37 #31 (`@`-version-pin syntax)**: implemented the spec
+    syntax `Transfer = transferWrapper @ "1.0.0"` for
+    `deploy_laws`.  Each binding's `@`-version is captured into
+    `LawBinding.version` distinct from the deployment's
+    `deploy_version`.  Bare-identifier form preserved for
+    backward compat.
+  * **LX.33 #9 (wildcard expansion)**: added the `[all_laws]`
+    keyword as the wildcard scope for `deploy_invariant_claims`
+    entries (deviation from §10.2's `[* @ {*}]` notation
+    because `*` is a reserved Lean operator; semantics
+    identical).  At elaboration time the wildcard expands to
+    the deployment's full `deploy_laws` list.
+  * **LX.31 / LX.33 named APIs**: exposed `parseDeployment`,
+    `synth_monotonic_law_set`, `synth_conservative_law_set`,
+    `synth_freeze_preserving_law_set`, and `DeploymentDecl` as
+    public functions/types per spec.
+  * **LX.34 #16 (git integration)**: added `--git <ref-a>
+    <ref-b>` mode to `lex_diff`, plus public APIs
+    `parseLawDeclFromGitRef`, `gitShow`, `gitLsTree`, and
+    `loadCodegenDirFromGitRef`.  Git-mode runs `git show
+    <ref>:<path>` to extract sidecars at named revisions
+    without requiring external scripting.
+  * **LX.34 #19 (`LawDiff` per-clause `Option Diff` shape)**:
+    rewrote `LawDiff` to expose per-field `Option Diff`
+    fields (`preDiff`, `implDiff`, `satisfiesDiff`, etc.)
+    matching the spec.
+  * **LX.35 #20 (manifest-level diffing)**: extended
+    `DeploymentDiff` with `authoritySlotsAdded` /
+    `authoritySlotsRemoved` / `authoritySlotsModified` /
+    `invariantClaimsAdded` / `invariantClaimsRemoved` /
+    `invariantClaimsModified` fields, plus
+    `classifyManifestBump` (major bump for law-set / authority-
+    set adds/removes; minor for in-binding edits).
+  * **LX.35 named APIs**: exposed `classifyVersionBump :
+    LawDecl → LawDecl → VersionBump`, `checkRefinementProof :
+    String → LawDecl → IO Bool`, `checkVersionDeclaration :
+    String → LawDecl → LawDecl → Except Diagnostic Unit`.
+  * **LX.36 #25 (clause-order canonicalization)**: implemented
+    full clause-order normalization per §3.3.  Out-of-order
+    clauses are reordered into the canonical sequence
+    (`lex_id` → `lex_version` → `lex_action_index` →
+    `lex_intent` → ... → `lex_proof <P>` → `lex_registry_effect`).
+  * **LX.36 #26 / #27 (indentation + comment preservation)**:
+    Implemented full block-segmentation walker.  Comments
+    immediately preceding a clause-start move WITH the clause
+    during reordering (`precedingComments` field on
+    `ClauseGroup`); comments on continuation lines stay as
+    body content; free-floating prelude comments are preserved
+    as block-prelude.  Multi-line `lex_events := do\n  pure
+    ()` and `do\n  nothing` forms canonicalise to single-line
+    `lex_events := []`.
+  * **LX.38 #37 (true auto-generation)**: replaced the
+    coverage-manifest placeholder with a real `emitAutoGenLean`
+    that emits the full `LegalKernel/Test/Properties/AutoGen.lean`
+    Lean test file.  Per-(law, property) tests are rendered
+    from per-property templates with hard-coded parameter
+    signatures for the kernel-built-in laws (transfer / mint /
+    burn / freezeResource / reward).  Unsupported pairs are
+    recorded as coverage-comment-only entries.  `lex_codegen
+    --gen-property-tests --check` is now a CI-gating check
+    that the committed `AutoGen.lean` is byte-stable against
+    the generator's output.
+  * **+4 cases for `tools-lex-codegen`**: `emitAutoGenLean` is
+    non-empty, deterministic on equal input, records
+    coverage-only entries for unsupported pairs, and handles
+    laws with no `satisfies` claims.
+  * **L008 / L016 / L018 promotion**: moved from
+    `deferredCodeRegistry` to `m1ImplementedCodes` in
+    `DiagnosticCoverage.lean`.  Sample messages added to
+    `m1CodeRegistry`.  Total deferred set: 9 → 6 codes.
+  * **Walkthrough manifest hash recorded**: the worked-example
+    USD-clearing's `manifest_hash` v1.0.0 is now pinned in
+    `docs/lex_amendment_walkthrough.md` for stability tracking.
+
+Test count after M3-completion: ~1570 (was 1547 pre-completion;
++25 new tests across `dsl-lex-deployment` (+8 — wildcard,
+attestor, version-pin, named-API existence checks),
+`tools-lex-diff` (+5 — `checkRefinementProofIO`,
+`checkVersionDeclaration*`, `manifestBump*`),
+`tools-lex-format` (+8 — clause-order, comment preservation,
+multi-line empty-events, indentation, non-block-content),
+`tools-lex-codegen` (+4 — `emitAutoGenLean` shape /
+determinism / coverage-only / no-satisfies).
+
+The M3-completion pass closes every functional defect identified
+in the post-landing audit while preserving backward-compatibility
+where reasonable (single-policy `deploy_authority` form is the
+only intentionally-removed surface, replaced by the spec-canonical
+multi-binding `[default = <expr>]` form).
 
 **Workstream-LX M2 audit-5 hardening (this branch).**  A fifth
 deep audit, parallelised across three independent agents (law-

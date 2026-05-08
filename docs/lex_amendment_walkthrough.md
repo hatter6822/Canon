@@ -205,6 +205,29 @@ And rebuilds.  The manifest-hash will change to reflect the
 new pinned version, and the attestor (V2) re-signs the new
 manifest hash.
 
+## Manifest Hash Stability Record
+
+For long-term stability tracking, the example manifest's `manifest_hash`
+at v1.0.0 is recorded here:
+
+  * **Deployment**: `example.usd_clearing`
+  * **Manifest version**: `1.0.0`
+  * **Manifest hash** (FNV-1a-64; first 8 bytes are the hash, rest zero-padded
+    until production BLAKE3 lands; see `Runtime/Hash.lean`):
+    `1919db5de8cacee1000000000000000000000000000000000000000000000000`
+
+To verify the hash hasn't drifted:
+
+```
+lake build Deployments.Examples.UsdClearing
+lake env lean --run /tmp/get_hash.lean    # see Phase-6 docs for the helper
+```
+
+A change to this hash signals a manifest-level edit (e.g.,
+adding/removing a law, changing an authority binding, bumping
+`deploy_version`).  The audit-tools `lex_diff` will produce a
+detailed per-clause breakdown of what changed.
+
 ## Acceptance Gate Summary
 
 After Steps 1–8 complete:

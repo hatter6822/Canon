@@ -82,14 +82,15 @@ def deploymentRecordShape : TestCase := {
 def manifestHashDeterminism : TestCase := {
   name := "LX.32: manifest hash is deterministic"
   body := do
+    let laws := [("Transfer", "Transfer", "1.0.0")]
+    let auth := [("default", "AuthorityPolicy.unrestricted")]
+    let claims := [(0, 0, ["Transfer"])]
     let h1 := computeManifestHash
       "ex.deploy" fixtureDeploymentId "1.0.0"
-      [("USD", 1)] [("Transfer", "1.0.0")] "(fun _ _ => True)"
-      [(0, ["Transfer"])]
+      [("USD", 1)] laws auth claims
     let h2 := computeManifestHash
       "ex.deploy" fixtureDeploymentId "1.0.0"
-      [("USD", 1)] [("Transfer", "1.0.0")] "(fun _ _ => True)"
-      [(0, ["Transfer"])]
+      [("USD", 1)] laws auth claims
     assertEq (expected := h1.toList) (actual := h2.toList)
       "two computeManifestHash invocations on equal input must be byte-identical"
 }
@@ -99,12 +100,14 @@ def manifestHashDeterminism : TestCase := {
 def manifestHashDistinguishesIdentifier : TestCase := {
   name := "LX.32: manifest hash distinguishes by identifier"
   body := do
+    let laws := [("Transfer", "Transfer", "1.0.0")]
+    let auth := [("default", "AuthorityPolicy.unrestricted")]
     let h1 := computeManifestHash
       "ex.deploy" fixtureDeploymentId "1.0.0"
-      [("USD", 1)] [("Transfer", "1.0.0")] "(fun _ _ => True)" []
+      [("USD", 1)] laws auth []
     let h2 := computeManifestHash
       "ex.different" fixtureDeploymentId "1.0.0"
-      [("USD", 1)] [("Transfer", "1.0.0")] "(fun _ _ => True)" []
+      [("USD", 1)] laws auth []
     assert (h1.toList != h2.toList)
       "distinct identifiers must produce distinct manifest hashes"
 }
@@ -116,8 +119,8 @@ def manifestHashDistinguishesDeploymentId : TestCase := {
   body := do
     let did1 := ByteArray.mk (Array.replicate 32 (0 : UInt8))
     let did2 := ByteArray.mk (Array.replicate 32 (1 : UInt8))
-    let h1 := computeManifestHash "ex.deploy" did1 "1.0.0" [] [] "" []
-    let h2 := computeManifestHash "ex.deploy" did2 "1.0.0" [] [] "" []
+    let h1 := computeManifestHash "ex.deploy" did1 "1.0.0" [] [] [] []
+    let h2 := computeManifestHash "ex.deploy" did2 "1.0.0" [] [] [] []
     assert (h1.toList != h2.toList)
       "distinct deployment IDs must produce distinct manifest hashes"
 }
@@ -128,7 +131,7 @@ def manifestHashSize : TestCase := {
   name := "LX.32: manifest hash is 32 bytes"
   body := do
     let h := computeManifestHash
-      "ex.deploy" fixtureDeploymentId "1.0.0" [] [] "" []
+      "ex.deploy" fixtureDeploymentId "1.0.0" [] [] [] []
     assertEq (expected := 32) (actual := h.size)
       "manifestHash size = 32 bytes"
 }
@@ -137,8 +140,8 @@ def manifestHashSize : TestCase := {
 def manifestHashDistinguishesVersion : TestCase := {
   name := "LX.32: manifest hash distinguishes by version"
   body := do
-    let h1 := computeManifestHash "ex" fixtureDeploymentId "1.0.0" [] [] "" []
-    let h2 := computeManifestHash "ex" fixtureDeploymentId "2.0.0" [] [] "" []
+    let h1 := computeManifestHash "ex" fixtureDeploymentId "1.0.0" [] [] [] []
+    let h2 := computeManifestHash "ex" fixtureDeploymentId "2.0.0" [] [] [] []
     assert (h1.toList != h2.toList)
       "distinct versions must produce distinct manifest hashes"
 }
@@ -229,7 +232,7 @@ deployment minimalTestDeployment where
   deploy_version         "1.0.0"
   deploy_resources       := [ "USD" := 1 ]
   deploy_laws            := [ Transfer ]
-  deploy_authority       := (fun _ _ => True)
+  deploy_authority       := [ default = AuthorityPolicy.unrestricted ]
 
 /-- The deployment macro emits a `Deployment` record def. -/
 def deploymentMacroEmitsRecord : TestCase := {
@@ -379,7 +382,142 @@ def hexDecodeBoundary30Bytes : TestCase := {
       throw (IO.userError "expected some, got none")
 }
 
-/-- The complete LX.31 / LX.32 / LX.33 test suite. -/
+/-! ## LX.32 — Authority policy fold (post-M3-completion) -/
+
+/-- The macro emits a `_authority_policy : AuthorityPolicy` def
+    derived from the user's authority bindings. -/
+def deploymentMacroEmitsAuthorityPolicy : TestCase := {
+  name := "LX.32: deployment macro emits _authority_policy : AuthorityPolicy"
+  body := do
+    -- The macro emits `minimalTestDeployment_authority_policy`.
+    let _check : AuthorityPolicy := minimalTestDeployment_authority_policy
+    pure ()
+}
+
+/-! ## LX.33 — Wildcard `[all_laws]` expansion -/
+
+-- Define a fixture with the wildcard form.
+deployment wildcardTestDeployment where
+  deploy_id              ex.wildcard
+  deploy_deployment_id   "0000000000000000000000000000000000000000000000000000000000000001"
+  deploy_version         "1.0.0"
+  deploy_resources       := [ "USD" := 0 ]
+  deploy_laws            := [ Freeze = fixtureFreezeLaw @ "1.0.0" ]
+  deploy_authority       := [ default = AuthorityPolicy.unrestricted ]
+  deploy_invariant_claims := [
+    monotonic_law_set [all_laws]
+  ]
+
+/-- The wildcard form expands to the deployment's full law list. -/
+def wildcardExpansionTest : TestCase := {
+  name := "LX.33: [all_laws] wildcard expands to deploy_laws list"
+  body := do
+    let mls := wildcardTestDeployment_monotonic_law_set_0
+    -- The deployment has 1 law (Freeze); the wildcard expands to it.
+    assertEq (expected := 1) (actual := mls.laws.length)
+      "wildcard expanded to the deployment's law list"
+}
+
+/-! ## LX.37 — attestor placeholder (v2 reservation) -/
+
+deployment attestorTestDeployment where
+  deploy_id              ex.attestor
+  deploy_deployment_id   "0000000000000000000000000000000000000000000000000000000000000002"
+  deploy_version         "1.0.0"
+  deploy_resources       := [ "USD" := 0 ]
+  deploy_laws            := [ Freeze = fixtureFreezeLaw @ "1.0.0" ]
+  deploy_authority       := [ default = AuthorityPolicy.unrestricted ]
+  deploy_invariant_claims := []
+  deploy_attestor        my_attestor
+
+/-- The `deploy_attestor` clause is parsed (v2-reservation;
+    captured but not yet wired into emitted defs). -/
+def attestorPlaceholderTest : TestCase := {
+  name := "LX.37: deploy_attestor clause is parsed (v2 reservation)"
+  body := do
+    -- The macro elaborates the clause without error; the
+    -- attestor handle is reserved for v2 (signed-manifest
+    -- attestation).
+    let _check : Deployment := attestorTestDeployment_deployment
+    pure ()
+}
+
+/-! ## LX.32 — `@`-version-pin syntax in `deploy_laws` -/
+
+-- Define a fixture using the spec's `<localName> = <law> @ "<version>"` form.
+deployment versionPinTestDeployment where
+  deploy_id              ex.version_pin
+  deploy_deployment_id   "0000000000000000000000000000000000000000000000000000000000000003"
+  deploy_version         "1.0.0"
+  deploy_resources       := [ "USD" := 0 ]
+  deploy_laws            := [
+    Freeze = fixtureFreezeLaw @ "0.9.0"  -- distinct from deploy_version
+  ]
+  deploy_authority       := [ default = AuthorityPolicy.unrestricted ]
+  deploy_invariant_claims := []
+
+/-- The `@`-version-pin captures a per-binding version distinct
+    from the deployment's `deploy_version`. -/
+def versionPinTest : TestCase := {
+  name := "LX.37: @-version-pin captures per-binding version"
+  body := do
+    let dep := versionPinTestDeployment_deployment
+    let firstLaw := dep.laws.head!
+    assertEq (expected := "0.9.0") (actual := firstLaw.version)
+      "law's @-version-pin captured into LawBinding.version"
+    assertEq (expected := "1.0.0") (actual := dep.version)
+      "deployment-level version distinct from per-law version pin"
+}
+
+/-! ## LX.33 — `synth_*` named functions -/
+
+/-- `synth_monotonic_law_set` is callable from `CommandElabM`. -/
+def synthMonotonicNamedAPITest : TestCase := {
+  name := "LX.33: synth_monotonic_law_set named API exists"
+  body := do
+    -- We don't run synth_* here (it requires CommandElabM
+    -- context).  This test confirms the symbol exists at the
+    -- term level (i.e. the named-API export is present).  A
+    -- full call-site exercise lives in the deployment macro
+    -- elaborator itself.
+    let _check : List Lean.Name → Lean.Elab.Command.CommandElabM Lean.Term :=
+      synth_monotonic_law_set
+    pure ()
+}
+
+/-- `synth_conservative_law_set` is callable. -/
+def synthConservativeNamedAPITest : TestCase := {
+  name := "LX.33: synth_conservative_law_set named API exists"
+  body := do
+    let _check : List Lean.Name → Lean.Elab.Command.CommandElabM Lean.Term :=
+      synth_conservative_law_set
+    pure ()
+}
+
+/-- `synth_freeze_preserving_law_set` is callable. -/
+def synthFreezePreservingNamedAPITest : TestCase := {
+  name := "LX.33: synth_freeze_preserving_law_set named API exists"
+  body := do
+    let _check : List Nat → List Lean.Name →
+                  Lean.Elab.Command.CommandElabM Lean.Term :=
+      synth_freeze_preserving_law_set
+    pure ()
+}
+
+/-! ## LX.31 — public `parseDeployment` named API -/
+
+/-- `parseDeployment` is callable. -/
+def parseDeploymentNamedAPITest : TestCase := {
+  name := "LX.31: parseDeployment named API exists"
+  body := do
+    let _check : Lean.Environment → Lean.Name → String → Nat →
+                  Lean.Name → Array Lean.Syntax →
+                  Lean.Elab.Command.CommandElabM DeploymentDecl :=
+      parseDeployment
+    pure ()
+}
+
+/-- The complete LX.31 / LX.32 / LX.33 / LX.37 test suite. -/
 def tests : List TestCase :=
   [ deploymentRecordShape,
     manifestHashDeterminism,
@@ -400,7 +538,16 @@ def tests : List TestCase :=
     deploymentMacroEmitsAdmissible,
     monotonicLawSetConsTest,
     conservativeLawSetConsTest,
-    hexDecodeBoundary30Bytes ]
+    hexDecodeBoundary30Bytes,
+    -- M3-completion tests:
+    deploymentMacroEmitsAuthorityPolicy,
+    wildcardExpansionTest,
+    attestorPlaceholderTest,
+    versionPinTest,
+    synthMonotonicNamedAPITest,
+    synthConservativeNamedAPITest,
+    synthFreezePreservingNamedAPITest,
+    parseDeploymentNamedAPITest ]
 
 end LexDeploymentTests
 end LegalKernel.Test.DSL

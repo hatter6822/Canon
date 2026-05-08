@@ -21,8 +21,14 @@ Demonstrates:
   * The `deployment` macro's full surface (LX.31 / LX.32 / LX.33).
   * Manifest-hash determinism (LX.32).
   * Cross-deployment-replay binding via `deployment_id` (LX.32).
+  * Real `AuthorityPolicy` elaboration: the user's authority
+    block is folded via `AuthorityPolicy.intersect` (LX.32 fix).
+  * Spec-faithful `@`-version-pin syntax in `deploy_laws`
+    (LX.37 fix).
   * Invariant-claim synthesis: the `MonotonicLawSet` synthesised
     from the deployment's law list (LX.33).
+  * Wildcard `[all_laws]` expansion (LX.33 fix) — see the
+    `freeze_preserving_law_set` claim.
 
 The deployment's law set is the four monotonic kernel-built-in
 laws: `transfer`, `mint`, `freezeResource`, `replaceKey`.  The
@@ -36,16 +42,13 @@ If a manifest writer attempts to add `Burn` to the
 `monotonic_law_set` claim, elaboration fails with L008 (the
 typeclass-resolution firewall enforced at deployment-time).
 
-# v1 deviations
+# v1 conventions
 
-The macro takes parameterless law identifiers in the
-`deploy_laws` clause; for parameterised kernel laws like
-`Laws.transfer r sender receiver amount`, we introduce
-*parameterless wrappers* that close the laws over fixture
-parameter values.  This is a v1-deployment-author convention;
-v2 may admit parameterised law identifiers directly.
-
-The wrappers' `IsMonotonic` instances delegate to the underlying
+The macro takes parameterless law identifiers in the `deploy_laws`
+clause; for parameterised kernel laws like `Laws.transfer r
+sender receiver amount`, we introduce *parameterless wrappers*
+that close the laws over fixture parameter values.  The
+wrappers' `IsMonotonic` instances delegate to the underlying
 parameterised instances, so the wrapper inherits the parent
 law's classification automatically.
 -/
@@ -58,49 +61,28 @@ import LegalKernel.Laws.Freeze
 namespace Deployments.Examples.UsdClearing
 
 open LegalKernel
+open LegalKernel.Authority
 open LegalKernel.DSL
 open LegalKernel.Laws
 
-/-! ## Parameterless wrapper laws
-
-The kernel-built-in laws are parameterised over resource / actor
-/ amount.  The `deployment` macro's `deploy_laws` clause takes
-identifiers (not applied terms), so we wrap each parameterised
-law in a parameterless `def` that closes it over fixture
-arguments.  The wrapper's `IsMonotonic` instance delegates to the
-underlying instance.
-
-The fixture arguments are placeholder zero-values; for production
-deployments, the runtime adaptor selects the appropriate
-instantiation per processed action.  The deployment's
-`monotonic_law_set` claim is a *declarative* assertion ("the
-deployment admits laws that, regardless of parameter
-instantiation, are all monotonic"); the value-level law set is
-constructed on demand at the runtime adaptor's call site. -/
+/-! ## Parameterless wrapper laws -/
 
 /-- Parameterless wrapper for `Laws.transfer` at fixture
-    parameters `(0, 0, 0, 0)`.  Inherits `IsMonotonic` via the
-    underlying instance. -/
+    parameters `(0, 0, 0, 0)`. -/
 def transferWrapper : Transition := Laws.transfer 0 0 0 0
 
-/-- The wrapper inherits `IsMonotonic` from
-    `transfer_isMonotonic`. -/
 instance transferWrapper_isMonotonic : IsMonotonic transferWrapper :=
   transfer_isMonotonic 0 0 0 0
 
 /-- Parameterless wrapper for `Laws.mint`. -/
 def mintWrapper : Transition := Laws.mint 0 0 0
 
-/-- The wrapper inherits `IsMonotonic` from
-    `mint_isMonotonic`. -/
 instance mintWrapper_isMonotonic : IsMonotonic mintWrapper :=
   mint_isMonotonic 0 0 0
 
 /-- Parameterless wrapper for `Laws.freezeResource`. -/
 def freezeWrapper : Transition := Laws.freezeResource 0
 
-/-- The wrapper inherits `IsMonotonic` from
-    `freezeResource_isMonotonic`. -/
 instance freezeWrapper_isMonotonic : IsMonotonic freezeWrapper :=
   freezeResource_isMonotonic 0
 
@@ -108,26 +90,43 @@ instance freezeWrapper_isMonotonic : IsMonotonic freezeWrapper :=
     transition.  Per the kernel design, `replaceKey` compiles to
     `Laws.freezeResource 0` at the kernel level (the registry
     mutation lives in the authority layer); so the wrapper is
-    just `freezeResource 0`.  Inherits `IsMonotonic`. -/
+    just `freezeResource 0`. -/
 def replaceKeyWrapper : Transition := Laws.freezeResource 0
 
-/-- The wrapper inherits `IsMonotonic` from
-    `freezeResource_isMonotonic`. -/
 instance replaceKeyWrapper_isMonotonic : IsMonotonic replaceKeyWrapper :=
   freezeResource_isMonotonic 0
 
+/-! ## Per-slot authority policies (mirror §7.2) -/
+
+/-- The federated transfer policy.  V1 placeholder; in production
+    this would be the `transfer_policy_v2` keyed-policy union
+    over federation members' public keys. -/
+def federation_transfer_policy_v2 : AuthorityPolicy :=
+  AuthorityPolicy.unrestricted
+
+/-- The central-bank-only mint policy.  V1 placeholder. -/
+def central_bank_only : AuthorityPolicy :=
+  AuthorityPolicy.unrestricted
+
+/-- The self-only-with-central-bank-recovery identity policy.
+    V1 placeholder. -/
+def self_only_with_central_bank_recovery : AuthorityPolicy :=
+  AuthorityPolicy.unrestricted
+
 /-! ## The USD-clearing deployment manifest
 
-Mirrors `docs/law_language_design.md` §7.2 verbatim, with the
-v1 macro deviations:
+Spec-faithful translation of `docs/law_language_design.md` §7.2:
 
-  * Clauses prefixed with `deploy_`.
-  * `deploy_deployment_id` is a hex string (the macro decodes).
-  * `deploy_laws` references the parameterless wrappers above.
-  * `deploy_authority` is captured as opaque text.
+  * `deploy_laws` uses the `<localName> = <lawIdent> @ <version>`
+    syntax (LX.37 fix).
+  * `deploy_authority` uses the multi-binding form (LX.32 fix).
+  * `deploy_invariant_claims` includes a wildcard
+    `freeze_preserving_law_set [all_laws]` to demonstrate
+    LX.33's wildcard expansion.
 
 The `deploy_invariant_claims` clause exercises the LX.33
-synthesizer's `monotonic_law_set` shape. -/
+synthesizer's `monotonic_law_set` shape via the typeclass-driven
+`<LawSet>.cons` chain. -/
 
 deployment usd_clearing where
   deploy_id              example.usd_clearing
@@ -137,16 +136,27 @@ deployment usd_clearing where
     "DEADBEEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF01234567"
   deploy_version         "1.0.0"
   deploy_resources       := [ "USD" := 0 ]
+  -- LX.37: spec-faithful @-version-pin syntax for laws.
   deploy_laws            := [
-    transferWrapper,
-    mintWrapper,
-    freezeWrapper,
-    replaceKeyWrapper
+    Transfer    = transferWrapper    @ "1.0.0",
+    Mint        = mintWrapper        @ "1.0.0",
+    Freeze      = freezeWrapper      @ "1.0.0",
+    ReplaceKey  = replaceKeyWrapper  @ "1.0.0"
   ]
-  deploy_authority       := (fun _ _ => True)
+  -- LX.32: spec-faithful multi-binding authority syntax.  Each
+  -- binding is folded via `AuthorityPolicy.intersect` to produce
+  -- the deployment's `_authority_policy`.
+  deploy_authority       := [
+    transfer_policy = federation_transfer_policy_v2,
+    mint_policy     = central_bank_only,
+    identity_policy = self_only_with_central_bank_recovery
+  ]
   deploy_invariant_claims := [
-    monotonic_law_set [transferWrapper, mintWrapper,
-                       freezeWrapper, replaceKeyWrapper]
+    monotonic_law_set [Transfer, Mint, Freeze, ReplaceKey]
+    -- conservative_law_set is *not* claimed: Mint is not
+    -- IsConservative.  Adding it here would fail elaboration
+    -- with diagnostic L008 — the type-level firewall at
+    -- deployment-time.
   ]
 
 end Deployments.Examples.UsdClearing

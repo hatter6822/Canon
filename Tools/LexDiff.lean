@@ -11,29 +11,32 @@ Tools.LexDiff — the Workstream-LX `lex_diff` semantic-diff binary.
 
 LX.34 / LX.35 (`docs/lex_implementation_plan.md` §14).
 
-Walks two checked-in trees of `LegalKernel/_lex_inputs/*.json`
-files (one for the "before" git ref, one for the "after"), computes
-a per-law / per-manifest semantic diff, and emits the diff to
-stdout in the §14.1 format.
+Walks two trees of `LegalKernel/_lex_inputs/*.json` files (or
+two git refs), computes a per-law / per-manifest semantic diff,
+and emits the diff to stdout in the §14.1 format.
 
-The diff is computed on the **parsed AST** (`LawDecl` records),
-not on raw source bytes — so reformatting and comment-only changes
-do not appear in the output.
+# Capabilities (post-M3-completion)
 
-# Capabilities
-
-  * Per-clause diff: identifier, version, action_index, intent,
-    signed_by, authorized_by, pre_expr, impl_block, satisfies,
-    events_block, registry_effect, params, proof_overrides.
-  * Version-bump classifier: deterministic mapping of a `LawDiff`
-    to one of `patch` / `minor` / `major` per §14.2.
-  * Refinement-proof check: a minor-bump-classified law must
-    declare a `lex_proof refinement_v<old> := ...` clause; missing
-    proofs fire L016.
-  * Version-declaration check: confirms the declared version bump
-    matches the classifier's; mismatch fires L007.
-  * Manifest-level diff: a `DeploymentDiff` record covering law-
-    set / authority-set / claim-set additions and removals.
+  * **Two input modes (LX.34)**: takes two directory paths
+    OR two git refs (`<ref>:<dir>`).  In git-ref mode, runs
+    `git show <ref>:<file>` to extract sidecars at the named
+    revision.
+  * **Per-clause structural diff**: AST-level comparison of
+    `pre_ast`, `impl_calculus`, `events`, `satisfies`,
+    `signed_by`, `authorized_by`, `intent`, `version`,
+    `action_index`, `params`, `proof_overrides`,
+    `registry_effect`.
+  * **`LawDiff` per-clause `Option Diff` shape (LX.34 spec)**:
+    each clause's diff (or `none` if unchanged) is exposed as a
+    named field.
+  * **Version-bump classifier**: `classifyVersionBump :
+    LawDiff → VersionBump`.
+  * **Refinement-proof check (LX.35)**: `checkRefinementProof :
+    LawDecl → IO Bool`.
+  * **Version-declaration mismatch**: `checkVersionDeclaration
+    : LawDiff → Except Diagnostic Unit`.
+  * **Manifest-level diff (LX.35)**: `DeploymentDiff` covering
+    laws / authority bindings / invariant claims.
 
 # Exit codes (§14.1)
 
@@ -41,19 +44,15 @@ do not appear in the output.
   * `1` — version-bump declaration mismatch (L007) OR missing
     refinement proof for a minor bump (L016).
   * `2` — internal binary failure (cannot read a file, malformed
-    JSON, etc.).
+    JSON, missing git, etc.).
 
 # Usage
 
   ```
   lake exe lex_diff <before-dir> <after-dir>
+  lake exe lex_diff --git <ref-a> <ref-b>
   lake exe lex_diff --help
   ```
-
-The `<before-dir>` and `<after-dir>` paths point at directories
-containing `*.json` codegen-input files (typically extracted from
-two git refs by an external script).  The binary itself does not
-shell out to git — extraction is the caller's responsibility.
 
 This module is **not** part of the trusted computing base.  Bugs
 produce wrong audit-binary output (false positives / negatives at
@@ -67,38 +66,24 @@ namespace LegalKernel.Tools.Lex.Diff
 open System (FilePath)
 open LegalKernel.Tools.Lex
 
-/-! ## Per-clause diff representation -/
+/-! ## Per-clause diff representation (LX.34 spec shape) -/
 
-/-- A single per-clause diff: the field name plus the before /
-    after surface text.  V1 emits the full text in a single
-    string (the `git diff -u` output is the caller's
-    responsibility). -/
-structure ClauseDiff where
-  /-- The field name being diffed. -/
-  field : String
+/-- A single "Diff" — a before / after string pair.  Used per
+    clause in the spec's `Option Diff` per-field shape. -/
+structure Diff where
   /-- The "before" surface text. -/
   before : String
   /-- The "after" surface text. -/
   after : String
   deriving Repr, DecidableEq, Inhabited
 
-/-- The version-bump category (per §14.2).  Each `LawDiff` is
-    classified into exactly one of these by the static rules:
-
-      * `patch` — proof-only changes (no `pre`/`impl`/etc. drift).
-      * `minor` — refinement: `pre` strengthens, `impl` mutates
-        within the same kernel-effect class, or `satisfies` adds
-        items.
-      * `major` — anything else.
-      * `none_` — no diff (used for laws that exist in both refs
-        and are byte-equal).
-    -/
+/-- The version-bump category (per §14.2). -/
 inductive VersionBump where
   /-- No semantic change. -/
   | none_
   /-- Patch: proof-only changes. -/
   | patch
-  /-- Minor: refinement. -/
+  /-- Minor: refinement-shaped. -/
   | minor
   /-- Major: breaking change. -/
   | major
@@ -106,157 +91,139 @@ inductive VersionBump where
 
 /-- Render a `VersionBump` as a one-word display string. -/
 def VersionBump.toDisplay : VersionBump → String
-  | .none_  => "none"
+  | .none_ => "none"
   | .patch => "patch"
   | .minor => "minor"
   | .major => "major"
 
-/-- A per-law structural diff: every clause's pre/post pair plus
-    the classified version bump and any auxiliary diagnostics. -/
+/-- A per-law structural diff (LX.34 spec shape).  Each clause
+    has its own `Option Diff` field; `none` means unchanged. -/
 structure LawDiff where
   /-- The law's canonical identifier. -/
   identifier : String
-  /-- The "before" version (semver). -/
+  /-- The "before" version. -/
   versionBefore : String
-  /-- The "after" version (semver). -/
+  /-- The "after" version. -/
   versionAfter : String
-  /-- The classifier's verdict on this diff. -/
+  /-- The classifier's verdict. -/
   versionBump : VersionBump
-  /-- Per-clause diffs.  Empty list = no changes (= `versionBump
-      = .none_`). -/
-  clauseDiffs : List ClauseDiff
+  /-- Pre-clause diff (`pre_expr`). -/
+  preDiff : Option Diff
+  /-- Impl-clause diff (`impl_block`). -/
+  implDiff : Option Diff
+  /-- Satisfies-clause diff. -/
+  satisfiesDiff : Option Diff
+  /-- Events-clause diff. -/
+  eventsDiff : Option Diff
+  /-- Intent-clause diff. -/
+  intentDiff : Option Diff
+  /-- Signed-by-clause diff. -/
+  signedByDiff : Option Diff
+  /-- Authorized-by-clause diff. -/
+  authDiff : Option Diff
+  /-- Action-index diff. -/
+  actionIndexDiff : Option Diff
+  /-- Params-clause diff. -/
+  paramsDiff : Option Diff
+  /-- Proof-overrides diff. -/
+  proofOverridesDiff : Option Diff
+  /-- Registry-effect diff. -/
+  registryEffectDiff : Option Diff
   /-- Whether the new version supplies a `lex_proof
-      refinement_v<old>` clause; populated for minor-bumped laws
-      only. -/
+      refinement_v<MAJ>_<MIN>` clause. -/
   refinementProofPresent : Bool
   deriving Repr, Inhabited
 
 /-! ## Per-clause diff helpers -/
 
-/-- Compute the per-clause diff between two `LawDecl`s.  Returns
-    the list of clauses that differ. -/
-def computeClauseDiffs (before after : LawDecl) : List ClauseDiff := Id.run do
-  let mut diffs : List ClauseDiff := []
-  if before.identifier != after.identifier then
-    diffs := diffs ++ [{ field := "identifier",
-                         before := before.identifier,
-                         after := after.identifier }]
-  if before.version != after.version then
-    diffs := diffs ++ [{ field := "version",
-                         before := before.version,
-                         after := after.version }]
-  if before.actionIndex != after.actionIndex then
-    diffs := diffs ++ [{ field := "action_index",
-                         before := toString before.actionIndex,
-                         after := toString after.actionIndex }]
-  if before.intent != after.intent then
-    diffs := diffs ++ [{ field := "intent",
-                         before := before.intent,
-                         after := after.intent }]
-  if before.signedBy != after.signedBy then
-    diffs := diffs ++ [{ field := "signed_by",
-                         before := before.signedBy.name,
-                         after := after.signedBy.name }]
-  if before.authorizedBy != after.authorizedBy then
-    diffs := diffs ++ [{ field := "authorized_by",
-                         before := before.authorizedBy.expr,
-                         after := after.authorizedBy.expr }]
-  if before.preExpr != after.preExpr then
-    diffs := diffs ++ [{ field := "pre",
-                         before := before.preExpr,
-                         after := after.preExpr }]
-  if before.implBlock != after.implBlock then
-    diffs := diffs ++ [{ field := "impl",
-                         before := before.implBlock,
-                         after := after.implBlock }]
-  if before.satisfies != after.satisfies then
-    let beforeStr := String.intercalate ", "
-      (before.satisfies.map (fun c => c.name))
-    let afterStr := String.intercalate ", "
-      (after.satisfies.map (fun c => c.name))
-    diffs := diffs ++ [{ field := "satisfies",
-                         before := beforeStr,
-                         after := afterStr }]
-  if before.eventsBlock != after.eventsBlock then
-    diffs := diffs ++ [{ field := "events",
-                         before := before.eventsBlock,
-                         after := after.eventsBlock }]
-  if before.registryEffect != after.registryEffect then
-    diffs := diffs ++ [{ field := "registry_effect",
-                         before := toString (repr before.registryEffect),
-                         after := toString (repr after.registryEffect) }]
-  if before.params != after.params then
-    let beforeStr := String.intercalate ", "
-      (before.params.map (fun p => p.name))
-    let afterStr := String.intercalate ", "
-      (after.params.map (fun p => p.name))
-    diffs := diffs ++ [{ field := "params",
-                         before := beforeStr,
-                         after := afterStr }]
-  if before.proofOverrides != after.proofOverrides then
-    let beforeStr := String.intercalate ", "
-      (before.proofOverrides.map (fun o => o.property))
-    let afterStr := String.intercalate ", "
-      (after.proofOverrides.map (fun o => o.property))
-    diffs := diffs ++ [{ field := "proof_overrides",
-                         before := beforeStr,
-                         after := afterStr }]
-  pure diffs
+/-- Compare two `String` values, returning `none` if equal,
+    else `some Diff`. -/
+def diffString (before after : String) : Option Diff :=
+  if before == after then none
+  else some { before, after }
 
-/-! ## Version-bump classifier (LX.35) -/
+/-- Compute a `LawDiff` from two `LawDecl`s.  Each clause is
+    diffed independently. -/
+def computeLawDiff (before after : LawDecl) : LawDiff :=
+  { identifier := before.identifier,
+    versionBefore := before.version,
+    versionAfter := after.version,
+    versionBump := .none_,  -- filled in by classifyVersionBump
+    preDiff := diffString before.preExpr after.preExpr,
+    implDiff := diffString before.implBlock after.implBlock,
+    satisfiesDiff :=
+      let bs := String.intercalate "," (before.satisfies.map (·.name))
+      let as := String.intercalate "," (after.satisfies.map (·.name))
+      diffString bs as,
+    eventsDiff := diffString before.eventsBlock after.eventsBlock,
+    intentDiff := diffString before.intent after.intent,
+    signedByDiff := diffString before.signedBy.name after.signedBy.name,
+    authDiff := diffString before.authorizedBy.expr after.authorizedBy.expr,
+    actionIndexDiff :=
+      diffString (toString before.actionIndex) (toString after.actionIndex),
+    paramsDiff :=
+      let bs := String.intercalate "," (before.params.map (·.name))
+      let as := String.intercalate "," (after.params.map (·.name))
+      diffString bs as,
+    proofOverridesDiff :=
+      let bs := String.intercalate "," (before.proofOverrides.map (·.property))
+      let as := String.intercalate "," (after.proofOverrides.map (·.property))
+      diffString bs as,
+    registryEffectDiff :=
+      diffString (toString (repr before.registryEffect))
+                 (toString (repr after.registryEffect)),
+    refinementProofPresent := false  -- filled in below
+  }
 
-/-- True if the only clause-diffs are in proof-related fields
-    (currently just `proof_overrides`).  Patch-bump trigger. -/
-def isProofOnlyDiff (diffs : List ClauseDiff) : Bool :=
-  diffs.all (fun d => d.field == "proof_overrides")
+/-- True iff the diff has no clause changes. -/
+def LawDiff.isEmpty (d : LawDiff) : Bool :=
+  d.preDiff.isNone ∧ d.implDiff.isNone ∧ d.satisfiesDiff.isNone ∧
+  d.eventsDiff.isNone ∧ d.intentDiff.isNone ∧ d.signedByDiff.isNone ∧
+  d.authDiff.isNone ∧ d.actionIndexDiff.isNone ∧ d.paramsDiff.isNone ∧
+  d.proofOverridesDiff.isNone ∧ d.registryEffectDiff.isNone
 
-/-- True if `pre` is the only mutated clause aside from `version`
-    (which is a counter-side-effect of any change).  Minor-bump
-    candidate when combined with `satisfies`-only-additions. -/
-def isPreOnlyDiff (diffs : List ClauseDiff) : Bool :=
-  let nonVersion := diffs.filter (fun d => d.field != "version")
-  nonVersion.length == 1 && (nonVersion.head?).map (·.field) == some "pre"
+/-- Are the clauses unchanged except for `version` and (optionally)
+    `proof_overrides` ? -/
+def LawDiff.isProofOnly (d : LawDiff) : Bool :=
+  d.preDiff.isNone ∧ d.implDiff.isNone ∧ d.satisfiesDiff.isNone ∧
+  d.eventsDiff.isNone ∧ d.intentDiff.isNone ∧ d.signedByDiff.isNone ∧
+  d.authDiff.isNone ∧ d.actionIndexDiff.isNone ∧ d.paramsDiff.isNone ∧
+  d.registryEffectDiff.isNone
 
-/-- True if `satisfies` is the only mutated clause aside from
-    `version` AND it is monotonically extended (no removals). -/
-def isSatisfiesAdditionsOnlyDiff (before after : LawDecl)
-    (diffs : List ClauseDiff) : Bool :=
-  let nonVersion := diffs.filter (fun d => d.field != "version")
-  if nonVersion.length != 1 then false
-  else
-    if (nonVersion.head?).map (·.field) != some "satisfies" then false
-    else
-      -- Check that every claim in `before.satisfies` is also in
-      -- `after.satisfies` (monotonic extension).
-      before.satisfies.all (fun bc =>
-        after.satisfies.any (fun ac =>
-          ac.name == bc.name && ac.args == bc.args))
+/-- Are the only mutated clauses `pre` and (optionally)
+    `proof_overrides`? -/
+def LawDiff.isPreOnly (d : LawDiff) : Bool :=
+  d.preDiff.isSome ∧ d.implDiff.isNone ∧ d.satisfiesDiff.isNone ∧
+  d.eventsDiff.isNone ∧ d.intentDiff.isNone ∧ d.signedByDiff.isNone ∧
+  d.authDiff.isNone ∧ d.actionIndexDiff.isNone ∧ d.paramsDiff.isNone ∧
+  d.registryEffectDiff.isNone
 
-/-- Classify a per-law diff into a version-bump category per
-    §14.2.  Deterministic mapping. -/
+/-- Is `before.satisfies ⊆ after.satisfies` (no removals)?  Plus
+    only the `satisfies` clause is mutated. -/
+def LawDiff.isSatisfiesAdditionsOnly (d : LawDiff)
+    (before after : LawDecl) : Bool :=
+  d.preDiff.isNone ∧ d.implDiff.isNone ∧ d.satisfiesDiff.isSome ∧
+  d.eventsDiff.isNone ∧ d.intentDiff.isNone ∧ d.signedByDiff.isNone ∧
+  d.authDiff.isNone ∧ d.actionIndexDiff.isNone ∧ d.paramsDiff.isNone ∧
+  d.registryEffectDiff.isNone ∧
+  before.satisfies.all (fun bc =>
+    after.satisfies.any (fun ac =>
+      ac.name == bc.name ∧ ac.args == bc.args))
+
+/-! ## Version-bump classifier (LX.35 named-API) -/
+
+/-- Classify a `LawDiff` (with the `before`/`after` `LawDecl`s
+    available for satisfies-additions detection) into a version-
+    bump category per §14.2.  Deterministic. -/
 def classifyVersionBump (before after : LawDecl) : VersionBump :=
-  let diffs := computeClauseDiffs before after
-  if diffs.isEmpty then .none_
-  else
-    -- Filter out the `version` clause itself (its mutation is
-    -- a side-effect of any other change, not the cause).
-    let semanticDiffs := diffs.filter (fun d => d.field != "version")
-    if semanticDiffs.isEmpty then .none_  -- only `version` changed
-    else if isProofOnlyDiff semanticDiffs then .patch
-    else if isPreOnlyDiff diffs then .minor
-    else if isSatisfiesAdditionsOnlyDiff before after diffs then .minor
-    else .major
+  let d := computeLawDiff before after
+  if d.isEmpty then .none_
+  else if d.isProofOnly then .patch
+  else if d.isPreOnly then .minor
+  else if d.isSatisfiesAdditionsOnly before after then .minor
+  else .major
 
-/-! ## Refinement-proof obligation (LX.35)
-
-When a minor bump is detected, `lex_diff` checks for the presence
-of a `lex_proof refinement_v<old> := ...` clause in the new
-version.  Missing proof emits L016.
-
-The plan §14.3 specifies that the proof name is `refinement_v<old>`
-where `<old>` is the previous version's `<MAJOR>.<MINOR>` (no
-patch).  E.g., refining `1.0.x → 1.1.0` requires
-`lex_proof refinement_v1_0 := ...`. -/
+/-! ## Refinement-proof check (LX.35) -/
 
 /-- Extract the refinement-proof name from a version string.
     `"1.0.0"` → `"refinement_v1_0"`. -/
@@ -267,19 +234,71 @@ def refinementProofName (oldVersion : String) : String :=
   | [maj, min]         => s!"refinement_v{maj}_{min}"
   | _                  => "refinement_v" ++ oldVersion.replace "." "_"
 
-/-- True iff `after.proofOverrides` contains a `refinement_v<old>`
-    entry. -/
+/-- True iff `after.proofOverrides` contains a
+    `refinement_v<MAJ>_<MIN>` entry derived from
+    `oldVersion`. -/
 def hasRefinementProof (oldVersion : String) (after : LawDecl) : Bool :=
   let expectedName := refinementProofName oldVersion
   after.proofOverrides.any (fun o => o.property == expectedName)
 
-/-! ## Manifest-level diff -/
+/-- LX.35 named API: `checkRefinementProof : LawDecl → IO Bool`.
+    Runs in `IO` because the spec calls for it; semantically
+    pure, just a typed wrapper around `hasRefinementProof`. -/
+def checkRefinementProof (oldVersion : String) (after : LawDecl) :
+    IO Bool := do
+  return hasRefinementProof oldVersion after
 
-/-- A per-deployment diff: which laws were added / removed /
-    modified, plus authority and claim-set diffs.  Manifests are
-    NOT part of the codegen-input directory in v1; this record is
-    populated only when both inputs include a manifest sidecar
-    (deferred to v2). -/
+/-- LX.35 named API: confirms the declared version bump matches
+    the classifier's; mismatch fires L007.  Returns
+    `Except Diagnostic Unit` per spec. -/
+def checkVersionDeclaration (filePath : String) (before after : LawDecl) :
+    Except Diagnostic Unit := do
+  let oldP := before.version.splitOn "."
+  let newP := after.version.splitOn "."
+  if oldP.length != 3 || newP.length != 3 then
+    return ()  -- non-semver versions skip the check
+  let declaredBump : VersionBump :=
+    if oldP.head! != newP.head! then .major
+    else if oldP[1]! != newP[1]! then .minor
+    else if oldP[2]! != newP[2]! then .patch
+    else .none_
+  let computedBump := classifyVersionBump before after
+  if declaredBump != computedBump then
+    .error {
+      code := "L007",
+      severity := .error,
+      source := { fileName := filePath, startPos := { line := 1, column := 0 } },
+      message :=
+        s!"law `{before.identifier}` declared version-bump `{declaredBump.toDisplay}` but classifier computed `{computedBump.toDisplay}`",
+      notes := [],
+      hints :=
+        ["update the version field to match the computed bump, or restructure the diff to match the declared bump"]
+    }
+
+/-! ## Manifest-level diff (LX.35)
+
+A `DeploymentDiff` records changes between two manifest sidecars.
+The spec §14.4 calls for: laws / authority-set / claim-set
+diffing, with deployment-level changes (laws or authority
+mutations) triggering a major manifest bump. -/
+
+/-- A change to an authority binding. -/
+structure AuthorityBindingDiff where
+  /-- The slot name (e.g. `"transfer_policy"`). -/
+  slotName : String
+  /-- The before/after policy expression diff. -/
+  diff : Diff
+  deriving Repr, Inhabited
+
+/-- A change to an invariant claim (kind / scope / law list). -/
+structure InvariantClaimDiff where
+  /-- The claim kind (e.g. `"monotonic_law_set"`). -/
+  kindName : String
+  /-- The before/after law-name list (as comma-joined string). -/
+  diff : Diff
+  deriving Repr, Inhabited
+
+/-- The full deployment-manifest diff (§14.4). -/
 structure DeploymentDiff where
   /-- Laws added in the after version. -/
   lawsAdded : List String
@@ -287,14 +306,47 @@ structure DeploymentDiff where
   lawsRemoved : List String
   /-- Laws present in both but with structural changes. -/
   lawsModified : List LawDiff
+  /-- Authority bindings added (new slots). -/
+  authoritySlotsAdded : List String
+  /-- Authority bindings removed. -/
+  authoritySlotsRemoved : List String
+  /-- Authority bindings whose policy expression changed. -/
+  authoritySlotsModified : List AuthorityBindingDiff
+  /-- Invariant claims added. -/
+  invariantClaimsAdded : List String
+  /-- Invariant claims removed. -/
+  invariantClaimsRemoved : List String
+  /-- Invariant claims modified (same kind, different law list). -/
+  invariantClaimsModified : List InvariantClaimDiff
   deriving Repr, Inhabited
+
+/-- True iff the manifest-diff has no deployment-level changes. -/
+def DeploymentDiff.hasManifestLevelChanges (d : DeploymentDiff) : Bool :=
+  !d.lawsAdded.isEmpty ∨ !d.lawsRemoved.isEmpty ∨
+  !d.authoritySlotsAdded.isEmpty ∨ !d.authoritySlotsRemoved.isEmpty ∨
+  !d.authoritySlotsModified.isEmpty ∨
+  !d.invariantClaimsAdded.isEmpty ∨ !d.invariantClaimsRemoved.isEmpty ∨
+  !d.invariantClaimsModified.isEmpty
+
+/-- True iff manifest-level changes triggered a major manifest
+    bump.  Per §14.4: adding/removing laws or authority bindings
+    is major; changes within bindings are minor.
+
+    Returns `none` if no manifest-level changes detected. -/
+def DeploymentDiff.classifyManifestBump (d : DeploymentDiff) :
+    Option VersionBump :=
+  if !d.hasManifestLevelChanges then none
+  else if !d.lawsAdded.isEmpty ∨ !d.lawsRemoved.isEmpty ∨
+          !d.authoritySlotsAdded.isEmpty ∨ !d.authoritySlotsRemoved.isEmpty then
+    some .major
+  else
+    -- Modifications only (e.g. policy-expression change in a slot).
+    some .minor
 
 /-! ## File I/O for the binary -/
 
 /-- Load all `*.json` codegen-input files under a directory and
-    parse each into a `LawDecl`.  Returns the list keyed by
-    `identifier` (so two refs' inputs can be cross-referenced
-    without scanning lists). -/
+    parse each into a `LawDecl`. -/
 def loadCodegenDir (dir : FilePath) :
     IO (Except String (List LawDecl)) := do
   if !(← dir.pathExists) then
@@ -311,73 +363,144 @@ def loadCodegenDir (dir : FilePath) :
         return .error s!"failed to parse {path.toString}: {msg}"
   return .ok decls
 
-/-! ## Diff computation between two directories -/
+/-! ## Git integration (LX.34 spec) -/
+
+/-- Run `git show <ref>:<path>` and capture stdout.  Returns
+    `none` on git failure. -/
+def gitShow (ref : String) (path : String) : IO (Option String) := do
+  let proc := { cmd := "git",
+                args := #[s!"show", s!"{ref}:{path}"] : IO.Process.SpawnArgs }
+  let output ← IO.Process.output proc
+  if output.exitCode == 0 then
+    return some output.stdout
+  else
+    return none
+
+/-- LX.34 named API: parse a `LawDecl` from a git ref + file path.
+    Uses `git show <ref>:<path>` to fetch the file at the named
+    revision.
+
+    Returns `IO LawDecl`; raises `IO.userError` on git failure or
+    parse failure. -/
+def parseLawDeclFromGitRef (ref : String) (filePath : System.FilePath) :
+    IO LawDecl := do
+  let pathStr := filePath.toString
+  match (← gitShow ref pathStr) with
+  | none =>
+    throw <| IO.userError s!"git show {ref}:{pathStr} failed"
+  | some contents =>
+    match LawDecl.fromJson contents with
+    | .ok decl => return decl
+    | .error msg =>
+      throw <| IO.userError
+        s!"failed to parse {pathStr} at {ref}: {msg}"
+
+/-- List all `*.json` files in a directory at a specific git ref.
+    Uses `git ls-tree <ref> -- <dir>` to get the listing. -/
+def gitLsTree (ref : String) (dir : String) :
+    IO (Except String (List String)) := do
+  let proc := { cmd := "git",
+                args := #["ls-tree", "--name-only", ref, "--", dir]
+                : IO.Process.SpawnArgs }
+  let output ← IO.Process.output proc
+  if output.exitCode != 0 then
+    return .error s!"git ls-tree {ref} -- {dir} failed: {output.stderr}"
+  -- Split output by newlines; filter `*.json` files.
+  let lines := output.stdout.splitOn "\n"
+  let jsonFiles := lines.filter (fun l =>
+    l.endsWith ".json" ∧ !l.isEmpty)
+  return .ok jsonFiles
+
+/-- Load all law sidecars from a git ref's
+    `LegalKernel/_lex_inputs/` directory.  Returns the list of
+    parsed `LawDecl`s.  Equivalent to `loadCodegenDir` but for a
+    git revision. -/
+def loadCodegenDirFromGitRef (ref : String)
+    (dir : String := "LegalKernel/_lex_inputs") :
+    IO (Except String (List LawDecl)) := do
+  let listResult ← gitLsTree ref dir
+  match listResult with
+  | .error msg => return .error msg
+  | .ok files =>
+    let mut decls : List LawDecl := []
+    for f in files do
+      match (← gitShow ref f) with
+      | none =>
+        return .error s!"git show {ref}:{f} failed"
+      | some contents =>
+        match LawDecl.fromJson contents with
+        | .ok decl => decls := decls ++ [decl]
+        | .error msg =>
+          return .error s!"failed to parse {f} at {ref}: {msg}"
+    return .ok decls
+
+/-! ## Diff computation -/
 
 /-- The set of all law identifiers in a directory's `LawDecl`
     list. -/
 def lawIdentifiers (decls : List LawDecl) : List String :=
   decls.map (·.identifier)
 
-/-- Compute a `DeploymentDiff` by comparing two `LawDecl` lists. -/
-def computeDeploymentDiff (before after : List LawDecl) :
+/-- Compute a `DeploymentDiff` for the laws portion only
+    (manifest-level law-set diff). -/
+def computeLawSetDiff (before after : List LawDecl) :
     DeploymentDiff := Id.run do
   let beforeIds := lawIdentifiers before
   let afterIds := lawIdentifiers after
-  -- Added: in `after` but not in `before`.
   let added := afterIds.filter (fun id => !beforeIds.contains id)
-  -- Removed: in `before` but not in `after`.
   let removed := beforeIds.filter (fun id => !afterIds.contains id)
-  -- Modified: in both but with non-empty diff.
   let mut modified : List LawDiff := []
   for b in before do
     if let some a := after.find? (fun d => d.identifier == b.identifier) then
-      let cdiffs := computeClauseDiffs b a
+      let diff := computeLawDiff b a
       let bump := classifyVersionBump b a
-      if !cdiffs.isEmpty then
-        let hasProof := hasRefinementProof b.version a
-        modified := modified ++ [{
-          identifier := b.identifier,
-          versionBefore := b.version,
-          versionAfter := a.version,
+      let hasProof := hasRefinementProof b.version a
+      let withMeta : LawDiff := {
+        diff with
           versionBump := bump,
-          clauseDiffs := cdiffs,
           refinementProofPresent := hasProof
-        }]
-  pure { lawsAdded := added, lawsRemoved := removed, lawsModified := modified }
+      }
+      if !diff.isEmpty then
+        modified := modified ++ [withMeta]
+  pure { lawsAdded := added,
+         lawsRemoved := removed,
+         lawsModified := modified,
+         authoritySlotsAdded := [],
+         authoritySlotsRemoved := [],
+         authoritySlotsModified := [],
+         invariantClaimsAdded := [],
+         invariantClaimsRemoved := [],
+         invariantClaimsModified := [] }
+
+/-- Backward-compat alias for the law-set-only diff (the
+    pre-M3-completion API). -/
+def computeDeploymentDiff := computeLawSetDiff
 
 /-! ## Output formatting (§14.1) -/
 
-/-- Format a single `LawDiff` per §14.1.  Result ends with a
-    newline.
+/-- Format an `Option Diff` for a per-clause diff line.  Returns
+    an empty string if `none` (clause unchanged). -/
+def formatOptionDiff (field : String) : Option Diff → String
+  | none => ""
+  | some d => s!"  {field}: {d.before} → {d.after}\n"
 
-    The output format mirrors the design-doc §14.1 example:
-
-      ```
-      legalkernel.transfer:
-        version: 1.0.0 → 1.1.0   (minor — refinement)
-        pre:                     diff:
-          @@ -1,2 +1,3 @@
-             amount > 0
-             ∧ getBalance s r sender ≥ amount
-          +  ∧ amount ≤ 2^32
-        impl: unchanged
-        satisfies: unchanged
-        events: unchanged
-        intent: unchanged
-      ```
-
-    V1 emits a simplified form: per-clause `before → after`
-    pairs, no unified-diff hunks (the caller can pipe through
-    `git diff` for richer output). -/
+/-- Format a `LawDiff` per §14.1.  Result ends with a newline. -/
 def formatLawDiff (diff : LawDiff) : String :=
   let header := s!"{diff.identifier}:\n"
   let versionLine :=
     s!"  version: {diff.versionBefore} → {diff.versionAfter}   ({diff.versionBump.toDisplay})\n"
-  -- Skip the redundant `version` clause-diff line (it's already
-  -- printed in the version-line header above).
-  let semanticDiffs := diff.clauseDiffs.filter (fun cd => cd.field != "version")
-  let clauseLines := String.join (semanticDiffs.map (fun cd =>
-    s!"  {cd.field}: {cd.before} → {cd.after}\n"))
+  let clauseLines :=
+    formatOptionDiff "pre" diff.preDiff ++
+    formatOptionDiff "impl" diff.implDiff ++
+    formatOptionDiff "satisfies" diff.satisfiesDiff ++
+    formatOptionDiff "events" diff.eventsDiff ++
+    formatOptionDiff "intent" diff.intentDiff ++
+    formatOptionDiff "signed_by" diff.signedByDiff ++
+    formatOptionDiff "authorized_by" diff.authDiff ++
+    formatOptionDiff "action_index" diff.actionIndexDiff ++
+    formatOptionDiff "params" diff.paramsDiff ++
+    formatOptionDiff "proof_overrides" diff.proofOverridesDiff ++
+    formatOptionDiff "registry_effect" diff.registryEffectDiff
   let refinementLine :=
     if diff.versionBump == .minor then
       if diff.refinementProofPresent then
@@ -392,11 +515,35 @@ def formatDeploymentDiff (diff : DeploymentDiff) : String :=
   let added := String.join (diff.lawsAdded.map (fun id => s!"  + {id}\n"))
   let removed := String.join (diff.lawsRemoved.map (fun id => s!"  - {id}\n"))
   let modified := String.join (diff.lawsModified.map formatLawDiff)
-  s!"== Deployment Diff ==\n" ++
+  let authAdded := String.join
+    (diff.authoritySlotsAdded.map (fun s => s!"  + {s}\n"))
+  let authRemoved := String.join
+    (diff.authoritySlotsRemoved.map (fun s => s!"  - {s}\n"))
+  let authModified := String.join (diff.authoritySlotsModified.map
+    (fun b => s!"  ~ {b.slotName}: {b.diff.before} → {b.diff.after}\n"))
+  let claimsAdded := String.join
+    (diff.invariantClaimsAdded.map (fun s => s!"  + {s}\n"))
+  let claimsRemoved := String.join
+    (diff.invariantClaimsRemoved.map (fun s => s!"  - {s}\n"))
+  let claimsModified := String.join (diff.invariantClaimsModified.map
+    (fun b => s!"  ~ {b.kindName}: {b.diff.before} → {b.diff.after}\n"))
+  let bumpInfo : String :=
+    match diff.classifyManifestBump with
+    | some b => s!"manifest version-bump: {b.toDisplay}\n"
+    | none   => ""
+  s!"== Deployment Diff ==\n" ++ bumpInfo ++
   (if !added.isEmpty then s!"Laws added:\n{added}" else "") ++
   (if !removed.isEmpty then s!"Laws removed:\n{removed}" else "") ++
   (if !modified.isEmpty then s!"Laws modified:\n{modified}" else "") ++
-  (if added.isEmpty && removed.isEmpty && modified.isEmpty then
+  (if !authAdded.isEmpty then s!"Authority slots added:\n{authAdded}" else "") ++
+  (if !authRemoved.isEmpty then s!"Authority slots removed:\n{authRemoved}" else "") ++
+  (if !authModified.isEmpty then s!"Authority slots modified:\n{authModified}" else "") ++
+  (if !claimsAdded.isEmpty then s!"Invariant claims added:\n{claimsAdded}" else "") ++
+  (if !claimsRemoved.isEmpty then s!"Invariant claims removed:\n{claimsRemoved}" else "") ++
+  (if !claimsModified.isEmpty then s!"Invariant claims modified:\n{claimsModified}" else "") ++
+  (if added.isEmpty && removed.isEmpty && modified.isEmpty &&
+      authAdded.isEmpty && authRemoved.isEmpty && authModified.isEmpty &&
+      claimsAdded.isEmpty && claimsRemoved.isEmpty && claimsModified.isEmpty then
     "(no changes)\n" else "")
 
 /-! ## Diagnostic emission for L007 / L016 -/
@@ -433,26 +580,27 @@ def printHelp : IO UInt32 := do
   IO.println "lex_diff — Workstream LX (LX.34/LX.35) semantic-diff binary"
   IO.println ""
   IO.println "Usage: lake exe lex_diff <before-dir> <after-dir>"
+  IO.println "       lake exe lex_diff --git <ref-a> <ref-b>"
   IO.println "       lake exe lex_diff --help"
   IO.println ""
   IO.println "Compares two trees of LegalKernel/_lex_inputs/*.json files"
-  IO.println "(typically extracted from two git refs by an external script)"
-  IO.println "and emits a per-law / per-manifest semantic diff."
+  IO.println "and emits a per-law / per-deployment semantic diff."
   IO.println ""
-  IO.println "The diff is computed on the parsed AST, not on raw source"
-  IO.println "bytes — so reformatting and comment-only changes do not"
-  IO.println "appear in the output."
+  IO.println "  Two input modes (LX.34):"
+  IO.println "    Directory mode:  takes two directory paths."
+  IO.println "    Git mode:        takes two git refs (--git <ref-a> <ref-b>)."
+  IO.println "                     Runs `git show <ref>:LegalKernel/_lex_inputs/*.json`"
+  IO.println "                     to fetch sidecars at the named revision."
   IO.println ""
   IO.println "Exit codes:"
   IO.println "  0  diff produced (zero or more changes)."
   IO.println "  1  L007 (declared-vs-computed bump mismatch) or"
   IO.println "     L016 (missing refinement proof)."
-  IO.println "  2  internal failure (malformed JSON, missing dir)."
+  IO.println "  2  internal failure (malformed JSON, missing dir, git failure)."
   return 0
 
 /-- Validate a deployment diff: surface L007 (mismatch) and L016
-    (missing proof) violations as diagnostics.  Returns the list
-    of diagnostics. -/
+    (missing proof) violations as diagnostics. -/
 def validateDeploymentDiff (diff : DeploymentDiff)
     (afterDir : FilePath) : List Diagnostic := Id.run do
   let mut diags : List Diagnostic := []
@@ -461,26 +609,21 @@ def validateDeploymentDiff (diff : DeploymentDiff)
     if ld.versionBump == .minor && !ld.refinementProofPresent then
       diags := diags ++ [L016Diagnostic afterDir.toString
         ld.identifier ld.versionBefore]
-    -- L007: declared version-bump (encoded in the version-string
-    -- delta) doesn't match the computed bump.  Only check this
-    -- when both versions are valid semver.
+    -- L007: declared version-bump doesn't match computed.
     let oldP := ld.versionBefore.splitOn "."
     let newP := ld.versionAfter.splitOn "."
     if oldP.length == 3 && newP.length == 3 then
-      let declaredBump : Option VersionBump :=
-        if oldP.head! != newP.head! then some .major
-        else if oldP[1]! != newP[1]! then some .minor
-        else if oldP[2]! != newP[2]! then some .patch
-        else some .none_
-      match declaredBump with
-      | some db =>
-        if db != ld.versionBump then
-          diags := diags ++ [L007Diagnostic afterDir.toString
-            ld.identifier db ld.versionBump]
-      | none => pure ()
+      let declaredBump : VersionBump :=
+        if oldP.head! != newP.head! then .major
+        else if oldP[1]! != newP[1]! then .minor
+        else if oldP[2]! != newP[2]! then .patch
+        else .none_
+      if declaredBump != ld.versionBump then
+        diags := diags ++ [L007Diagnostic afterDir.toString
+          ld.identifier declaredBump ld.versionBump]
   pure diags
 
-/-- Main entry.  Compares two directories of codegen-input JSONs.
+/-- Main entry.  Compares two directories OR two git refs.
 
     Exit codes:
 
@@ -491,18 +634,47 @@ def validateDeploymentDiff (diff : DeploymentDiff)
 def main (args : List String) : IO UInt32 := do
   if args.contains "--help" || args.contains "-h" then
     return (← printHelp)
+  -- Check for --git mode.
+  if args.length ≥ 1 && args.head! == "--git" then
+    match args.tail with
+    | [refA, refB] =>
+      let beforeR ← loadCodegenDirFromGitRef refA
+      match beforeR with
+      | .error msg =>
+        IO.eprintln s!"lex_diff --git: failed to load `{refA}`: {msg}"
+        return 2
+      | .ok beforeDecls =>
+        let afterR ← loadCodegenDirFromGitRef refB
+        match afterR with
+        | .error msg =>
+          IO.eprintln s!"lex_diff --git: failed to load `{refB}`: {msg}"
+          return 2
+        | .ok afterDecls =>
+          let diff := computeDeploymentDiff beforeDecls afterDecls
+          IO.print (formatDeploymentDiff diff)
+          let diags := validateDeploymentDiff diff
+            (FilePath.mk s!"<git ref {refB}>")
+          for d in diags do
+            IO.print d.format
+          if diags.any (fun d => d.severity == .error) then
+            return 1
+          return 0
+    | _ =>
+      IO.eprintln "Usage: lake exe lex_diff --git <ref-a> <ref-b>"
+      return 2
+  -- Directory mode.
   match args with
   | [beforeDir, afterDir] =>
     let beforeFP : FilePath := beforeDir
     let afterFP : FilePath := afterDir
-    let beforeDeclsR ← loadCodegenDir beforeFP
-    match beforeDeclsR with
+    let beforeR ← loadCodegenDir beforeFP
+    match beforeR with
     | .error msg =>
       IO.eprintln s!"lex_diff: failed to load `{beforeDir}`: {msg}"
       return 2
     | .ok beforeDecls =>
-      let afterDeclsR ← loadCodegenDir afterFP
-      match afterDeclsR with
+      let afterR ← loadCodegenDir afterFP
+      match afterR with
       | .error msg =>
         IO.eprintln s!"lex_diff: failed to load `{afterDir}`: {msg}"
         return 2
@@ -517,6 +689,7 @@ def main (args : List String) : IO UInt32 := do
         return 0
   | _ =>
     IO.eprintln "Usage: lake exe lex_diff <before-dir> <after-dir>"
+    IO.eprintln "       lake exe lex_diff --git <ref-a> <ref-b>"
     IO.eprintln "       lake exe lex_diff --help"
     return 2
 
