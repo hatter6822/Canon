@@ -558,28 +558,82 @@ def checkTargetFile (path : FilePath) (rendered : FenceBodies) :
 Acquires an advisory lockfile on each target before rewriting,
 serialising concurrent invocations. -/
 
-/-- Acquire an advisory file lock by atomically creating a
-    sentinel file.  Returns `true` if the lock was acquired,
-    `false` if a concurrent invocation holds it.  A failed
-    acquisition is treated as a non-fatal warning by the caller
-    (the second invocation's writes are skipped). -/
+/-- The advisory-lock path for a given target.  Co-located with
+    the target so a stale lock is easy to spot. -/
+private def lockPathFor (path : FilePath) : FilePath :=
+  FilePath.mk (path.toString ++ ".lex_codegen.lock")
+
+/-- Acquire an advisory file lock.
+
+    The implementation creates a sentinel file at
+    `<path>.lex_codegen.lock`.  Returns `true` if the lock was
+    acquired (no prior sentinel existed), `false` if a concurrent
+    invocation holds it.
+
+    **Race-condition note.**  This is a TOCTOU-vulnerable
+    `pathExists`-then-`writeFile` pattern: two near-simultaneous
+    invocations can both observe the absent sentinel and both
+    succeed.  This is acceptable for the M1 use case (single
+    developer machine; CI runs one `lex_codegen` invocation at a
+    time).  M2 may upgrade to `flock(2)` (Linux) / `LockFile`
+    (Windows) for production-grade serialisation.
+
+    Callers MUST pair every successful `tryAcquireLock` with a
+    later `releaseLock`, even on early-return paths, or the lock
+    will leak and block subsequent invocations.  Use
+    `withFileLock` for an exception-safe wrapper. -/
 def tryAcquireLock (path : FilePath) : IO Bool := do
-  let lockPath := FilePath.mk (path.toString ++ ".lex_codegen.lock")
+  let lockPath := lockPathFor path
   if (← lockPath.pathExists) then
     return false
   IO.FS.writeFile lockPath ""
   return true
 
-/-- Release a previously-acquired advisory lock. -/
+/-- Release a previously-acquired advisory lock.  Idempotent
+    (a missing lock file is silently tolerated). -/
 def releaseLock (path : FilePath) : IO Unit := do
-  let lockPath := FilePath.mk (path.toString ++ ".lex_codegen.lock")
+  let lockPath := lockPathFor path
   if (← lockPath.pathExists) then
     IO.FS.removeFile lockPath
+
+/-- Run `body` with the target's advisory lock held; the lock is
+    released on every exit path (success, error, or thrown
+    exception).  Use this rather than ad-hoc
+    `tryAcquireLock` / `releaseLock` pairings to guarantee the
+    lock isn't leaked.
+
+    Returns:
+      * `none` — lock was already held by a concurrent invocation;
+        `body` was NOT run.
+      * `some result` — lock was acquired, `body` ran to
+        completion (or threw an exception, which propagates after
+        the lock is released). -/
+def withFileLock {α : Type} (path : FilePath) (body : IO α) :
+    IO (Option α) := do
+  let acquired ← tryAcquireLock path
+  if !acquired then
+    return none
+  try
+    let result ← body
+    releaseLock path
+    return some result
+  catch e =>
+    -- Always release on exception so a transient IO error doesn't
+    -- leave a stale lock behind.
+    releaseLock path
+    throw e
 
 /-- Rewrite a target file's fences to match the rendered output.
     Idempotent: a no-op if the existing fence content already
     matches.  Returns `true` if any byte was written, `false`
-    otherwise. -/
+    otherwise.
+
+    The advisory lock is acquired and released via `withFileLock`
+    so EVERY exit path — success, structured error, or thrown
+    exception — releases the lock.  An audit finding (commit
+    audit-2) closed a lock-leak class where the early-return
+    paths inside the `try` block left the lock file behind on
+    fence-corruption / fence-count-mismatch errors. -/
 def appendToTargetFile (path : FilePath) (rendered : FenceBodies) :
     IO (Except String Bool) := do
   if !(← path.pathExists) then
@@ -587,37 +641,35 @@ def appendToTargetFile (path : FilePath) (rendered : FenceBodies) :
       return .ok false
     else
       return .error s!"target file `{path.toString}` does not exist but expected non-empty fence content"
-  let acquired ← tryAcquireLock path
-  if !acquired then
+  match (← withFileLock path (do
+      let contents ← IO.FS.readFile path
+      match locateAllFences contents with
+      | .error e =>
+        return Except.error
+          s!"target file `{path.toString}`: {FenceError.toString e}"
+      | .ok fencePairs =>
+        if fencePairs.length != rendered.length then
+          return Except.error
+            s!"target file `{path.toString}` has {fencePairs.length} fence(s) but expected {rendered.length}"
+        -- Iterate in DESCENDING fence-index order so earlier
+        -- replacements don't shift later indices.  Build
+        -- (b, e, body) tuples then sort by `b` descending.
+        let pairsWithIdx : Array (Nat × Nat × String) :=
+          (List.range rendered.length).toArray.map (fun i =>
+            let (b, e) := fencePairs[i]!
+            let body := rendered[i]!
+            (b, e, body))
+        let sorted := pairsWithIdx.qsort (fun a b => a.1 > b.1)
+        let mut current := contents
+        for (b, e, body) in sorted.toList do
+          current := replaceFenceAt current b e body
+        let beforeBytes := contents
+        atomicWriteIfChanged path current
+        let changed := beforeBytes != current
+        return Except.ok changed)) with
+  | none =>
     return .error s!"target file `{path.toString}`: another `lex_codegen` invocation holds the advisory lock"
-  try
-    let contents ← IO.FS.readFile path
-    match locateAllFences contents with
-    | .error e =>
-      return .error s!"target file `{path.toString}`: {FenceError.toString e}"
-    | .ok fencePairs =>
-      if fencePairs.length != rendered.length then
-        return .error s!"target file `{path.toString}` has {fencePairs.length} fence(s) but expected {rendered.length}"
-      -- Iterate in DESCENDING fence-index order so earlier replacements
-      -- don't shift later indices.  Build (idx, b, e, body) tuples then
-      -- sort by `b` descending.
-      let pairsWithIdx : Array (Nat × Nat × String) :=
-        (List.range rendered.length).toArray.map (fun i =>
-          let (b, e) := fencePairs[i]!
-          let body := rendered[i]!
-          (b, e, body))
-      let sorted := pairsWithIdx.qsort (fun a b => a.1 > b.1)
-      let mut current := contents
-      for (b, e, body) in sorted.toList do
-        current := replaceFenceAt current b e body
-      let beforeBytes := contents
-      atomicWriteIfChanged path current
-      let changed := beforeBytes != current
-      releaseLock path
-      return .ok changed
-  catch e =>
-    releaseLock path
-    return .error s!"target file `{path.toString}`: {e.toString}"
+  | some result => return result
 
 /-! ## Banner / printing helpers -/
 

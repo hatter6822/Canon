@@ -239,6 +239,29 @@ private def tokeniseStmts (s : String) : List String :=
 private def startsWithKeyword (stmt : String) (kw : String) : Bool :=
   stmt.startsWith (kw ++ " ") || stmt == kw
 
+/-- Strip a leading keyword and any whitespace that follows it,
+    returning the trimmed remainder (the "argument list" the
+    statement carries after the keyword).  E.g.,
+    `"revoke_key alice"` ↦ `"alice"`,
+    `"revoke_key "` ↦ `""` (no actor named).
+
+    Used by `parseImplStmt` to extract the per-statement payload
+    (e.g. the actor name in `revoke_key`) from the raw textual
+    statement, so per-keyword diagnostics show only the relevant
+    sub-text rather than the full leading keyword. -/
+private def stripKeyword (stmt : String) (kw : String) : String :=
+  if stmt.startsWith (kw ++ " ") then
+    (stmt.drop (kw.length + 1)).trimAscii.toString
+  else if stmt == kw then ""
+  else stmt
+
+/-- Take the first whitespace-bounded token from `s`, or `s`
+    itself if there's no internal whitespace.  Used to extract
+    e.g. the actor name from `"alice ..."`. -/
+private def firstToken (s : String) : String :=
+  let chars := s.toList.takeWhile (fun c => c != ' ' && c != '\t' && c != '\n')
+  String.ofList chars
+
 /-- Parse a single statement string into an `ImplStmt`.  Falls
     back to `.bareTerm` on shapes outside the §8.1 calculus. -/
 def parseImplStmt (stmt : String) : ImplStmt :=
@@ -258,7 +281,11 @@ def parseImplStmt (stmt : String) : ImplStmt :=
   else if startsWithKeyword s "register_identity" then
     .registerIdentity s ""
   else if startsWithKeyword s "revoke_key" then
-    .revokeKey s
+    -- Audit-2 fix: extract the actor name from the statement
+    -- text; the pre-fix code passed the full statement
+    -- (`"revoke_key alice"`) as the actor parameter, producing
+    -- malformed L022 messages like `"revoke_key revoke_key alice"`.
+    .revokeKey (firstToken (stripKeyword s "revoke_key"))
   else if s.startsWith "setBalance" then
     .bareSetBalance s
   else if startsWithKeyword s "for" then

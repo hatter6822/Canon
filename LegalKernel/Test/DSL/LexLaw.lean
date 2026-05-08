@@ -327,6 +327,50 @@ def tests : List TestCase :=
           LegalKernel.DSL.transferDSL 7 1 2 5
         pure ()
     }
+  -- Audit-2 regression: verify `parseImplStmt` extracts the actor
+  -- name from `revoke_key alice` and only puts that in the
+  -- `.revokeKey` AST node — pre-fix it passed the entire statement
+  -- text (`"revoke_key alice"`) producing malformed L022 messages
+  -- like `"L022: \`revoke_key revoke_key alice\` used..."`.
+  , { name := "audit-2: parseImplStmt extracts actor from `revoke_key alice`"
+    , body := do
+        let stmt := LegalKernel.DSL.Lex.parseImplStmt "revoke_key alice"
+        match stmt with
+        | .revokeKey actor =>
+            assertEq (expected := "alice") (actual := actor)
+              "actor extracted as just `alice`, not the full statement"
+        | _ => throw (IO.userError "expected .revokeKey")
+    }
+  , { name := "audit-2: parseImplStmt handles bare `revoke_key` with no args"
+    , body := do
+        let stmt := LegalKernel.DSL.Lex.parseImplStmt "revoke_key"
+        match stmt with
+        | .revokeKey actor =>
+            assertEq (expected := "") (actual := actor)
+              "empty actor on bare `revoke_key`"
+        | _ => throw (IO.userError "expected .revokeKey")
+    }
+  , { name := "audit-2: parseImplStmt extracts only the first token after revoke_key"
+    , body := do
+        let stmt :=
+          LegalKernel.DSL.Lex.parseImplStmt "revoke_key alice extra-junk"
+        match stmt with
+        | .revokeKey actor =>
+            assertEq (expected := "alice") (actual := actor)
+              "actor is the first token; trailing junk discarded"
+        | _ => throw (IO.userError "expected .revokeKey")
+    }
+  , { name := "audit-2: L022Message produces clean `revoke_key alice` form"
+    , body := do
+        -- Verify the diagnostic message uses just the actor name,
+        -- not the keyword-prefixed full statement.
+        let msg := LegalKernel.DSL.Lex.L022Message "alice"
+        -- Pre-fix: would have been `L022: \`revoke_key revoke_key alice\` used...`
+        -- Post-fix: `L022: \`revoke_key alice\` used...`
+        let parts := msg.splitOn "revoke_key"
+        assert (parts.length == 2)
+          s!"`revoke_key` should appear exactly once in the diagnostic, got: {msg}"
+    }
   ]
 
 end LegalKernel.Test.DSL.LexLawTests

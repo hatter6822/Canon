@@ -2074,6 +2074,149 @@ After the M1 completion pass, M1 ships at:
     explicitly deferred to M2 (L012) / M3 (L008, L015–L018,
     L021) with milestone annotations.
 
+**Workstream-LX M1 audit-2 hardening (this branch).**  A second
+deep audit (parallelised across foundation / macro-pipeline /
+synthesizer / codegen layers; see `docs/lex_implementation_plan.md`
+§22 for the future audit-2 amendment) found **one HIGH** defect in
+the M1-completion-pass codegen layer plus **two CRITICAL**
+diagnostic-correctness defects in the macro pipeline that audit-1
+had missed.  All closed in this branch.
+
+  * **HIGH: Lock leak in `appendToTargetFile`'s early-return
+    paths** (`Tools/LexCodegen.lean`).  The pre-fix code
+    acquired the advisory `<path>.lex_codegen.lock` sentinel
+    via `tryAcquireLock`, then opened a `try` block; two
+    `return .error` paths inside the `try` (fence-corruption
+    and fence-count-mismatch) skipped the `releaseLock` call,
+    leaking the lock file.  Subsequent invocations of
+    `lex_codegen` would then fail with "another invocation
+    holds the advisory lock" — a denial-of-service against
+    the codegen binary itself, reproducible by simply having
+    a target file with a corrupted fence at any time.  Fix:
+    introduced `withFileLock {α} (path) (body : IO α) : IO
+    (Option α)` exception-safe wrapper that releases the lock
+    on EVERY exit path (success, structured error, exception).
+    Refactored `appendToTargetFile` to delegate to it.  Six
+    new regression tests (`tools-lex-codegen` extended from
+    33 to 39): tryAcquireLock fresh-path / contended-path,
+    releaseLock idempotency, withFileLock on success / on
+    exception / on contention.
+
+  * **CRITICAL: `revokeKey` actor parameter type mismatch**
+    (`LegalKernel/DSL/LexImplCalculus.lean`).  The pre-fix
+    `parseImplStmt` constructed `.revokeKey s` where `s` was
+    the entire trimmed statement text — e.g. for input
+    `"revoke_key alice"`, the `actor` field carried
+    `"revoke_key alice"` (the full statement) rather than
+    just `"alice"`.  The downstream `L022Message actor`
+    formatter then produced
+    `"L022: \`revoke_key revoke_key alice\` used..."` instead
+    of `"L022: \`revoke_key alice\` used..."`.  Fix: added a
+    `stripKeyword` + `firstToken` helper pair in
+    `LexImplCalculus.lean`, used to extract the actor from
+    the statement before constructing the AST node.  Four new
+    regression tests in `dsl-lex-law` (parseImplStmt extracts
+    just `alice`; bare `revoke_key` yields empty actor; only
+    first token kept; L022Message's diagnostic mentions
+    `revoke_key` exactly once).
+
+  * **CRITICAL: `parsePreExpr` walker missing forall / exists
+    patterns** (`LegalKernel/DSL/LexPreGrammar.lean`).  The
+    pre-fix walker had match arms for boolean connectives,
+    `Nat` comparators, and `if-then-else`, but not for the
+    bounded quantifiers `∀ x ∈ list, P x` and `∃ x ∈ list,
+    P x` — even though the AST defined `.forallIn` and
+    `.existsIn` constructors and `isFullyRecognised` handled
+    them.  A Lex law writing such a quantifier in its
+    `lex_pre` clause therefore fell through to `.unknown`,
+    triggering a false-positive L003 warning despite the
+    grammar admitting the shape.  Fix: added two match arms
+    covering ` ∀ $x:ident ∈ $iter, $body` and
+    `∃ $x:ident ∈ $iter, $body`, each emitting the matching
+    AST node with `BoundedIter.toListExpr` carrying the
+    iterator's surface text.  Three new regression tests in
+    `tools-lex-diagnostic-coverage` exercising
+    `PreNode.forallIn` / `.existsIn` `isFullyRecognised`
+    paths.
+
+  * **HIGH: L019 / L023 detection deferred to M2** (audit-2
+    re-classification).  Pre-audit-2's `DiagnosticCoverage.lean`
+    listed L019 (`for` iter not statically a List) and L023
+    (`impl` calls untagged helper) as "M1-implemented", citing
+    the presence of `L019Message` and `L023Message` formatters
+    in `LexImplCalculus.lean`.  Audit-2 found the *detection
+    walkers* are not fired: L019 requires AST-parsed for-loop
+    iterator extraction (M1's `parseImplStmt` stuffs
+    for-statements into `[.bareTerm s]`), and L023 requires
+    distinguishing function-call shapes from variable-reference
+    shapes inside `bareTerm` (M1's classifier doesn't
+    differentiate).  Both are deployment-policy hints, not
+    safety gates — the kernel's `apply_admissible` enforcement
+    is unaffected by their absence.  Fix: moved L019 and L023
+    from `m1ImplementedCodes` to `deferredCodeRegistry` with
+    the `M2 (AST-parsed for-loop iter)` and
+    `M2 (AST-parsed function call)` milestone annotations.
+    The formatters remain in-tree (consumed by `lex_lint`'s
+    future M2-walker integration); only the implementation-set
+    membership changes.  M1 implemented set goes from 20 to
+    18 codes; deferred set from 7 to 9.
+
+  * **MEDIUM: `whitespaceTokenize` newline handling**
+    (`Tools/LexCommon.lean`).  Pre-fix split only on space /
+    tab / CR; the docstring's "whitespace" classification
+    implicitly includes `\n`.  All current callers pass
+    pre-newline-split input, so this was a defensive
+    correction with no observable behaviour change.  Fix:
+    added `\n` to the separator set.
+
+  * **MEDIUM (DOC): `atomicWriteIfChanged` TOCTOU + symlink-
+    via-`.tmp` limitations** (`Tools/LexCommon.lean`).
+    Pre-fix the docstring claimed atomicity without naming
+    the race conditions.  Audit-2 documents the
+    `pathExists`-then-`writeFile` TOCTOU window (acceptable
+    for M1 single-developer use but documented for production)
+    and the predictable `.tmp`-suffix symlink risk (limited
+    in scope — only writes to `LegalKernel/_lex_inputs/`,
+    a repo-internal directory; M2 may upgrade to `mkstemp`).
+
+  * **LOW (DOC): path-traversal sanitisation flow clarified**
+    (`Tools/LexCommon.lean`).  Pre-fix the `isAlnumUnderscore`
+    docstring noted the `[a-zA-Z0-9_.]` set without explaining
+    why the `.` is admitted (it's stripped to `_` by
+    `codegenInputFileName` BEFORE constructing the file name,
+    so a `..` in the identifier becomes `__.json` — harmless
+    and contained).  Audit-2 spells out the dot-replacement
+    flow in the docstring.
+
+  * **LOW (TEST): missing `synth_conservative` rejects-reward
+    test** (`LegalKernel/Test/DSL/LexProperty.lean`).  Pre-fix
+    the suite tested `mint` and `burn` rejection but not
+    `reward`, even though the underlying `buildConservativeProof`
+    grouped `mint | burn | reward` in the same arm.  Fix:
+    added an explicit reward-rejection test as a regression
+    pin against a future "groups split" refactor.
+
+After audit-2 fixes:
+
+  * **1393 tests across 81 suites** (was 1385 pre-audit-2;
+    +8 tests: 4 revokeKey actor extraction in `dsl-lex-law`,
+    1 reward rejection in `dsl-lex-property`, 3 forall/exists
+    walker in `tools-lex-diagnostic-coverage`, 6 lock semantics
+    in `tools-lex-codegen` — net is +8 because the
+    `m1CodeRegistry totals` test count adjusted from 20 to 18
+    and the deferred-set count test from 7 to 9 are unchanged
+    in count).
+  * **0 build warnings** (verified after clean rebuild).
+  * **0 sorries** in TCB.
+  * **All 7 CI gates green**.
+  * **`lex_codegen` idempotency preserved** (a second
+    invocation reports "0 target(s) rewritten"; `--check`
+    passes byte-for-byte).
+  * **No leaked lock files** after either success or error
+    paths (verified by the new lock-semantics regression
+    tests).
+  * **18 v1 L-codes implemented in M1**; 9 explicitly deferred.
+
 **Workstream LX deferred to M2.**  Per the plan §19.4, M2 lands
 the strict-equivalence migration of the 17 kernel-built-in
 laws to Lex, plus the canonical-mode flip on `lex_codegen`

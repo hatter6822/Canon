@@ -204,14 +204,23 @@ def stripWhitespace (s : String) : String :=
   let dropBoth := (dropLeft.reverse.dropWhile Char.isWhitespace).reverse
   String.ofList dropBoth
 
-/-- Whitespace-tokenize a string: split on spaces / tabs and drop
-    empty fragments.  Used by the registry-line parser; avoids
-    depending on `String.split`'s slice-iterator return type. -/
+/-- Whitespace-tokenize a string: split on spaces / tabs / newlines /
+    carriage returns and drop empty fragments.  Used by the
+    registry-line parser; avoids depending on `String.split`'s
+    slice-iterator return type.
+
+    Audit-2: pre-fix the function only split on space / tab / CR,
+    which silently mishandled multi-line input (tokens spanned
+    line boundaries).  The fix-pass adds `\n` to the separator
+    set so the function matches its docstring "whitespace" -
+    classification.  All current callers pass single-line input
+    (lines pre-split via `splitOn "\n"`), so this is a defensive
+    correction with no observable behaviour change. -/
 private def whitespaceTokenize (s : String) : List String := Id.run do
   let mut tokens : List String := []
   let mut cur : String := ""
   for c in s.toList do
-    if c == ' ' || c == '\t' || c == '\r' then
+    if c == ' ' || c == '\t' || c == '\r' || c == '\n' then
       if !cur.isEmpty then
         tokens := tokens ++ [cur]
         cur := ""
@@ -730,18 +739,35 @@ def codegenInputsDir : System.FilePath := "LegalKernel/_lex_inputs"
 def registryPath : System.FilePath := "lex_index_registry.txt"
 
 /-- True iff a single character is one of the canonical
-    identifier-segment characters: `[a-zA-Z0-9_]`.  Used to
-    sanitise codegen-input file names against path-traversal
-    attempts via `«»`-quoted Lean identifiers. -/
+    identifier-segment characters: `[a-zA-Z0-9_.]` (note the dot
+    is included so dotted identifiers like
+    `legalkernel.transfer` are recognised; the dot is replaced
+    with `_` by `codegenInputFileName` before being used as a
+    file name, so `..` cannot escape `LegalKernel/_lex_inputs/`).
+
+    Used to sanitise codegen-input file names against path-
+    traversal attempts via `«»`-quoted Lean identifiers (e.g.
+    `«../../etc/passwd»`), which `Lean.Parser` admits as valid
+    identifiers but would otherwise let the macro write
+    arbitrary files. -/
 private def isAlnumUnderscore (c : Char) : Bool :=
   (c ≥ 'a' && c ≤ 'z') || (c ≥ 'A' && c ≤ 'Z') ||
   (c ≥ '0' && c ≤ '9') || c == '_' || c == '.'
 
 /-- True iff `s` consists only of the canonical identifier-
-    segment characters (per `isAlnumUnderscore`).  Path-traversal
-    components (`/`, `..`, etc.) and any non-ASCII characters
-    cause this to return `false`.  Used by `codegenInputFileName`
-    to reject malformed identifiers at the file-system boundary. -/
+    segment characters (per `isAlnumUnderscore`): `[a-zA-Z0-9_.]`.
+
+    **Path-traversal hardening.**  A traversal component like
+    `..` is technically composable from the dot character, but
+    `codegenInputFileName` (the only consumer of this predicate)
+    replaces every `.` with `_` before constructing the file name,
+    so a hypothetical `«..»` identifier produces the file name
+    `__.json`, harmless and contained within
+    `LegalKernel/_lex_inputs/`.  More aggressive characters (`/`,
+    `\\`, control chars, non-ASCII) are rejected by this predicate
+    and never reach the file-name composer.  Audit-2 hardened the
+    docstring to make the dot-then-underscore-replace flow explicit;
+    no functional change. -/
 def isSafeIdentifier (s : String) : Bool :=
   !s.isEmpty && s.toList.all isAlnumUnderscore
 
@@ -836,7 +862,39 @@ implementation plan. -/
     exists at `path` with byte-identical contents, the function is
     a no-op (no `mtime` bump).  This is the production wrapper
     consumed by the `lex_law` macro and the `lex_codegen`
-    binary. -/
+    binary.
+
+    **Atomicity model.**  The implementation writes to
+    `<path>.tmp` and then `IO.FS.rename`s into place.  POSIX
+    `rename(2)` is atomic on the same filesystem; concurrent
+    readers see either the old or new file, never a partial
+    write.  Cross-filesystem renames may fall back to a
+    copy+delete on some platforms; this is acceptable for the
+    `LegalKernel/_lex_inputs/` directory (always on the same
+    filesystem as the repo).
+
+    **Known TOCTOU limitation.**  Two concurrent invocations on
+    the same `path` race between `pathExists` (line 1) and
+    `writeFile` (line tmp) — both can observe the absent
+    sentinel and both write.  The second invocation's content
+    wins via `rename`'s last-write-wins semantics, which is
+    acceptable when both invocations would write the same bytes
+    (the M1 case).  Production deployments needing strict
+    serialisation must wrap the call in a `flock`-based external
+    lock (the `lex_codegen` binary's `withFileLock` is one such
+    wrapper, but with the same TOCTOU window — both wrappers are
+    advisory in M1).  Documented for audit-2.
+
+    **Symlink / fixed-`.tmp` consideration.**  The `.tmp` suffix
+    is predictable.  An attacker with write access to the
+    target's parent directory could pre-create a symlink at
+    `<path>.tmp` redirecting writes elsewhere.  The risk surface
+    is limited because (a) the only files this function writes
+    in production are codegen-input JSON files in
+    `LegalKernel/_lex_inputs/` (a repo-internal directory whose
+    write access is gated by repo permissions), and (b) the
+    overwritten content is non-secret (the JSON is committed to
+    git).  M2 may upgrade to a `mkstemp`-style unique tmp name. -/
 def atomicWriteIfChanged (path : System.FilePath) (contents : String) : IO Unit := do
   if (← path.pathExists) then
     let existing ← IO.FS.readFile path

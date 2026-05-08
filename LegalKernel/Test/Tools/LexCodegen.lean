@@ -311,6 +311,92 @@ def tests : List TestCase :=
         let violations := validateAgainstRegistry [fixtureLaw] [entry]
         assert (violations.length > 0) "should detect mismatch"
     }
+  -- Audit-2: advisory-lock acquire / release semantics.  Pre-fix
+  -- `appendToTargetFile`'s early-return paths (e.g. on a fence-
+  -- count mismatch) leaked the advisory lock, so subsequent
+  -- invocations failed with "another invocation holds the lock"
+  -- even when no other process was running.  The post-fix
+  -- `withFileLock` wrapper releases on every exit path (success,
+  -- structured error, exception).
+  , { name := "audit-2: tryAcquireLock returns true on fresh path"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target"
+        -- Cleanup any stale lock from prior test runs.
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        let acquired ← tryAcquireLock testPath
+        assert acquired "first acquire should succeed"
+        -- Cleanup.
+        releaseLock testPath
+        let stillLocked ← lockPath.pathExists
+        assert (!stillLocked) "lock file should be removed after release"
+    }
+  , { name := "audit-2: tryAcquireLock returns false when lock is held"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target_2"
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        let _ ← tryAcquireLock testPath
+        let secondTry ← tryAcquireLock testPath
+        assert (!secondTry) "second acquire should fail while first held"
+        releaseLock testPath
+    }
+  , { name := "audit-2: releaseLock is idempotent (missing file silently OK)"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target_3"
+        -- Pre-condition: no lock.
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        -- releaseLock on an absent lock should silently succeed.
+        releaseLock testPath
+        pure ()
+    }
+  , { name := "audit-2: withFileLock releases on success path"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target_4"
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        let result ← withFileLock testPath (pure 42)
+        assertEq (expected := some 42) (actual := result)
+          "body ran and returned its result"
+        let stillLocked ← lockPath.pathExists
+        assert (!stillLocked)
+          "lock file should be removed after withFileLock returns"
+    }
+  , { name := "audit-2: withFileLock releases on exception path"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target_5"
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        let caught ← try
+          let _ ← withFileLock (α := Unit) testPath (throw (IO.userError "test error"))
+          pure false
+        catch _ => pure true
+        assert caught "exception was propagated"
+        let stillLocked ← lockPath.pathExists
+        assert (!stillLocked)
+          "lock file should be removed even on exception"
+    }
+  , { name := "audit-2: withFileLock returns none when lock is already held"
+    , body := do
+        let testPath : System.FilePath := "/tmp/canon_lex_test_lock_target_6"
+        let lockPath : System.FilePath :=
+          System.FilePath.mk (testPath.toString ++ ".lex_codegen.lock")
+        if (← lockPath.pathExists) then IO.FS.removeFile lockPath
+        -- Hold the lock externally.
+        let _ ← tryAcquireLock testPath
+        -- withFileLock should report contention.
+        let result ← withFileLock testPath (pure 42)
+        match result with
+        | none => pure ()
+        | some _ => throw (IO.userError "expected none on contention")
+        releaseLock testPath
+    }
   ]
 
 end LegalKernel.Test.Tools.LexCodegen

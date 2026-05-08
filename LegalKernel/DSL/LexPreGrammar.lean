@@ -264,6 +264,20 @@ partial def parsePreExpr (env : Lean.Environment) (stx : Lean.Syntax) :
   | `($lhs > $rhs)       => .gtNat (parseNatExpr env lhs) (parseNatExpr env rhs)
   | `($lhs = $rhs)       => .eqNat (parseNatExpr env lhs) (parseNatExpr env rhs)
   | `($lhs ≠ $rhs)       => .neNat (parseNatExpr env lhs) (parseNatExpr env rhs)
+  -- Bounded universal quantifier: `∀ x ∈ list, body`.  Audit-2
+  -- fix: pre-audit `parsePreExpr` had no match arms for these
+  -- shapes, so a Lex law with a bounded quantifier in its
+  -- `lex_pre` clause fell through to `unknown`, triggering a
+  -- false-positive L003 warning even though `forallIn` /
+  -- `existsIn` are admissible §7.2 grammar nodes.  The walker
+  -- now records the binder name, the iter (as `BoundedIter.toListExpr`
+  -- carrying the surface text), and recursively walks the body.
+  | `(∀ $x:ident ∈ $iter, $body) =>
+      .forallIn x.getId (BoundedIter.toListExpr (toString iter))
+                        (parsePreExpr env body)
+  | `(∃ $x:ident ∈ $iter, $body) =>
+      .existsIn x.getId (BoundedIter.toListExpr (toString iter))
+                        (parsePreExpr env body)
   | _                    => fallback
 
 /-- Walk a `Term`-syntax and classify it as a §7.2 `NatNode`. -/

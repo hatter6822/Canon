@@ -38,7 +38,7 @@ Coverage strategy:
      no implementation yet.  Each deferred entry carries the
      milestone in which it lands.
 
-# M1 implemented set (20 codes)
+# M1 implemented set (18 codes)
 
   * `L001` — missing `signed_by` (LX.6 / LexLaw.lean)
   * `L002` — missing `satisfies` (LX.6 / LexLaw.lean)
@@ -52,16 +52,14 @@ Coverage strategy:
   * `L011` — `self_only` mutates non-signer state (LX.9 / LexShim.lean)
   * `L013` — events omits/duplicates (LX.10 / LexEvents.lean) [warning]
   * `L014` — manual emission of auto-emitted event (LX.10 / LexEvents.lean) [warning]
-  * `L019` — `for` iter is not statically a List (LX.8 / LexImplCalculus.lean)
   * `L020` — unknown property in `satisfies` (LX.12 / LexProperty.lean)
   * `L022` — `revoke_key` used (LX.8 / LexImplCalculus.lean)
-  * `L023` — `impl` calls untagged helper (LX.8 / LexImplCalculus.lean)
   * `L024` — `local [*]` trivially satisfied (LX.14 / LexProperty.lean)
   * `L025` — per-resource `[r]` to conservative/monotonic (LX.14 / LexProperty.lean)
   * `L026` — `lex_codegen --check` divergence (LX.20 / LexCodegen.lean)
   * `L027` — bare `s` reference inside events (LX.10 / LexEvents.lean)
 
-# M2/M3 deferred set (7 codes)
+# M2/M3 deferred set (9 codes)
 
   * `L008` — manifest invariant claim not satisfiable (M3 — manifests)
   * `L012` — registry-mutating non-replaceKey law (M3 — extension)
@@ -69,7 +67,38 @@ Coverage strategy:
   * `L016` — refinement proof missing for minor bump (M3 — `lex_diff`)
   * `L017` — major bump without tombstone (M3 — `lex_diff`)
   * `L018` — manifest deployment_id not 32 bytes (M3 — manifests)
+  * `L019` — `for` iter is not statically a List (M2 — needs AST-parsed
+            for-loop iter; M1 ships only the `L019Message` formatter,
+            consumed by future `lex_lint` cross-pass).
   * `L021` — law has no impl effects (M3 — manifests)
+  * `L023` — `impl` calls untagged helper (M2 — needs AST-parsed
+            function-call shape; M1 ships only the `L023Message`
+            formatter.  In M1, `bareTerm` is a recognized escape
+            hatch that admits arbitrary user expressions, including
+            calls; tag-based auditability is reserved for M2 once
+            the bareTerm shape is replaced with proper AST nodes.).
+
+Audit-2 update.  Pre-audit-2, this gate listed L019 and L023 as
+"M1-implemented" because their message formatters
+(`L019Message` / `L023Message`) shipped in `LexImplCalculus.lean`.
+A deeper audit found the *detection* walkers are not fired:
+
+  * L019 detection requires type-checking the `for` iterator
+    against `List α`, which the M1 walker does not do (`for`
+    statements are stuffed into `[.bareTerm s]` per the
+    `parseImplStmt` comment "M2 refines").
+  * L023 detection requires distinguishing a function-call
+    `bareTerm` from a variable-reference `bareTerm`.  M1's
+    parseImplStmt classifies *all* non-keyword shapes as
+    `bareTerm` without further analysis.  The detection walker
+    is deferred to M2 alongside the proper AST refinement.
+
+Both formatters remain in-tree so `lex_lint` (LX.5) can consume
+them at the lint layer once M2 lands the AST-parsed shapes.
+This deferral does not weaken any kernel guarantee: L019 / L023
+are deployment-policy hints, not safety gates.  The kernel's
+`apply_admissible` pre-check is the authoritative type / policy
+enforcement.
 
 The deferred codes are listed in `deferredCodeRegistry`; the
 registry is consulted by the `m1_implemented_codes_listed`
@@ -93,13 +122,17 @@ open LegalKernel.Tools.Lex
 
 /-- The set of L-codes implemented in M1.  Adding a new code is a
     deliberate scope decision; deleting one breaks an acceptance
-    gate.  Sorted ascending. -/
+    gate.  Sorted ascending.
+
+    Audit-2: removed `L019` and `L023` (moved to deferred set;
+    their detection walkers require AST-parsed for-loop / function-
+    call shapes that M1 explicitly defers to M2). -/
 def m1ImplementedCodes : List String :=
   [ "L001", "L002", "L003", "L004", "L005", "L006", "L007"
   , "L009", "L010", "L011"
   , "L013", "L014"
-  , "L019", "L020"
-  , "L022", "L023", "L024", "L025", "L026", "L027" ]
+  , "L020"
+  , "L022", "L024", "L025", "L026", "L027" ]
 
 /-- A diagnostic's metadata: its code, its severity, and the
     Lean-side function that constructs the canonical message
@@ -125,7 +158,10 @@ def mkEntry (code severity sample : String) : DiagnosticEntry :=
 /-- The M1-implemented diagnostics with their canonical sample
     messages.  Adding a code requires landing the corresponding
     `L<NNN>Message` formatter in one of `LegalKernel/DSL/Lex*.lean`
-    or `Tools/LexCommon.lean`. -/
+    or `Tools/LexCommon.lean`.
+
+    Audit-2: removed L019 and L023 entries (their detection
+    walkers are deferred to M2; see deferredCodeRegistry). -/
 def m1CodeRegistry : List DiagnosticEntry :=
   [ mkEntry "L001" "error" "L001: missing `signed_by` clause; add `signed_by <actor>` to the law declaration"
   , mkEntry "L002" "error" "L002: missing `satisfies` clause; add `satisfies := […]` listing at least one property"
@@ -139,10 +175,8 @@ def m1CodeRegistry : List DiagnosticEntry :=
   , mkEntry "L011" "error" (L011Message "alice" "setBalance ... bob 100")
   , mkEntry "L013" "warning" (L013Message "[r1, alice]")
   , mkEntry "L014" "warning" (L014Message "balanceChanged")
-  , mkEntry "L019" "error" (L019Message "myArbitraryThing")
   , mkEntry "L020" "error" (L020Message "myUndefinedProperty")
   , mkEntry "L022" "error" (L022Message "alice")
-  , mkEntry "L023" "error" (L023Message "myUntaggedHelper")
   , mkEntry "L024" "error" L024Message
   , mkEntry "L025" "error" (L025Message "conservative")
   , mkEntry "L026" "error" "L026: fence content in target file diverges from rendered output"
@@ -158,7 +192,12 @@ structure DeferredEntry where
   /-- The milestone where this code is scheduled to be implemented. -/
   milestone : String
 
-/-- The M2/M3-deferred set. -/
+/-- The M2/M3-deferred set.  Each entry's `milestone` records the
+    landing target for the detection walker / formatter integration.
+    The formatters for these codes (e.g. `L019Message` /
+    `L023Message`) MAY ship in M1 even when the detection walker
+    is deferred — `lex_lint` (LX.5) consumes the formatters at the
+    lint layer when the AST infrastructure is ready. -/
 def deferredCodeRegistry : List DeferredEntry :=
   [ { code := "L008", milestone := "M3 (manifest invariants)" }
   , { code := "L012", milestone := "M3 (extension)" }
@@ -166,7 +205,9 @@ def deferredCodeRegistry : List DeferredEntry :=
   , { code := "L016", milestone := "M3 (lex_diff)" }
   , { code := "L017", milestone := "M3 (lex_diff)" }
   , { code := "L018", milestone := "M3 (manifests)" }
+  , { code := "L019", milestone := "M2 (AST-parsed for-loop iter)" }
   , { code := "L021", milestone := "M3 (manifests)" }
+  , { code := "L023", milestone := "M2 (AST-parsed function call)" }
   ]
 
 /-- True iff `code` is implemented in M1. -/
@@ -217,9 +258,9 @@ def tests : List TestCase :=
           assert (!isDeferred code)
             s!"{code} is in BOTH the implemented and deferred set — contradiction"
     }
-  , { name := "deferredCodeRegistry totals 7 codes (M2/M3 backlog)"
+  , { name := "deferredCodeRegistry totals 9 codes (M2/M3 backlog; audit-2 added L019 + L023)"
     , body := do
-        assertEq (expected := (7 : Nat)) (actual := deferredCodeRegistry.length)
+        assertEq (expected := (9 : Nat)) (actual := deferredCodeRegistry.length)
           "deferred set size"
     }
   , { name := "v1 catalogue has exactly 27 codes (excluding retired L042)"
@@ -260,7 +301,11 @@ def tests : List TestCase :=
         let msg := L014Message "balanceChanged"
         assert (msg.startsWith "L014:") "prefix"
     }
-  , { name := "L019Message produces L019-prefixed string"
+  -- L019 / L023 message-formatter tests: these formatters ship in
+  -- M1 (consumed by `lex_lint` once the M2 walker lands), but the
+  -- DETECTION is deferred to M2.  The format-prefix tests stay in
+  -- the tree to pin formatter stability across the M1 → M2 boundary.
+  , { name := "L019Message produces L019-prefixed string (formatter ships in M1; detection M2)"
     , body := do
         let msg := L019Message "myUnknownIter"
         assert (msg.startsWith "L019:") "prefix"
@@ -275,7 +320,7 @@ def tests : List TestCase :=
         let msg := L022Message "alice"
         assert (msg.startsWith "L022:") "prefix"
     }
-  , { name := "L023Message produces L023-prefixed string"
+  , { name := "L023Message produces L023-prefixed string (formatter ships in M1; detection M2)"
     , body := do
         let msg := L023Message "myHelper"
         assert (msg.startsWith "L023:") "prefix"
@@ -344,6 +389,42 @@ def tests : List TestCase :=
         assert (L024Message.startsWith "L024:") "prefix"
         let parts := L024Message.splitOn "local"
         assert (parts.length > 1) "mentions `local`"
+    }
+  -- Audit-2 regression: forall/exists nodes (added to parsePreExpr)
+  -- properly satisfy `isFullyRecognised`.  Pre-audit-2 the AST
+  -- defined `.forallIn` and `.existsIn` constructors but the
+  -- walker had no match arms emitting them, so a Lex law writing
+  -- `lex_pre := fun s => ∀ x ∈ list, P x` fell through to
+  -- `.unknown`, falsely triggering an L003 warning.
+  , { name := "audit-2: PreNode.forallIn over a recognised body is fully recognised"
+    , body := do
+        let inner : PreNode := .true_
+        let node : PreNode :=
+          .forallIn (Lean.Name.mkSimple "x")
+                    (.toListExpr "myList")
+                    inner
+        assert node.isFullyRecognised
+          "forallIn with True body should be fully recognised"
+    }
+  , { name := "audit-2: PreNode.existsIn over a recognised body is fully recognised"
+    , body := do
+        let inner : PreNode := .true_
+        let node : PreNode :=
+          .existsIn (Lean.Name.mkSimple "x")
+                    (.toListExpr "myList")
+                    inner
+        assert node.isFullyRecognised
+          "existsIn with True body should be fully recognised"
+    }
+  , { name := "audit-2: PreNode.forallIn over an unknown body is NOT fully recognised"
+    , body := do
+        let inner : PreNode := .unknown "weird shape"
+        let node : PreNode :=
+          .forallIn (Lean.Name.mkSimple "x")
+                    (.toListExpr "myList")
+                    inner
+        assert (!node.isFullyRecognised)
+          "forallIn with unknown body should NOT be fully recognised"
     }
   ]
 

@@ -77,6 +77,17 @@ def tests : List TestCase :=
         | .error .nonConservativeStmt => pure ()
         | _ => throw (IO.userError "expected nonConservativeStmt on burn")
     }
+  , { name := "synth_conservative fails on reward (audit-2 regression)"
+    , body := do
+        -- Audit-2 finding: pre-fix the test suite had no explicit
+        -- test for `reward` rejection by `synth_conservative`,
+        -- relying only on the `mint` and `burn` cases.  A regression
+        -- in `buildConservativeProof` could have silently let
+        -- `reward` through.  This test pins the rejection.
+        match synth_conservative [.reward] with
+        | .error .nonConservativeStmt => pure ()
+        | _ => throw (IO.userError "expected nonConservativeStmt on reward")
+    }
   , { name := "synth_conservative fails on bareTerm"
     , body := do
         match synth_conservative [.bareTerm] with
