@@ -257,9 +257,14 @@ private def stripKeyword (stmt : String) (kw : String) : String :=
 
 /-- Take the first whitespace-bounded token from `s`, or `s`
     itself if there's no internal whitespace.  Used to extract
-    e.g. the actor name from `"alice ..."`. -/
+    e.g. the actor name from `"alice ..."`.
+
+    Audit-4: handles `\r` (carriage return) too, so a CRLF-line-
+    ending source file's parsed statement doesn't leak `\r` into
+    the actor name on Windows-checked-out repos. -/
 private def firstToken (s : String) : String :=
-  let chars := s.toList.takeWhile (fun c => c != ' ' && c != '\t' && c != '\n')
+  let chars := s.toList.takeWhile (fun c =>
+    c != ' ' && c != '\t' && c != '\n' && c != '\r')
   String.ofList chars
 
 /-- Parse a single statement string into an `ImplStmt`.  Falls

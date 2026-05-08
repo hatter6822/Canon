@@ -469,11 +469,21 @@ structure AuthorizedByRef where
 structure PropertyClaim where
   /-- Property name (e.g. `"conservative"`, `"local"`). -/
   name : String
-  /-- Property arguments captured as compressed-JSON strings for
-      ergonomic round-tripping; the macro layer interprets them
-      back into typed values via `Lean.Json.parse`.  Strings
-      (rather than `Lean.Json`) so that the structure can derive
-      `Repr` and `DecidableEq` (which `Lean.Json` doesn't ship). -/
+  /-- Property arguments captured as opaque text strings.
+
+      Audit-3 redesign: pre-fix the docstring claimed args were
+      "compressed-JSON strings" parsed back via `Lean.Json.parse`.
+      The codec then *parsed* each arg as JSON on encode and
+      *compressed* on decode, producing an asymmetric round-trip
+      (`["foo"]` round-tripped to `["\"foo\""]`).  The audit-3
+      design treats args as opaque strings: the codec wraps each
+      as `Json.str` on encode and unwraps via `getStr` on
+      decode — symmetric.  The macro layer is responsible for
+      any text-to-typed-value conversion (M2 concern).
+
+      Strings rather than `Lean.Json` so that the structure can
+      derive `Repr` and `DecidableEq` (`Lean.Json` doesn't ship
+      either). -/
   args : List String
   deriving Repr, DecidableEq, Inhabited
 

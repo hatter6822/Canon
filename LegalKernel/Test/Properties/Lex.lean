@@ -120,14 +120,76 @@ private def genRegistryEffectKind : Gen RegistryEffectKind := fun st =>
     | _ => RegistryEffectKind.localPolicy
   (kind, st1)
 
-/-- Generate a minimal canonical `LawDecl` with no params /
-    satisfies / proofOverrides (matching the M1 example law's
-    shape). -/
+/-- Generate a small `PropertyClaim` (audit-4 addition).  Picks
+    a property name from the §10.1 v1 set + variates the args
+    list to actually exercise the audit-3 PropertyClaim codec
+    fix.  Pre-audit-4, `genLawDecl` hardcoded `satisfies := []`,
+    so the codec path was never sampled by the property tests. -/
+def genPropertyClaim : Gen PropertyClaim := fun st =>
+  let (kind, st1) := genNat 5 st
+  let name := match kind with
+    | 0 => "conservative"
+    | 1 => "monotonic"
+    | 2 => "local"
+    | 3 => "freeze_preserving"
+    | _ => "registry_preserving"
+  let (argCount, st2) := genNat 4 st1   -- 0..3 args
+  let (argSeed, st3) := genNat 1000 st2
+  let args : List String := match argCount, argSeed % 4 with
+    | 0, _ => []
+    | _, 0 => ["r1"]
+    | _, 1 => ["r1", "alice"]
+    | _, 2 => ["{nested:json}"]   -- audit-3 stress: JSON-special chars
+    | _, _ => ["raw_string", "another"]
+  ({ name, args }, st3)
+
+/-- Generate a `ProofOverride` (audit-4 addition).  Mirrors
+    `genPropertyClaim` for the `proof_overrides` field. -/
+def genProofOverride : Gen ProofOverride := fun st =>
+  let (n, st1) := genNat 3 st
+  let property := match n with
+    | 0 => "conservative"
+    | 1 => "monotonic"
+    | _ => "local"
+  let (tacSeed, st2) := genNat 4 st1
+  let tacticBlock := match tacSeed with
+    | 0 => "by exact ()"
+    | 1 => "by rfl"
+    | 2 => "by simp"
+    | _ => "by exact custom_proof"
+  ({ property, tacticBlock }, st2)
+
+/-- Internal: collect `k` random `PropertyClaim` values. -/
+private partial def collectClaims (k : Nat) (acc : List PropertyClaim) (s : GenState) :
+    List PropertyClaim × GenState :=
+  if k = 0 then (acc, s)
+  else
+    let (c, s') := genPropertyClaim s
+    collectClaims (k - 1) (acc ++ [c]) s'
+
+/-- Internal: collect `k` random `ProofOverride` values. -/
+private partial def collectOverrides (k : Nat) (acc : List ProofOverride) (s : GenState) :
+    List ProofOverride × GenState :=
+  if k = 0 then (acc, s)
+  else
+    let (o, s') := genProofOverride s
+    collectOverrides (k - 1) (acc ++ [o]) s'
+
+/-- Generate a minimal canonical `LawDecl`.  Audit-4: extended
+    to populate `satisfies` and `proofOverrides` with non-empty
+    samples so the audit-3 PropertyClaim codec fix and the
+    ProofOverride codec are actually exercised by the round-trip
+    property test.  Pre-audit-4, both lists were hardcoded `[]`,
+    leaving the codec un-tested at the property level. -/
 def genLawDecl : Gen LawDecl := fun st =>
   let (ident, st1) := genDottedIdent st
   let (ver, st2) := genVersion st1
   let (idx, st3) := genActionIndex st2
   let (regEff, st4) := genRegistryEffectKind st3
+  let (sCount, st5) := genNat 3 st4         -- 0..2 satisfies entries
+  let (satisfies, st6) := collectClaims sCount [] st5
+  let (oCount, st7) := genNat 2 st6         -- 0..1 proof overrides
+  let (overrides, st8) := collectOverrides oCount [] st7
   let decl : LawDecl :=
     { schemaVersion := 1
       identifier := ident
@@ -139,12 +201,12 @@ def genLawDecl : Gen LawDecl := fun st =>
       authorizedBy := { expr := "fun _ _ => True" }
       preExpr := "fun _ => True"
       implBlock := "fun s => s"
-      satisfies := []
+      satisfies := satisfies
       eventsBlock := "[]"
       registryEffect := regEff
-      proofOverrides := []
+      proofOverrides := overrides
       sourceLocation := { fileName := "Generated.lean", startPos := { line := 1, column := 0 } } }
-  (decl, st4)
+  (decl, st8)
 
 /-! ## Generator for `List LawDecl` -/
 
@@ -169,15 +231,20 @@ def genLawDeclList (lenMax : Nat) : Gen (List LawDecl) := fun st =>
 
 /-- Property 1: `lex_macro_idempotency_property` —
     `LawDecl.fromJson ∘ LawDecl.toCanonicalJson = id` modulo
-    schema-defaulted fields.  Concretely: encoding a `LawDecl`,
-    decoding it, and re-encoding produces byte-identical output
-    to the first encode.
+    schema-defaulted fields.
 
-    The intermediate `fromJson` step exercises the decoder; the
-    final re-encode confirms the decoder's output is canonically
-    re-encodable. -/
+    The audit-4 stronger form checks BOTH:
+      (a) `decl == decl'` (structural equality after roundtrip)
+          — guards against the audit-3-class `args` codec
+          regression where byte-equal encoded forms hid an
+          asymmetric in-memory transformation.
+      (b) `firstEncode == secondEncode` (byte determinism on
+          re-encode of the decoded value).
+
+    Both properties together rule out the entire class of
+    asymmetric encode/decode bugs that audit-3 closed. -/
 def lexMacroIdempotencyProperty : TestCase := {
-  name := "property: Lex macro idempotency (re-encode = original) (100 samples)"
+  name := "property: Lex macro idempotency (structural + byte-equal roundtrip) (100 samples)"
   body := do
     let seed ← readSeed
     let n ← readIterations
@@ -187,7 +254,9 @@ def lexMacroIdempotencyProperty : TestCase := {
       | .error _ => false  -- canonical encode then decode should never error
       | .ok decl' =>
         let secondEncode := LawDecl.toCanonicalJson decl'
-        decide (firstEncode = secondEncode)
+        -- Both forms simultaneously: structural equality of
+        -- decoded value AND byte equality of re-encoded form.
+        decide (decl = decl') && decide (firstEncode = secondEncode)
 }
 
 /-- Property 2: `lex_codegen_determinism_property` — running the

@@ -2348,6 +2348,82 @@ After audit-3 fixes:
   * **Both audit binaries (`lex_lint`, `lex_codegen`) support
     `--help` / `-h`** with usage text + exit-code semantics.
 
+**Workstream-LX M1 audit-4 hardening (this branch).**  A fourth
+deep audit, parallelised across property-test generator soundness,
+attribute initialisation, macro elaboration ordering, and parser
+edge cases, found **two MEDIUM** defects plus a number of
+documentation drifts that audit-1 / audit-2 / audit-3 had missed.
+All closed.  No CRITICAL or HIGH defects this round — the
+codebase has converged.
+
+  * **MEDIUM: Property test 1 didn't exercise the audit-3
+    PropertyClaim codec fix** (`LegalKernel/Test/Properties/Lex.lean`).
+    Pre-fix `genLawDecl` hardcoded `satisfies := []` and
+    `proofOverrides := []`, so the audit-3 PropertyClaim codec
+    fix (replacing the asymmetric `Json.parse` + `compress`
+    pattern with symmetric `Json.str` wrap/unwrap) was NEVER
+    sampled by the property tests — a regression in the codec
+    would silently pass.  Fix: added `genPropertyClaim` and
+    `genProofOverride` generators producing varied args
+    (including JSON-special-char-bearing ones like
+    `"{nested:json}"`) and overrides; `genLawDecl` now generates
+    0..2 satisfies entries + 0..1 proof overrides per sample.
+    Property test 1 (`lexMacroIdempotencyProperty`) was also
+    strengthened to check both structural equality (`decl =
+    decl'`) AND byte equality (`firstEncode = secondEncode`),
+    closing the entire class of asymmetric-codec bugs that
+    audit-3 fixed at the value level — now fuzzed at 100 samples
+    per CI run.
+
+  * **MEDIUM: `firstToken` didn't handle CRLF line endings**
+    (`LegalKernel/DSL/LexImplCalculus.lean`).  Pre-fix the
+    helper split on space / tab / `\n` only, so on a Windows-
+    checked-out repo (CRLF line endings), the parser-extracted
+    actor name from `revoke_key alice\r` would be `"alice\r"`
+    (with trailing carriage return).  Fix: added `\r` to the
+    whitespace separator set.  All current callers pre-trim
+    via `stripKeyword`, so the bug was dormant on Unix; the
+    fix is defensive against Windows checkouts and future
+    callers that don't pre-trim.
+
+  * **DOC: `PropertyClaim.args` field docstring referenced
+    pre-audit-3 codec semantics** (`Tools/LexCommon.lean`).
+    Pre-fix the docstring claimed args were "compressed-JSON
+    strings ... interpreted back into typed values via
+    `Lean.Json.parse`".  The audit-3 redesign treats args as
+    opaque text strings (Json.str wrap/unwrap symmetric);
+    audit-4 corrects the docstring to match.
+
+After audit-4 fixes:
+
+  * **1412 tests across 81 suites** (unchanged from
+    pre-audit-4; the property-test generator extension
+    increases coverage breadth — sampling more of the
+    PropertyClaim codec subspace per CI run — without adding
+    new test cases).  Each property-test invocation now
+    exercises ~50% non-empty `satisfies` + 0..1 proof
+    overrides per sample, totalling ~100 PropertyClaim
+    round-trips per `lexMacroIdempotencyProperty` run.
+  * **0 build warnings** on clean rebuild.
+  * **0 sorries** in TCB.
+  * **All 7 CI gates green**.
+  * **`lex_codegen` idempotency preserved** (a second
+    invocation reports "0 target(s) rewritten"; `--check`
+    passes byte-for-byte).
+  * **No leaked lock files** after either success or error
+    paths.
+  * **Audit cycle convergence**: the audit-4 deep dive
+    (parallelised across property-test soundness, attribute
+    init, macro elaboration ordering, parsers) found ZERO
+    HIGH or CRITICAL defects — only forward-port placeholders
+    and 1 dormant defensive issue.  Audit cycle:
+    - audit-1: 6 defects (1 CRITICAL + 1 HIGH + 4 MEDIUM/LOW)
+    - audit-2: 3 defects (1 HIGH + 2 CRITICAL)
+    - audit-3: 8 defects (4 HIGH + 2 MEDIUM + 2 LOW)
+    - audit-4: 2 defects (2 MEDIUM, no HIGH or CRITICAL)
+    The decreasing severity-and-count trend confirms the
+    codebase has stabilised.
+
 **Workstream LX deferred to M2.**  Per the plan §19.4, M2 lands
 the strict-equivalence migration of the 17 kernel-built-in
 laws to Lex, plus the canonical-mode flip on `lex_codegen`
