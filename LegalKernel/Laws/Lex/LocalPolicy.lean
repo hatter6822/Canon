@@ -51,6 +51,7 @@ lexlaw legalkernel_declareLocalPolicy where
   lex_intent          "Declare (or replace) the signer's local policy (Workstream LP §5.2).  Mutates the `ExtendedState.localPolicies` table to map the signer's `ActorId` to `_policy`.  Idempotent on equal `policy`; replaces on differing `policy`.  Kernel-level effect: `Laws.freezeResource 0`.  Authority-level effect: `localPolicies` insertion via `applyActionToLocalPolicies`."
   lex_signed_by       signer
   lex_authorized_by   (fun _ _ => True)
+  lex_registry_effect localPolicy
   lex_params          (_policy : LegalKernel.Authority.LocalPolicy)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
@@ -72,6 +73,7 @@ lexlaw legalkernel_revokeLocalPolicy where
   lex_intent          "Revoke the signer's local policy (Workstream LP §5.3).  Mutates the `ExtendedState.localPolicies` table to erase the signer's `ActorId` entry.  Idempotent: revoking a non-existent entry is a no-op.  Kernel-level effect: `Laws.freezeResource 0`.  No fields: which actor is being revoked is the signer."
   lex_signed_by       signer
   lex_authorized_by   (fun _ _ => True)
+  lex_registry_effect localPolicy
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
   lex_satisfies       := []

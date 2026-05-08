@@ -5,7 +5,7 @@
  "signed_by": {"name": "bridge", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],
- "registry_effect": {"kind": "none"},
+ "registry_effect": {"kind": "registerIdentity"},
  "proof_overrides": [],
  "pre_expr":
  "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription\n    (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n    (Term.hole \"_\")\n    \":\"\n    [`LegalKernel.State]\n    \")\")]\n  []\n  \"=>\"\n  `True))",

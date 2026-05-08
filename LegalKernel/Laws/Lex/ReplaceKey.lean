@@ -53,6 +53,7 @@ lexlaw legalkernel_replaceKey where
   lex_intent          "Re-point `actor`'s identity to `newKey` in the `KeyRegistry`, signed by the *old* key.  Kernel-level effect is identity on `State`; the authority-level effect (registry update) happens in `apply_admissible` via `applyActionToRegistry` (Phase 3 / WU 3.10)."
   lex_signed_by       actor
   lex_authorized_by   (fun _ _ => True)
+  lex_registry_effect replaceKey
   -- Underscore prefix on `_actor` and `_newKey`: the kernel-level
   -- `Transition` is the identity (per the Phase-3 design where
   -- registry mutation lives in `applyActionToRegistry`, not in

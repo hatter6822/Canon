@@ -44,6 +44,7 @@ lexlaw legalkernel_registerIdentity where
   lex_intent          "Insert a fresh `(actor, pk)` pair into the `KeyRegistry`, signed by the bridge actor.  Used for first-time identity registrations where `replaceKey` cannot apply (the old key doesn't exist yet).  Kernel-level effect is identity on `State`; the authority-level effect (registry insertion) happens in `apply_admissible` via `applyActionToRegistry`."
   lex_signed_by       bridge
   lex_authorized_by   (fun _ _ => True)
+  lex_registry_effect registerIdentity
   -- Underscore prefix: kernel-level identity transition; registry
   -- mutation lives in `applyActionToRegistry`, not in the
   -- compiled `Transition`.

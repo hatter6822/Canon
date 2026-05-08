@@ -118,6 +118,18 @@ syntax (name := lexSatisfiesClauseStx)
   "lex_satisfies" ":=" "[" sepBy(ident, ",") "]" : lawClause
 syntax (name := lexEventsClauseStx) "lex_events" ":=" term : lawClause
 syntax (name := lexProofClauseStx) "lex_proof" ident ":=" term : lawClause
+-- LX-M2 (audit-1): a `lex_registry_effect <ident>` clause that
+-- records the law's authority-layer registry effect for the
+-- JSON sidecar.  Admissible kinds: `none`, `replaceKey`,
+-- `registerIdentity`, `localPolicy`.  Per plan §19.4 LX.25 +
+-- LX.28: the kernel-built-in `replaceKey` / `registerIdentity` /
+-- `declareLocalPolicy` / `revokeLocalPolicy` laws set this
+-- field correctly so M3's codegen can route registry mutations
+-- to the right authority-layer helper
+-- (`applyActionToRegistry` vs `applyActionToLocalPolicies`).
+-- Defaults to `none` if absent (M1 backward compat).
+syntax (name := lexRegistryEffectClauseStx)
+  "lex_registry_effect" ident : lawClause
 
 /-- The top-level Lex `lex_law` command. -/
 syntax (name := lexLawCmd)
@@ -158,6 +170,9 @@ private structure ParsedLaw where
   eventsClause : Option (Syntax × String) := none
   /-- All `lex_proof <P>` overrides, ordered as encountered. -/
   proofClauses : List (String × String) := []
+  /-- The `lex_registry_effect` clause's parsed kind (LX-M2 audit-1).
+      Defaults to `.none_` if absent (M1 backward compat). -/
+  registryEffectClause : Option LegalKernel.Tools.Lex.RegistryEffectKind := none
   /-- The originating file path (for diagnostic anchoring). -/
   sourceFile : String := ""
   /-- The originating line of the `lex_law` keyword. -/
@@ -272,6 +287,23 @@ private def parseClause (clause : Syntax) (acc : ParsedLaw) :
         s!"lex law: duplicate `lex_proof {propName}` clause; only one override is allowed per property"
     return { acc with
       proofClauses := acc.proofClauses ++ [(propName, renderSyntax tac)] }
+  | `(lawClause| lex_registry_effect $eff:ident) =>
+    -- LX-M2 (audit-1): parse the registry-effect kind.  Hard-
+    -- error on duplicate or unknown kinds with a precise
+    -- diagnostic.
+    if acc.registryEffectClause.isSome then
+      throwErrorAt clause
+        "lex law: duplicate `lex_registry_effect` clause"
+    let effStr := toString eff.getId
+    let kind ← match effStr with
+      | "none"             => pure LegalKernel.Tools.Lex.RegistryEffectKind.none_
+      | "replaceKey"       => pure LegalKernel.Tools.Lex.RegistryEffectKind.replaceKey
+      | "registerIdentity" => pure LegalKernel.Tools.Lex.RegistryEffectKind.registerIdentity
+      | "localPolicy"      => pure LegalKernel.Tools.Lex.RegistryEffectKind.localPolicy
+      | _ =>
+        throwErrorAt clause
+          s!"lex law: unknown registry-effect kind `{effStr}`; admissible kinds are `none`, `replaceKey`, `registerIdentity`, `localPolicy`"
+    return { acc with registryEffectClause := some kind }
   | _ =>
     throwError "lex law: unknown clause `{clause}`"
 
@@ -395,7 +427,11 @@ private def buildLawDecl (parsed : ParsedLaw) :
   let satisfiesList : List LegalKernel.Tools.Lex.PropertyClaim :=
     satisfiesNames.map (fun n =>
       ({ name := n, args := [] } : LegalKernel.Tools.Lex.PropertyClaim))
-  let regEff : LegalKernel.Tools.Lex.RegistryEffectKind := .none_
+  -- LX-M2 (audit-1): consume the `lex_registry_effect` clause's
+  -- parsed value if present; default to `none` for backward
+  -- compatibility.
+  let regEff : LegalKernel.Tools.Lex.RegistryEffectKind :=
+    parsed.registryEffectClause.getD .none_
   let params : List LegalKernel.Tools.Lex.ParamSpec :=
     match parsed.paramsClause with
     | some bs => paramSpecsFromBinders bs

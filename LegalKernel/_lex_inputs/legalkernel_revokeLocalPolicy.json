@@ -1,11 +1,11 @@
 {"version": "1.0.0",
  "source_location":
- {"position": {"line": 68, "column": 0},
+ {"position": {"line": 69, "column": 0},
   "file": "LegalKernel/Laws/Lex/LocalPolicy.lean"},
  "signed_by": {"name": "signer", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],
- "registry_effect": {"kind": "none"},
+ "registry_effect": {"kind": "localPolicy"},
  "proof_overrides": [],
  "pre_expr":
  "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription\n    (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n    (Term.hole \"_\")\n    \":\"\n    [`LegalKernel.State]\n    \")\")]\n  []\n  \"=>\"\n  `True))",

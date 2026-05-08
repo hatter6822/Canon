@@ -2619,6 +2619,57 @@ here and in CLAUDE.md):**
     M2).  `proportionalDilute` exercises the dust-bound
     theorem (the `proof` override path at M3 will plug in here).
 
+**Workstream-LX M2 audit-1 hardening (this branch).**  A post-
+landing deep audit identified one M2-acceptance gap and one
+test-coverage observation; both are closed in this branch.
+
+  * **LX.25 + LX.28 acceptance gap: `registry_effect` field
+    not set per-law.**  Per plan §19.4 LX.25 ("The codegen-
+    input's `registry_effect` field is set to `\"replaceKey\"`
+    and `\"registerIdentity\"` respectively") and LX.28 ("The
+    codegen-input's `registry_effect` field is extended with a
+    `\"localPolicy\"` variant"), the M2 declarations for
+    `replaceKey` (index 4), `registerIdentity` (index 12),
+    `declareLocalPolicy` (index 15), and `revokeLocalPolicy`
+    (index 16) should each set the `registry_effect` field to
+    a non-`none` kind.  Pre-audit: all 4 sidecars defaulted to
+    `{"kind": "none"}`.  This was a per-WU acceptance gap
+    (informational only — the `requiresEmission := false`
+    policy means the renderers don't currently consume the
+    field), but the plan calls it out as an explicit
+    deliverable.  Fix: extended the `lex_law` macro with a new
+    `lex_registry_effect <ident>` clause (admissible kinds:
+    `none` / `replaceKey` / `registerIdentity` / `localPolicy`;
+    defaults to `none` if absent for backward compat).  The 4
+    affected Lex re-expressions now declare the correct kind;
+    audit binaries (`lex_lint`, `lex_codegen --check`)
+    continue to pass byte-for-byte.
+
+  * **Mutation-test verification of the byte-equivalence
+    regression.**  An empirical mutation test on
+    `Laws/Lex/Mint.lean` (changing `+ amount` to `- amount`
+    in the `lex_impl` body) confirmed that the `rfl`-close
+    `example` regression test correctly fails the build with
+    a precise `Type mismatch` diagnostic.  This validates the
+    M2 strict-equivalence invariant: any drift in the Lex
+    re-expression's `pre` / `apply_impl` from the hand-written
+    form is caught at elaboration time.  Reverting the
+    mutation restores the build.
+
+After audit-1 fixes:
+
+  * Test count unchanged (1436; the macro extension + sidecar
+    updates don't add new tests — the existing
+    `lex_codegen --check` suite already validates byte-stability).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 7 CI gates green.
+  * Macro now exposes the `lex_registry_effect <ident>` clause
+    for explicit per-law registry-effect classification (M2-
+    compliant per plan §19.4 LX.25 + LX.28).
+  * Mutation-test sanity: the `rfl`-close `example` regression
+    catches at least the trivial `+ → -` impl mutation.
+
 **Workstream LX deferred to M3.**  Per the plan §19.5, M3 lands
 the `deployment` macro, `lex_diff` / `lex_format` audit
 binaries, property-test auto-generation, the synthesizer
