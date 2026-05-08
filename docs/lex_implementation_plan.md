@@ -81,6 +81,7 @@ trust.
   * [Appendix B — Decidability discipline reminders](#appendix-b--decidability-discipline-reminders)
   * [Appendix C — Glossary](#appendix-c--glossary)
   * [Appendix D — Worked Lex law (full template)](#appendix-d--worked-lex-law-full-template)
+  * [Appendix E — Audit-1 changelog](#appendix-e--audit-1-changelog)
 
 ## Status
 
@@ -323,27 +324,28 @@ LegalKernel.DSL.LexLaw                     (LX.4; new — the `law` macro elabor
   ├── imports DSL.Law (re-exports `Law.mk` for v1 callers)
   └── exports `law` syntax + per-file emission
 
-LegalKernel.DSL.LexProperty                (LX.7; new — synthesizer library)
+LegalKernel.DSL.LexProperty                (LX.12; new — synthesizer library skeleton)
+                                            (LX.13–16; filled in incrementally)
   ├── imports Conservation + Laws.* + LexLaw
   └── exports synthesizer-internal helpers
 
-LegalKernel.DSL.LexDeployment              (LX.18; new — `deployment` manifest macro)
+LegalKernel.DSL.LexDeployment              (LX.31–33; new — `deployment` manifest macro)
   ├── imports Encoding.SignInput + LexLaw + LexProperty
   └── exports `deployment` syntax + `Deployment` record
 
-Tools.LexCommon                            (LX.3; new — shared parsing utilities)
+Tools.LexCommon                            (LX.4; new — shared parsing utilities)
   └── imports Tools.Common
 
-Tools.LexLint                              (LX.3; new — audit binary)
+Tools.LexLint                              (LX.5; new — audit binary skeleton)
   └── imports Tools.LexCommon
 
-Tools.LexCodegen                           (LX.8; new — codegen binary)
+Tools.LexCodegen                           (LX.17–20; new — codegen binary built up incrementally)
   └── imports Tools.LexCommon
 
-Tools.LexDiff                              (LX.20; new — semantic-diff binary)
+Tools.LexDiff                              (LX.34–35; new — semantic-diff binary)
   └── imports Tools.LexCommon
 
-Tools.LexFormat                            (LX.21; new — pretty-printer binary)
+Tools.LexFormat                            (LX.36; new — pretty-printer binary)
   └── imports Tools.LexCommon
 
 LegalKernel._lex_inputs/                   (LX.1; new directory — codegen-input metadata)
@@ -352,10 +354,11 @@ LegalKernel._lex_inputs/                   (LX.1; new directory — codegen-inpu
 
 lex_index_registry.txt                     (LX.1; new file — frozen action-index registry)
 
-LegalKernel.lean                           (extended in LX.4 / LX.18: re-export new modules)
+LegalKernel.lean                           (extended in LX.6 / LX.12 / LX.31:
+                                                       re-export new modules)
 
-Deployments/                               (LX.22; new directory — example deployments)
-  └── Examples/UsdClearing.lean            (LX.22; illustrative manifest)
+Deployments/                               (LX.37; new directory — example deployments)
+  └── Examples/UsdClearing.lean            (LX.37; illustrative manifest)
 
 LegalKernel.Authority.Action               (regenerated in M2: Lex-derived constructor list)
 LegalKernel.Encoding.Action                (regenerated in M2: Lex-derived encoding branches)
@@ -1065,8 +1068,11 @@ for v1, removed in v2).
 
 ### 6.2 Per-file elaboration steps
 
-The macro's `macro_rules` block does the following, in
-order, at file-elaboration time:
+The `law` command's `elab_rules` block (using `command`
+elaboration, which has full IO access via Lean's
+`CommandElabM` monad — *not* `macro_rules` / `MacroM`,
+which is restricted to pure syntax transformation) does
+the following, in order, at file-elaboration time:
 
   1. **Parse all clauses** and bind them to a Lean-level
      `LawDecl` value.  This is an internal data type used
@@ -1103,14 +1109,18 @@ order, at file-elaboration time:
      synthesizer library (§10).  If a `proof <P>` override
      exists, it is used as the instance body; otherwise
      the synthesizer's default body is emitted.
-  8. **Emit the codegen-input file.**  The macro
+  8. **Emit the codegen-input file.**  The elaborator
      serialises the `LawDecl` value to JSON and writes it
      to `LegalKernel/_lex_inputs/<identifier>.json`.  The
      write is *deterministic*: equal `LawDecl` values
      produce byte-equal JSON.  The write happens via
-     `IO.FS.writeFile` from inside a `MacroM` action;
-     because Lean macros may run more than once during
-     incremental builds, the write is idempotent.
+     `IO.FS.writeFile` lifted into `CommandElabM` (the
+     command-elaboration monad has full `IO` access,
+     unlike `MacroM` which is restricted to pure syntax
+     manipulation); because Lean elaborators may run more
+     than once during incremental builds, the write is
+     idempotent (compares structurally before writing —
+     see §6.10).
   9. **Emit a `#check` for the registry consistency.**  A
      `#check_failure` line that fails if the registry's
      `(identifier, action_index)` does not match the
@@ -1133,11 +1143,17 @@ The per-file macro **does not**:
     consistency `#check_failure`.
   * Run any tactic over `apply_admissible` shape.
 
-The constraint is structural: a Lean 4 macro is a *pure*
-syntax-tree transformer over the file being parsed, plus
-`MacroM`-restricted IO (file reads under a controlled
-allowlist).  The cross-module artefacts are emitted by a
-separate binary.
+The constraint is structural: Lean 4's `command`
+elaboration (`CommandElabM`) admits full IO at file-
+elaboration time, but it cannot extend an inductive
+declared in a sibling module (Lean's elaborator is per-
+file).  Lex's `law` keyword uses `elab_rules : command`
+(or equivalently `elab "law" ... : command`) to obtain
+both `CommandElabM`'s IO surface and per-file declaration
+emission; the cross-module artefacts (Action constructor
+list, encoding branches, etc.) are emitted by a separate
+build-time binary (`lex_codegen`, §12) consuming the
+codegen-input JSON files.
 
 ### 6.4 Per-file elaboration error conditions
 
@@ -1189,11 +1205,17 @@ This is consistent with the protobuf-codegen / bindgen-
 style discipline familiar to readers of the Rust / Go
 ecosystems.
 
-### 6.6 Concrete Lean macro shape
+### 6.6 Concrete Lean elaboration shape
 
-The `law` macro is declared in
-`LegalKernel/DSL/LexLaw.lean` using Lean 4's `syntax` and
-`macro_rules` mechanisms.  Skeleton:
+The `law` keyword is a Lean 4 *command* declared in
+`LegalKernel/DSL/LexLaw.lean` using `syntax` (for the
+parse tree) plus `elab_rules : command` (for the
+elaboration logic).  The choice of `elab_rules`
+rather than `macro_rules` is deliberate: the elaboration
+needs to write a JSON sidecar file at file-elaboration
+time, which requires `CommandElabM`'s IO access; pure
+`macro_rules` operates inside `MacroM`, which has no
+unconstrained IO surface.  Skeleton:
 
 ```lean
 namespace LegalKernel.DSL
@@ -1221,9 +1243,11 @@ syntax (name := signedByClause) "signed_by" term : lawClause
 
 -- ... (similar for the other 6 clause kinds)
 
-macro_rules
+elab_rules : command
   | `(law $name:ident ( $params:bracketedBinder,* )
       where $clauses:lawClause*) => do
+        -- Inside `CommandElabM`: full IO is available via
+        -- the `MonadLiftT IO CommandElabM` instance.
         -- Pass 1 elaboration (all 9 phases inlined for clarity;
         -- in the implementation this dispatches through helper
         -- functions per the §6.2 step list):
@@ -1231,13 +1255,21 @@ macro_rules
         validateRequiredClauses lawDecl
         validatePreGrammar lawDecl.preExpr
         validateImplCalculus lawDecl.implCalculus
-        let transitionDef ← buildTransitionDef lawDecl
-        let instanceDecls ← buildSatisfiesInstances lawDecl
-        let intentDocstring ← buildIntentDocstring lawDecl
-        writeCodegenInputIdempotent lawDecl
-        let registryCheck ← buildRegistryConsistencyCheck lawDecl
-        return mkNullNode #[transitionDef, instanceDecls, intentDocstring, registryCheck]
+        Lean.Elab.Command.elabCommand (← buildTransitionDef lawDecl)
+        for inst in (← buildSatisfiesInstances lawDecl) do
+          Lean.Elab.Command.elabCommand inst
+        attachIntentDocstring lawDecl
+        liftIO (writeCodegenInputIdempotent lawDecl)
+        liftIO (verifyRegistryConsistency lawDecl)
+        pure ()
 ```
+
+`CommandElabM` is the canonical home for Lean 4 commands
+that need to (a) emit multiple top-level declarations
+into the surrounding namespace, (b) perform side-effecting
+IO at elaboration time, and (c) emit diagnostics anchored
+at user source positions via `Lean.Elab.Command.elabCommand`
+plus `Lean.throwErrorAt`.  All three needs apply here.
 
 The exact grammar for `intentBody` admits a balanced-
 brace markdown block (Lean's `Parser.Term.bracketedBinder`
@@ -1951,16 +1983,28 @@ class FreezePreserving (S : List ResourceId) (t : Transition) : Prop where
       t.pre s →
       FrozenForResource r snap (step_impl s t)
 
-/-- `RegistryPreserving t` — `t`'s authority-layer effect is
-    the identity on `KeyRegistry`.  Trivial for every
-    `Action` constructor whose `compileTransition` is a
-    kernel-level no-op (i.e. all but `replaceKey` and
-    `registerIdentity`). -/
-class RegistryPreserving (t : Transition) : Prop where
-  registry_preserves :
-    ∀ (oldRegistry : KeyRegistry) (action : Action),
-      Action.compileTransition action = t →
-      applyActionToRegistry action oldRegistry = oldRegistry
+/-- `RegistryPreserving a` — Action `a`'s authority-layer
+    effect on `KeyRegistry` is the identity.  Trivial for
+    every `Action` constructor that does NOT mutate the
+    registry — i.e. all but `replaceKey` and `registerIdentity`.
+
+    **Why an `Action`-indexed typeclass, not a
+    `Transition`-indexed one.**  The authority-layer effect
+    `applyActionToRegistry` dispatches on `Action`, not on
+    `Transition`.  Multiple `Action` constructors compile to
+    the same `Transition` (e.g. `replaceKey`, `dispute`,
+    `disputeWithdraw`, `verdict`, `rollback`,
+    `registerIdentity`, `declareLocalPolicy`,
+    `revokeLocalPolicy`, and `freezeResource r` for any `r`
+    all compile to the kernel-level no-op `Laws.freezeResource
+    0` because the `freezeResource` law's body ignores its
+    `r` parameter — see CLAUDE.md "type-level design
+    properties").  Among those, `replaceKey` and
+    `registerIdentity` mutate the registry while the others
+    do not.  A typeclass on `Transition` could not
+    distinguish them; the `Action`-indexed form can. -/
+class RegistryPreserving (a : Action) : Prop where
+  preserves : ∀ (kr : KeyRegistry), applyActionToRegistry kr a = kr
 
 end LegalKernel
 ```
@@ -1982,26 +2026,51 @@ at scale; the typeclass interface is forward-compatible
 because callers see only the `Prop`-level conclusion, not
 the `S` representation.
 
+The asymmetry between `LocalTo` / `FreezePreserving` (on
+`Transition`) and `RegistryPreserving` (on `Action`)
+reflects the underlying architecture: kernel-impl effects
+are encoded in `Transition.apply_impl`, while authority-
+layer effects are encoded in `applyActionToRegistry`,
+which dispatches on `Action`.  The two effect surfaces do
+not share an indexing type, and the typeclasses cannot
+either.
+
 ### 10.3 Per-existing-law instances (LX.2)
 
-Workstream LX.2 lands typeclass instances for every
-existing kernel-built-in law:
+Workstream LX.2 / LX.3 land typeclass instances for every
+existing kernel-built-in law.  `LocalTo` and `FreezePreserving`
+instances are indexed by the law's *kernel-level transition*
+(the value of `Action.compileTransition action`);
+`RegistryPreserving` instances are indexed by the *action
+constructor* itself, since the authority-layer effect is
+`Action`-keyed (see §10.2's "why an `Action`-indexed
+typeclass" rationale).
 
-| Law                                              | `LocalTo`                            | `FreezePreserving`                   | `RegistryPreserving` |
-|--------------------------------------------------|--------------------------------------|--------------------------------------|----------------------|
-| `transfer r sender receiver amount`              | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}` (closure) | yes                  |
-| `mint r minter receiver amount`                  | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `burn r burner amount`                           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `freezeResource r`                               | `LocalTo {}` (touches no balance)     | `FreezePreserving [*]` (no balance change preserves any frozen invariant) | yes |
-| `replaceKey actor newKey`                        | `LocalTo {}`                          | `FreezePreserving [*]`                | **no**               |
-| `reward r minter receiver amount`                | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `distributeOthers r excluded amount`             | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `proportionalDilute r excluded totalReward`      | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `dispute / disputeWithdraw / verdict / rollback` | `LocalTo {}` (kernel-no-op)           | `FreezePreserving [*]`                | yes                  |
-| `registerIdentity actor newKey`                  | `LocalTo {}`                          | `FreezePreserving [*]`                | **no**               |
-| `deposit r recipient amount depositId`           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `withdraw r sender amount recipientL1`           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                  |
-| `declareLocalPolicy / revokeLocalPolicy`         | `LocalTo {}`                          | `FreezePreserving [*]`                | yes                  |
+| Law (action ctor)                                | `LocalTo` (on `Transition`)          | `FreezePreserving` (on `Transition`) | `RegistryPreserving` (on `Action`) |
+|--------------------------------------------------|--------------------------------------|--------------------------------------|------------------------------------|
+| `transfer r sender receiver amount`              | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}` (closure) | yes                                |
+| `mint r minter receiver amount`                  | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `burn r burner amount`                           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `freezeResource r`                               | `LocalTo {}` (touches no balance)     | `FreezePreserving [*]` (no balance change preserves any frozen invariant) | yes                                |
+| `replaceKey actor newKey`                        | `LocalTo {}`                          | `FreezePreserving [*]`                | **no** (mutates registry)          |
+| `reward r minter receiver amount`                | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `distributeOthers r excluded amount`             | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `proportionalDilute r excluded totalReward`      | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `dispute / disputeWithdraw / verdict / rollback` | `LocalTo {}` (kernel-no-op)           | `FreezePreserving [*]`                | yes                                |
+| `registerIdentity actor newKey`                  | `LocalTo {}`                          | `FreezePreserving [*]`                | **no** (mutates registry)          |
+| `deposit r recipient amount depositId`           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `withdraw r sender amount recipientL1`           | `LocalTo {r}`                         | `FreezePreserving {r' ≠ r}`           | yes                                |
+| `declareLocalPolicy / revokeLocalPolicy`         | `LocalTo {}`                          | `FreezePreserving [*]`                | yes                                |
+
+Note that the rows for `freezeResource`, `replaceKey`,
+`dispute / …`, `registerIdentity`, and `declareLocalPolicy /
+revokeLocalPolicy` all share the **same** `LocalTo` and
+`FreezePreserving` instances (since they all compile to a
+definitionally-equal `Laws.freezeResource _` Transition);
+the table lists them per-law for clarity, but the actual
+Lean instance landings are per-Transition (so one shared
+instance handles all of them at the kernel-impl level).
+Only the `RegistryPreserving` instances are per-Action.
 
 The `FreezePreserving {r' ≠ r}` notation is shorthand for
 "every resource other than the law's primary resource"; the
@@ -2299,7 +2368,7 @@ the synthesizer dispatch table:
 
 ```lean
 def dispatchSynthesizer (claim : PropertyClaim) (decl : LawDecl) :
-    Lean.MacroM (Except Diagnostic Lean.Term) := do
+    Lean.Elab.Command.CommandElabM (Except Diagnostic Lean.Term) := do
   match decl.proof_overrides.find? (fun (n, _) => n == claim.propertyName) with
   | some (_, tactic) =>
     -- Override fires; bypass synthesizer.
@@ -2352,9 +2421,15 @@ byte-identical Lean terms.  This is verified by:
 
 Determinism is structural: no synthesizer reads the
 filesystem, network, environment variables, or wall
-clock.  Lean's `MacroM` monad imposes IO restrictions
-(via `liftMetaM`) that prevent accidental
-non-determinism.
+clock.  Although the surrounding command elaboration
+runs in `CommandElabM` (which *does* admit IO via
+`liftIO`), the synthesizers themselves are pure
+`Except`-valued functions — IO is segregated to the
+explicit `liftIO (writeCodegenInputIdempotent ...)`
+call site.  This keeps the synthesizer's output a pure
+function of its inputs and makes the
+`lex_codegen_determinism_property` test trivially
+discharge.
 
 
 ## §11 The `events` block elaborator
@@ -3268,7 +3343,7 @@ In `LegalKernel/Conservation.lean`:
 
   * **`LocalTo (S : List ResourceId) (t : Transition) : Prop`** — class declaration.
   * **`FreezePreserving (S : List ResourceId) (t : Transition) : Prop`** — class declaration.
-  * **`RegistryPreserving (t : Transition) : Prop`** — class declaration.
+  * **`RegistryPreserving (a : Action) : Prop`** — class declaration (indexed by `Action`, not `Transition`; see §10.2 for rationale).
 
 In `LegalKernel/Laws/Transfer.lean`:
 
@@ -3277,16 +3352,34 @@ In `LegalKernel/Laws/Transfer.lean`:
   * **`transfer_freezePreserving`** : `FreezePreserving (manifestResources \ {r})
     (transfer r sender receiver amount)` for any deployment.  Built from
     `transfer_preserves_freeze`.
-  * **`transfer_registryPreserving`** : `RegistryPreserving (transfer r sender receiver amount)`.
-    Trivial: `transfer`'s `applyActionToRegistry` branch is `id`.
+  * **`transfer_registryPreserving`** : `RegistryPreserving (Action.transfer r sender receiver amount)`.
+    Trivial: `applyActionToRegistry kr (.transfer r sender receiver amount) = kr` by `rfl`
+    (the `transfer` arm falls into `applyActionToRegistry`'s catch-all `_ => kr` branch).
 
-(Analogous instances for `mint`, `burn`, `freezeResource`, `replaceKey`, `reward`,
+(Analogous instances for `mint`, `burn`, `freezeResource`, `reward`,
 `distributeOthers`, `proportionalDilute`, `dispute`, `disputeWithdraw`, `verdict`,
-`rollback`, `registerIdentity`, `deposit`, `withdraw`, `declareLocalPolicy`,
-`revokeLocalPolicy` — 17 laws × 3 typeclasses = 51 instances total in M1.  Negative
-witnesses for `replaceKey`'s and `registerIdentity`'s `RegistryPreserving` are
-*intentionally absent* — those laws mutate the registry; trying to derive an instance
-fails by design.)
+`rollback`, `deposit`, `withdraw`, `declareLocalPolicy`,
+`revokeLocalPolicy` — 15 of the 17 actions get `RegistryPreserving` instances.
+The two negative witnesses are deliberately absent: `replaceKey` and
+`registerIdentity` mutate the registry, so `applyActionToRegistry kr
+(.replaceKey actor newKey) = kr.insert actor newKey ≠ kr` (in general),
+and Lean cannot derive `RegistryPreserving` for them.
+
+Total instance count for LX.3:
+  - 17 `LocalTo` (on `Transition`; one per kernel-built-in action's compiled transition;
+    several actions share an instance because they compile to definitionally-equal
+    transitions — e.g. all 8 actions that compile to `Laws.freezeResource _` share a
+    single `LocalTo {}` instance).
+  - 17 `FreezePreserving` (same sharing pattern).
+  - 15 `RegistryPreserving` (on `Action`; one per non-mutating action constructor).
+  - **2 deliberate absences** of `RegistryPreserving` for `replaceKey` and
+    `registerIdentity`.
+
+Net: ~31 instance landings (after deduplicating shared
+`LocalTo` / `FreezePreserving` instances) plus 2 documented
+absences.  The plan's earlier "51 instances" estimate
+counted shared instances multiply; the corrected count
+reflects the per-Transition / per-Action separation.)
 
 ### 17.2 The `FreezePreservingLawSet` structure (LX.2)
 
@@ -3304,7 +3397,7 @@ with corollary
     ∀ s s', ReachableViaLaws lawSet.laws s s' → ∀ r ∈ S, ∀ snap, FrozenForResource r snap s →
     FrozenForResource r snap s'`.
 
-### 17.3 The cross-deployment-replay theorem (LX.18)
+### 17.3 The cross-deployment-replay theorem (LX.32)
 
 In `LegalKernel/DSL/LexDeployment.lean`:
 
@@ -3322,20 +3415,30 @@ satisfies item.  The instance signatures are stable:
 ```lean
 -- For a parameterised `law foo (p₁ : T₁) … (pₙ : Tₙ) where ...`:
 
+-- Transition-indexed properties (4 of 5):
 instance foo_isConservative
     {p₁ : T₁} … {pₙ : Tₙ} :
     IsConservative (foo_transition p₁ … pₙ) := ⟨…⟩
 
-instance foo_isMonotonic ... : IsMonotonic ... := ⟨…⟩
-instance foo_localTo ... : LocalTo {…} ... := ⟨…⟩
-instance foo_freezePreserving ... : FreezePreserving ... := ⟨…⟩
-instance foo_registryPreserving ... : RegistryPreserving ... := ⟨…⟩
+instance foo_isMonotonic ... : IsMonotonic (foo_transition p₁ … pₙ) := ⟨…⟩
+instance foo_localTo ... : LocalTo […] (foo_transition p₁ … pₙ) := ⟨…⟩
+instance foo_freezePreserving ... : FreezePreserving […] (foo_transition p₁ … pₙ) := ⟨…⟩
+
+-- Action-indexed property (1 of 5; only present if `registry_preserving` is claimed):
+instance foo_registryPreserving ... : RegistryPreserving (Action.foo p₁ … pₙ) := ⟨…⟩
 ```
 
 The instance bodies are produced by the synthesizers.
 The Prop-level conclusions, the type signatures, and the
 constructor argument lists are all stable across
 synthesizer revisions.
+
+Note the indexing-type asymmetry: `foo_isConservative`
+through `foo_freezePreserving` are indexed by the
+*compiled transition* (`foo_transition p…`); only
+`foo_registryPreserving` is indexed by the *action
+constructor* (`Action.foo p…`).  This matches the §10.2
+typeclass declarations exactly.
 
 ### 17.5 Lex-emitted regression tests
 
@@ -3432,10 +3535,10 @@ Lean 4's elaborator distinguishes three position kinds:
   * **`Lean.Syntax` source position.**  Always points at
     user-written source.  Captured via
     `Syntax.getRange?`.
-  * **Macro-expansion position.**  Points at the macro
+  * **Elaboration-site position.**  Points at the command
     invocation site (the user's `law` keyword).  Lean
-    propagates this via `MacroM`'s `withRef` /
-    `withFreshMacroScope`.
+    propagates this via `CommandElabM`'s `withRef` /
+    `withFreshMacroScope` combinators.
   * **Generated-term position.**  Points at the macro's
     generated term, which has *no* source location by
     default.  Lean substitutes the macro-invocation
@@ -3459,15 +3562,17 @@ structure Diagnostic where
   hints    : List String      -- remediation suggestions
   deriving Repr
 
-def Diagnostic.emit (d : Diagnostic) : Lean.MacroM Unit := do
-  let ref ← do
-    let info := SourceInfo.original d.source.startPos d.source.endPos
-    return Lean.Syntax.atom info ""
-  Lean.Macro.throwErrorAt ref d.formatMessage
+def Diagnostic.emit (d : Diagnostic) : Lean.Elab.Command.CommandElabM Unit := do
+  let ref : Lean.Syntax := Lean.Syntax.atom
+    (SourceInfo.original d.source.startPos d.source.endPos)
+    ""
+  Lean.throwErrorAt ref d.formatMessage
 ```
 
-The `Lean.Macro.throwErrorAt` invocation is what
-anchors the error at the user's surface syntax.  Lean's
+The `Lean.throwErrorAt` invocation is what anchors the
+error at the user's surface syntax (the function is
+available in any monad with a `MonadRef` instance,
+including `CommandElabM` and `MacroM`).  Lean's
 elaborator preserves the supplied `Syntax` reference's
 position when surfacing the error in `lake build`'s
 output.
@@ -3713,7 +3818,7 @@ Risk class:
 
   * `class LocalTo (S : List ResourceId) (t : Transition) : Prop` with single field `local_to`.
   * `class FreezePreserving (S : List ResourceId) (t : Transition) : Prop` with single field `preserves`.
-  * `class RegistryPreserving (t : Transition) : Prop` with single field `registry_preserves`.
+  * `class RegistryPreserving (a : Action) : Prop` with single field `preserves` (indexed by `Action`, not `Transition` — see §10.2 for rationale).
   * `structure FreezePreservingLawSet (S : List ResourceId)` with two fields (`laws`, `isFreezePreserving`).
   * `theorem freeze_preservation_via_law_set` — typeclass-driven non-decrease corollary mirroring `total_supply_global_via_law_set`.
 
@@ -3763,16 +3868,31 @@ with 5 cases:
 
 **Deliverables:**
 
-  * 17 `LocalTo` instances (one per law).
-  * 17 `FreezePreserving` instances.
-  * 15 `RegistryPreserving` instances (excluding
-    `replaceKey` / `registerIdentity`, which mutate the
-    registry by design).
-  * 49 instances total, plus the **deliberate absence** of
-    2 instances (negative witnesses for `RegistryPreserving`
-    on the two registry-mutating laws — the absence is
-    itself a typeclass-level witness via `inferInstance`
-    failing).
+  * `LocalTo` instances per *compiled transition*: distinct
+    transitions get distinct instances; actions sharing a
+    transition (e.g. the 9 actions that compile to
+    `Laws.freezeResource _`) share a single
+    `LocalTo {} (Laws.freezeResource _)` instance.  Net:
+    ~9 `LocalTo` instances landed (one per equivalence
+    class of compiled transitions).
+  * `FreezePreserving` instances on the same per-transition
+    basis: ~9 instances landed.
+  * 15 `RegistryPreserving` instances per *Action
+    constructor* (excluding `replaceKey` and
+    `registerIdentity`, which mutate the registry by
+    design).
+  * **2 deliberate absences** of `RegistryPreserving` for
+    `replaceKey` and `registerIdentity` — Lean's
+    `inferInstance` fails for these by construction (no
+    instance is provided), serving as the negative
+    witness.
+
+The shared-instance pattern (`LocalTo` / `FreezePreserving`
+on the kernel-level transition) is what allows the M2 strict-
+equivalence invariant to hold byte-for-byte: every action
+that compiles to `Laws.freezeResource _` participates in
+the same instance bag, matching the pre-LX hand-written
+form's structural shape.
 
 **Acceptance criteria:**
 
@@ -3907,12 +4027,15 @@ per-law instance landing.
     `action_index`, `intent`, `signed_by`,
     `authorized_by`, `pre`, `impl`, `satisfies`,
     `events`, `proof`).
-  * `parseLawDecl : Lean.Syntax → Lean.MacroM (Except Diagnostic LawDecl)` — converts the parsed `Syntax` to a `LawDecl` value, surfacing missing-clause errors (L001 / L002 / L009).
+  * `parseLawDecl : Lean.Syntax → Lean.Elab.Command.CommandElabM (Except Diagnostic LawDecl)` — converts the parsed `Syntax` to a `LawDecl` value, surfacing missing-clause errors (L001 / L002 / L009).
   * Source-position threading: every clause's syntax
     position is captured in the `LawDecl`.
-  * Placeholder `macro_rules` block emitting only a
-    `#check ()` ensuring the parsed law can be referenced
+  * Placeholder `elab_rules : command` block emitting only
+    a `pure ()` ensuring the parsed law can be referenced
     at the call site without polluting the namespace.
+    Subsequent WUs (LX.7 – LX.11) extend this elaborator
+    with grammar enforcement, calculus enforcement,
+    instance generation, and the codegen-input write.
 
 **Acceptance criteria:**
 
@@ -4127,8 +4250,12 @@ constructors.
     `<identifier>.json.tmp`, then rename to
     `<identifier>.json`.  Avoids partial-file states
     visible to a concurrent reader.
-  * Macro-level `IO.FS.writeFile` invocation via Lean's
-    `MacroM` IO surface (using `Lean.MacroM.lift`).
+  * Command-level `IO.FS.writeFile` invocation via
+    `liftIO` inside `CommandElabM` (the `law` keyword
+    is registered as a Lean 4 *command* via `elab_rules :
+    command`, which has full IO access; this is distinct
+    from the pure `MacroM` used by the Phase-4 `Law.mk`
+    macro, which has no IO surface).
 
 **Acceptance criteria:**
 
@@ -4956,7 +5083,7 @@ mode flip is the only irreversible step.
     keyword and every clause keyword (`identifier`,
     `deployment_id`, `version`, `resources`, `laws`,
     `authority`, `invariant_claims`, `attestor`).
-  * `parseDeployment : Lean.Syntax → Lean.MacroM (Except Diagnostic DeploymentDecl)` walker.
+  * `parseDeployment : Lean.Syntax → Lean.Elab.Command.CommandElabM (Except Diagnostic DeploymentDecl)` walker.
   * `DeploymentDecl` Lean structure mirroring §16.4's
     `Deployment` record + parsing-time intermediate
     fields (e.g. `manifestSourceBytes` for the eventual
@@ -6283,4 +6410,263 @@ status").  This file is informational; the canonical
 specification is `docs/law_language_design.md`, and the
 canonical specification of the kernel surface Lex compiles
 into is `docs/GENESIS_PLAN.md`.
+
+
+---
+
+## Appendix E — Audit-1 changelog
+
+This section records the corrections applied during the
+v1 plan's first deep audit (the audit-1 pass), so
+follow-up readers can distinguish the audited (current)
+form from the pre-audit form.  Per the project's "Names
+describe content, never provenance" rule (CLAUDE.md), the
+changes themselves carry no provenance markers in
+declaration names; this changelog is the authoritative
+provenance record.
+
+The audit-1 pass was performed against the post-LP
+state of the codebase.  It validated every codebase
+reference, every Lean-mechanism claim, and every
+typeclass formulation against the actually-shipped
+sources.  Three substantive defects were found and
+fixed; several smaller cross-reference and naming
+inconsistencies were resolved at the same time.
+
+### E.1 Substantive defects found and corrected
+
+#### E.1.1 `RegistryPreserving` indexed on `Transition` instead of `Action` (mathematical-correctness defect)
+
+**Pre-audit form:**
+
+```lean
+class RegistryPreserving (t : Transition) : Prop where
+  registry_preserves :
+    ∀ (oldRegistry : KeyRegistry) (action : Action),
+      Action.compileTransition action = t →
+      applyActionToRegistry action oldRegistry = oldRegistry
+```
+
+**Post-audit form (§10.2):**
+
+```lean
+class RegistryPreserving (a : Action) : Prop where
+  preserves : ∀ (kr : KeyRegistry), applyActionToRegistry kr a = kr
+```
+
+**Why the pre-audit form was broken.**  `applyActionToRegistry`
+dispatches on `Action`, not on `Transition`.  Multiple `Action`
+constructors compile to definitionally-equal `Transition`
+values: `replaceKey`, `dispute`, `disputeWithdraw`, `verdict`,
+`rollback`, `registerIdentity`, `declareLocalPolicy`,
+`revokeLocalPolicy`, and `freezeResource r` (for any `r`)
+all compile to `Laws.freezeResource _` (the `freezeResource`
+law's body ignores its `r` parameter, per CLAUDE.md "type-
+level design properties").  Among these, `replaceKey` and
+`registerIdentity` mutate the registry, while the others do
+not.  The pre-audit `RegistryPreserving` typeclass on
+`Transition` would therefore require a single Prop value
+to be simultaneously true (for `dispute` etc.) and false
+(for `replaceKey`) — a contradiction.
+
+**Why the post-audit form is correct.**  The typeclass is
+now indexed by `Action`, so each constructor's `applyActionToRegistry`
+arm is independently classified.  `RegistryPreserving (.transfer
+…)` reduces to `applyActionToRegistry kr (.transfer …) = kr`,
+which holds by `rfl` (the catch-all branch returns `kr`
+unchanged).  `RegistryPreserving (.replaceKey actor newKey)`
+reduces to `kr.insert actor newKey = kr`, which is false in
+general — Lean's `inferInstance` correctly fails, serving as
+the negative witness.
+
+**Surface impact:**
+  * §10.2 typeclass declaration updated.
+  * §10.3 instance table now distinguishes "on `Transition`"
+    (`LocalTo`, `FreezePreserving`) from "on `Action`"
+    (`RegistryPreserving`).
+  * §17.1 theorem inventory clarifies the per-Transition vs
+    per-Action instance count.
+  * §17.4 generated-instance shape updated to reflect the
+    indexing-type asymmetry.
+  * §19.6 LX.2 / LX.3 work-unit deliverables updated.
+
+The §10.2 docstring carries the full rationale so future
+readers don't need to consult this changelog.
+
+#### E.1.2 `applyActionToRegistry` argument-order error
+
+**Pre-audit form:**
+
+```lean
+applyActionToRegistry action oldRegistry = oldRegistry
+```
+
+**Post-audit form (matches actual signature
+`def applyActionToRegistry (kr : KeyRegistry) : Action →
+KeyRegistry`):**
+
+```lean
+applyActionToRegistry kr a = kr
+```
+
+**Why this matters.**  Even if the pre-audit
+`RegistryPreserving` formulation were not broken
+(see E.1.1), it would not type-check against the actual
+kernel signature: `applyActionToRegistry` takes
+`KeyRegistry` first, `Action` second.  The post-audit
+formulation matches the kernel signature exactly.
+
+**Surface impact:** §10.2 declaration updated; §17.1
+theorem statements updated.
+
+#### E.1.3 `MacroM` vs `CommandElabM` for IO at elaboration time
+
+**Pre-audit claim:**  The plan repeatedly claimed the
+`law` keyword would be implemented via `macro_rules`
+running in `MacroM`, with `IO.FS.writeFile` calls for the
+codegen-input JSON sidecar emitted "via Lean's `MacroM`
+IO surface (using `Lean.MacroM.lift`)".
+
+**Reality:**  Lean 4's `MacroM` is `ReaderT Macro.Context
+(EStateM Exception Macro.State)` — a pure syntactic
+transformer monad with no general IO access.  Writing a
+JSON file at elaboration time requires `CommandElabM`
+(the command-elaboration monad), which has full `IO`
+access via `MonadLiftT IO CommandElabM`.
+
+**Post-audit form:**  The plan now uses `elab_rules :
+command` (or equivalently `elab "law" … : command`)
+throughout.  The skeleton in §6.6 was rewritten;
+references in §6.2, §6.3, §10.13, §16.1, §18.2, §19.6
+LX.6 / LX.11 / LX.31 were updated.
+
+**Why this matters.**  A Lean 4 `command` is the natural
+home for a syntactic surface that needs to:
+  1. emit multiple top-level declarations (`def`,
+     `instance`, etc.) into the surrounding namespace —
+     `Lean.Elab.Command.elabCommand` handles this in
+     `CommandElabM`;
+  2. perform IO at elaboration time (write the codegen-
+     input file) — `liftIO` works in `CommandElabM`;
+  3. emit diagnostics anchored at user-source positions
+     — `Lean.throwErrorAt` works in any monad with a
+     `MonadRef` instance, including `CommandElabM`.
+
+The Phase-4 `Law.mk` macro (`LegalKernel/DSL/Law.lean`)
+correctly uses `macro_rules` because it has no IO needs
+— it only emits a single `Transition` term.  Lex's
+broader scope (multiple emitted decls + sidecar IO) makes
+the `command`-elaboration approach correct.
+
+**Surface impact:**  All `MacroM` references in the plan
+were updated to `CommandElabM` *except* in
+contrastive contexts (e.g. "the pure `MacroM` used by the
+Phase-4 macro" — which is correctly `MacroM`).  The
+Phase-4 macro's identity is unchanged.
+
+### E.2 Cross-reference inconsistencies resolved
+
+The work-unit decomposition from 23 to 38 WUs (in the
+v1-refinement commit) left a handful of stale WU-number
+references in `§2.1` (architectural overview),
+`§17.3` (theorem inventory), `§17.5` (regression-`example`
+spec), and the `_lex_inputs/` directory caption.  All have
+been updated to reference the post-decomposition WU IDs:
+
+| Pre-audit reference          | Post-audit reference              | Location           |
+|------------------------------|-----------------------------------|--------------------|
+| LX.18 (LexDeployment)         | LX.31–33                          | §2.1 module graph  |
+| LX.20 (LexDiff)              | LX.34–35                          | §2.1 module graph  |
+| LX.21 (LexFormat)            | LX.36                             | §2.1 module graph  |
+| LX.22 (Deployments/)         | LX.37                             | §2.1 module graph  |
+| LX.4 / LX.18 (umbrella)      | LX.6 / LX.12 / LX.31              | §2.1 module graph  |
+| LX.18 (cross-deployment-replay) | LX.32                          | §17.3 header       |
+| LX.7 (LexProperty)           | LX.12 (skeleton; LX.13–16 fill)   | §2.1 module graph  |
+| LX.8 (LexCodegen)            | LX.17 (skeleton; LX.18–20 fill)   | §2.1 module graph  |
+
+### E.3 Unchanged (verified accurate)
+
+The following claims were verified correct against the
+actual codebase and required no changes:
+
+  * `MonotonicLawSet` field name (`isMonotonic`) at
+    `Conservation.lean` line 615.
+  * `compileTransition` defined at `Authority/Action.lean`
+    line 286, with `replaceKey` mapping to
+    `Laws.freezeResource 0` at line 291.
+  * `Events/Extract.lean`'s `if oldV != newV` zero-delta
+    filter at lines 95, 128, 132 (the "lines 122-123"
+    citation in §6.6 was anchored on context, not exact
+    line; spot-checked OK).
+  * 17 `Action` constructors at indices 0..16 (counted
+    via `grep -E "^\s*\| (transfer|...|revokeLocalPolicy)"`).
+  * `kernelBuildTag` value `"canon-local-policies"` at
+    `LegalKernel.lean` line 219 (corresponds to the
+    plan's "Pre-LX" baseline).
+  * Test count `1228` post-LP (verified via CLAUDE.md's
+    Workstream-LP changelog entry).
+  * TCB allowlist (`tcb_allowlist.txt`) contains exactly
+    `Std.Data.TreeMap`; the plan's claim of zero allowlist
+    edits is correct.
+  * Phase-4 `Law.mk` macro uses `macro_rules` (verified
+    at `DSL/Law.lean` line 106) — the plan's deprecation
+    plan is consistent with the existing surface.
+  * `signingInput` signature
+    `(action : Action) (signer : ActorId) (nonce : Nonce)
+     (deploymentId : ByteArray) : SigningInput` matches
+    the post-Audit-3.3/3.4 form at
+    `Authority/SignedAction.lean` line 171.
+  * `applyActionToRegistry` matches `(kr : KeyRegistry) →
+    Action → KeyRegistry` at `Authority/SignedAction.lean`
+    line 465 (the argument-order issue in E.1.2 was a
+    plan-side error; the kernel signature itself is
+    unchanged).
+  * `LegalKernel/Authority/Nonce.lean`'s
+    `localPolicies := LocalPolicies.empty` default at
+    line 140 — the plan's claim that pre-LP fixtures
+    "keep elaborating" (§13.1 backwards-compat note) is
+    accurate.
+
+### E.4 Post-audit invariants
+
+The post-audit plan satisfies:
+
+  * **Mathematical correctness.**  Every typeclass
+    formulation type-checks against the actual kernel
+    signatures.  Every theorem statement names a real
+    kernel theorem or instance.
+  * **Lean 4 feasibility.**  Every Lean mechanism
+    referenced (`elab_rules`, `CommandElabM`,
+    `Lean.throwErrorAt`, `ParametricAttribute`,
+    `liftIO`, atomic-rename via `IO.FS.rename`, etc.)
+    exists in current Lean core (≥ 4.10) and is
+    discoverable via `#check` against a fresh
+    elaboration.
+  * **No provenance markers in declaration names.**  Per
+    CLAUDE.md, identifiers describe content; the audit-1
+    record lives only in this changelog and (where
+    applicable) in docstrings.
+  * **No new opaque or axiom declarations.**  The three
+    typeclasses are `Prop`-valued single-field records
+    using only standard Lean built-ins.
+  * **No expansion of the kernel TCB.**  The
+    `tcb_allowlist.txt` is unchanged; new modules under
+    `LegalKernel/DSL/`, `Tools/`, `Deployments/`, and
+    additive instance landings under `LegalKernel/Laws/`
+    are all non-TCB.
+  * **Strict-narrowing of admissibility preserved.**  The
+    `signed_by`-strengthening conjunct lives at the shim
+    layer (per §9.1), not at `AdmissibleWith`.  Existing
+    `replay_impossible`, `nonce_uniqueness`, and the
+    Workstream-LP / PA composition theorems re-elaborate
+    verbatim post-LX.
+  * **Cross-deployment-replay protection preserved.**
+    `signingInput`'s injectivity in `(action, signer,
+    nonce, deploymentId)` (Audit-3.3/3.4) is the
+    integration point Lex's `deployment_id` flows into;
+    the plan's §16.5 description is accurate.
+
+A v0.2 audit pass — once the M1 checkpoint (LX.1 – LX.21)
+lands — will produce an Appendix F with whatever further
+corrections the implementation surfaces.
 
