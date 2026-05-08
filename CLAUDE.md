@@ -207,19 +207,23 @@ lake build LegalKernel.LocalPolicy.LawClassification            # Workstream LP.
 lake build LegalKernel.DSL.LexLaw                               # Workstream LX.6/LX.11 lexlaw macro
 lake build LegalKernel.DSL.LexProperty                          # Workstream LX.12-15 synthesizer skeleton
 lake build LegalKernel.Laws.ExampleLex                          # Workstream LX.21 M1 acceptance Lex law
-lake build LegalKernel.Laws.Lex.Transfer                        # Workstream LX.22 transfer Lex re-expression
-lake build LegalKernel.Laws.Lex.Mint                            # Workstream LX.23 mint Lex re-expression
-lake build LegalKernel.Laws.Lex.Burn                            # Workstream LX.23 burn Lex re-expression
-lake build LegalKernel.Laws.Lex.Freeze                          # Workstream LX.24 freezeResource Lex re-expression
-lake build LegalKernel.Laws.Lex.Reward                          # Workstream LX.24 reward Lex re-expression
-lake build LegalKernel.Laws.Lex.ReplaceKey                      # Workstream LX.25 replaceKey Lex re-expression
-lake build LegalKernel.Laws.Lex.RegisterIdentity                # Workstream LX.25 registerIdentity Lex re-expression
-lake build LegalKernel.Laws.Lex.Deposit                         # Workstream LX.26 deposit Lex re-expression
-lake build LegalKernel.Laws.Lex.Withdraw                        # Workstream LX.26 withdraw Lex re-expression
-lake build LegalKernel.Laws.Lex.Dispute                         # Workstream LX.27 dispute pipeline Lex re-expressions
-lake build LegalKernel.Laws.Lex.LocalPolicy                     # Workstream LX.28 declareLocalPolicy/revokeLocalPolicy Lex re-expressions
-lake build LegalKernel.Laws.Lex.DistributeOthers                # Workstream LX.29 distributeOthers Lex re-expression
-lake build LegalKernel.Laws.Lex.ProportionalDilute              # Workstream LX.29 proportionalDilute Lex re-expression
+# LX-M2 audit-2 in-place migration: Lex declarations co-located with
+# hand-written law files (or at top-level for Lex-only laws).
+lake build LegalKernel.Laws.Transfer                            # LX.22 transfer (hand-written + Lex)
+lake build LegalKernel.Laws.Mint                                # LX.23 mint (hand-written + Lex)
+lake build LegalKernel.Laws.Burn                                # LX.23 burn (hand-written + Lex)
+lake build LegalKernel.Laws.Freeze                              # LX.24 freezeResource (hand-written + Lex)
+lake build LegalKernel.Laws.Reward                              # LX.24 reward (hand-written + Lex)
+lake build LegalKernel.Laws.Deposit                             # LX.26 deposit (hand-written + Lex)
+lake build LegalKernel.Laws.Withdraw                            # LX.26 withdraw (hand-written + Lex)
+lake build LegalKernel.Laws.DistributeOthers                    # LX.29 distributeOthers (hand-written + Lex)
+lake build LegalKernel.Laws.ProportionalDilute                  # LX.29 proportionalDilute (hand-written + Lex)
+lake build LegalKernel.Laws.ReplaceKey                          # LX.25 replaceKey (Lex-only; identity transition)
+lake build LegalKernel.Laws.RegisterIdentity                    # LX.25 registerIdentity (Lex-only)
+lake build LegalKernel.Laws.Dispute                             # LX.27 dispute pipeline laws (4 in one file; Lex-only)
+lake build LegalKernel.Laws.LocalPolicy                         # LX.28 LP laws (declare/revoke; Lex-only)
+lake build LegalKernel.DSL.LawSyntax                            # Phase-4 `law pre := ...; impl := ...` macro (split from DSL.Law)
+lake build LegalKernel.DSL.LexImplLowering                      # LX-M2 §6.2 calculus parser (opt-in)
 lake build LexCommon                          # Workstream LX.4 shared audit-binary utilities
 lake build canon                              # Phase-5 `canon` runtime CLI (D.2: withdrawal-proof subcommand)
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
@@ -2619,7 +2623,154 @@ here and in CLAUDE.md):**
     M2).  `proportionalDilute` exercises the dust-bound
     theorem (the `proof` override path at M3 will plug in here).
 
-**Workstream-LX M2 audit-1 hardening (this branch).**  A post-
+**Workstream-LX M2 audit-2 (deep migration; this branch).**  An
+audit-2 deep migration pass closes 7 of the 9 plan §19.4
+deviations identified in the audit-1 pass.  The remaining 2
+(synthesizer integration with canonical-shape instance emission;
+canonical-mode codegen with full-body regeneration of the 4
+target files) are documented as a multi-day follow-up effort
+beyond the scope of this branch.
+
+  * **Token-clash fix: `DSL/Law.lean` split into function
+    + macro modules.**  The Phase-4 `Law.mk` combinator is now
+    in `DSL/Law.lean` (function only, no parser-keyword
+    pollution).  The legacy `law pre := … ; impl := …` macro
+    is moved to `DSL/LawSyntax.lean` (where the global `pre`
+    and `impl` Lean tokens are activated).  Downstream modules
+    that just want `Law.mk` import `DSL/Law` (no token
+    activation); modules that want the macro form import
+    `DSL/LawSyntax` explicitly.  This unblocks the in-place
+    LX-M2 migration.
+
+  * **In-place migration: 9 hand-written law files now carry
+    Lex declarations alongside.**  After the token-clash fix,
+    the `lexlaw` macro can be invoked from inside hand-written
+    law files (`Laws/Transfer.lean`, `Laws/Mint.lean`, etc.)
+    without breaking the structure-field syntax of the
+    original `def transfer where pre := ...; apply_impl := ...`
+    block.  The `lexlaw` declaration is added INSIDE the same
+    file (after the hand-written form), and a regression
+    `example` confirms byte-equivalence at elaboration time.
+    This eliminates the LX-M2 audit-1 "twin-file structure"
+    deviation.
+
+  * **Top-level `Laws/<Law>.lean` files for Lex-only laws.**
+    The 8 kernel-identity laws (replaceKey, registerIdentity,
+    dispute pipeline {dispute, disputeWithdraw, verdict,
+    rollback}, localPolicy {declareLocalPolicy,
+    revokeLocalPolicy}) — which have no hand-written
+    counterpart, since their kernel-level transition is
+    `Laws.freezeResource 0` — now live at top-level
+    `Laws/<Name>.lean` in the `LegalKernel.Laws` namespace
+    (instead of the previously-used `LegalKernel.Laws.Lex`
+    sub-namespace).  The `Laws/Lex/` subdirectory is removed.
+    This matches the plan §19.4 file-layout spec.
+
+  * **§6.2 calculus parser implemented (`DSL/LexImplLowering.lean`).**
+    A new module exports the §6.2 impl-calculus DSL:
+        `lex_do flow r amt v from a to b`
+        `lex_do mint r amt v to b`
+        `lex_do burn r amt v from a`
+        `lex_do reward r amt v to b`
+        `lex_do freeze_resource r`
+        `lex_do register_key a as k`
+        `lex_do register_identity a as k`
+        `lex_do nop`
+    Each calculus statement lowers to a `State → State` Lean
+    term with the documented semantics (e.g., `flow` lowers to
+    the §4.11 self-transfer-safe sequencing pattern).  M2
+    ships single-statement form only; multi-statement
+    composition uses Lean-term-level function composition
+    (most kernel-built-in laws are single-statement).  The
+    module is opt-in (NOT in the umbrella) because the `to` /
+    `from` / `as` / `amt` keywords would conflict with
+    parameter names like `(to : ActorId)` if globally
+    activated.  Test suite `dsl-lex-impl-lowering` (11 cases)
+    verifies each calculus statement's lowering is byte-
+    equivalent to the hand-written form (per-shape `rfl`
+    checks + value-level post-state probes for `flow`, `mint`,
+    `burn`).
+
+  * **`Law.mk` `@[deprecated]` activated.**  The Phase-4
+    `Law.mk` combinator carries
+    `@[deprecated "Use Lex's `lexlaw` macro instead." (since
+    := "lex-m2-canonical")]`.  The deprecation message points
+    users at the canonical M2 surface (`lexlaw`).  The macro
+    itself emits `Law.mk` references internally, but the
+    emission is wrapped in `set_option linter.deprecated false
+    in def ...` so the strict-warnings CI gate is unaffected.
+    The `transferDSL` regression-test example in
+    `DSL/LawSyntax.lean` is similarly wrapped; the `law pre :=
+    ...; impl := ...` macro itself remains usable for
+    backward compat (any user invocation must wrap in
+    `set_option linter.deprecated false` or migrate to
+    `lexlaw`).
+
+  * **Test count after audit-2: 1447 (+11) across 83 suites
+    (+1).**  The new `dsl-lex-impl-lowering` suite adds 11
+    tests covering each calculus statement's lowering and
+    value-level equivalence with the hand-written `apply_impl`
+    fields of `Laws.transfer`, `Laws.mint`, `Laws.burn`.
+
+After audit-2 fixes:
+  * 1447 tests across 83 suites (was 1436 / 82 in audit-1;
+    +11 new tests in 1 new suite).
+  * 0 build warnings on a clean rebuild (the `Law.mk`
+    deprecation does NOT fire any warnings — suppressed at
+    every emission site via `set_option linter.deprecated
+    false`).
+  * 0 sorries in TCB.
+  * All 7 CI gates green.
+  * `Laws/Lex/` subdirectory removed; all 17 Lex re-expressions
+    co-located with their hand-written counterparts (or at
+    top level for the 8 Lex-only laws).
+  * `lex_codegen --check` passes byte-for-byte (the JSON
+    sidecars were auto-regenerated by the macro on the
+    in-place migration; their `source_location.file` now
+    points at the consolidated path).
+
+**Plan §19.4 deliverables remaining (deferred to follow-up):**
+
+  1. **Synthesizer integration with canonical-shape instance
+     emission.**  The plan §19.4 LX.23 / LX.24 / LX.29 specifies
+     that `lex_satisfies := [...]` claims drive the synthesizer
+     to emit canonical-shape instance bodies (e.g., `instance :
+     IsConservative <law> := <synthesized term>`).  The
+     synthesizer skeleton in `DSL/LexProperty.lean` returns
+     placeholder strings; wiring it into the macro to emit
+     real Lean instances requires a per-property-shape
+     instance-body emitter that walks the calculus form and
+     produces canonical-shape proofs.  Multi-day engineering
+     effort.
+
+  2. **Canonical-mode codegen with full-body regeneration.**
+     The plan §19.4 LX.30 specifies `lex_codegen --canonical`
+     should emit the entire body of `Authority/Action.lean`
+     (505 lines), `Encoding/Action.lean` (600+ lines),
+     `Events/Extract.lean`, and `Authority/SignedAction.lean`'s
+     registry-mutation portions from JSON sidecars — including
+     all docstrings, namespace declarations, projection
+     lemmas, smoke-test `example`s, and instance declarations.
+     Multi-day engineering effort.  After this lands, the
+     fences in those 4 files are removed and the bodies are
+     fully generated.
+
+  3. **Populated `lex_satisfies` per law per plan spec.**
+     The plan §19.4 LX.23 specifies `mint`'s `lex_satisfies`
+     should include `[monotonic, local, freeze_preserving,
+     nonce_advances, registry_preserving]`; `burn`'s should
+     omit `monotonic` and `conservative`.  Currently all 17
+     laws have `lex_satisfies := []`.  This is purely
+     metadata in M2 (no synthesizer integration yet); will be
+     populated in the same follow-up that wires (#1).
+
+  4. **Populated `lex_events` for dispute laws.**  The plan
+     §19.4 LX.27 specifies emit blocks for `dispute`,
+     `disputeWithdraw`, `verdict`.  Currently all 4 dispute
+     laws have `lex_events := []`.  Will be populated in the
+     follow-up alongside (#2)'s canonical-mode codegen.
+
+**Workstream-LX M2 audit-1 hardening (deep migration baseline).**  A post-
 landing deep audit identified one M2-acceptance gap and one
 test-coverage observation; both are closed in this branch.
 

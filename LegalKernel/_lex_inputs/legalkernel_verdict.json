@@ -1,7 +1,7 @@
 {"version": "1.0.0",
  "source_location":
  {"position": {"line": 83, "column": 0},
-  "file": "LegalKernel/Laws/Lex/Dispute.lean"},
+  "file": "LegalKernel/Laws/Dispute.lean"},
  "signed_by": {"name": "adjudicator", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],

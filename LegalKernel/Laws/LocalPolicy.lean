@@ -36,9 +36,9 @@ import LegalKernel.Laws.Freeze
 import LegalKernel.Authority.LocalPolicy
 import LegalKernel.DSL.LexLaw
 
-namespace LegalKernel.Laws.Lex
+namespace LegalKernel
+namespace Laws
 
-open LegalKernel
 open LegalKernel.Authority
 
 /-! ## `declareLocalPolicy` (frozen action index 15) -/
@@ -61,7 +61,7 @@ lexlaw legalkernel_declareLocalPolicy where
 /-- LX.28 byte-equivalence regression for `declareLocalPolicy`. -/
 example (policy : LocalPolicy) :
     legalkernel_declareLocalPolicy_transition policy =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
 /-! ## `revokeLocalPolicy` (frozen action index 16) -/
 
@@ -82,6 +82,7 @@ lexlaw legalkernel_revokeLocalPolicy where
 /-- LX.28 byte-equivalence regression for `revokeLocalPolicy`. -/
 example :
     legalkernel_revokeLocalPolicy_transition =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
-end LegalKernel.Laws.Lex
+end Laws
+end LegalKernel

@@ -182,35 +182,35 @@ import LegalKernel.Encoding.SignedAction
 import LegalKernel.Encoding.State
 import LegalKernel.Encoding.SignInput
 import LegalKernel.DSL.Law
+import LegalKernel.DSL.LawSyntax
 import LegalKernel.DSL.LexPreGrammar
 import LegalKernel.DSL.LexImplCalculus
 import LegalKernel.DSL.LexEvents
 import LegalKernel.DSL.LexShim
 import LegalKernel.DSL.LexLaw
 import LegalKernel.DSL.LexProperty
+-- LexImplLowering is intentionally NOT in the umbrella: it
+-- registers `to`, `from`, `as`, `amt`, `nop` as global Lean
+-- tokens (the §6.2 calculus keywords).  Files that consume the
+-- calculus-form `lex_do <stmt>` import `LegalKernel.DSL.LexImplLowering`
+-- explicitly; everywhere else (test suites, hand-written law
+-- files using common `(to : ActorId)` parameters) is unaffected.
 import LegalKernel.Laws.ExampleLex
 -- Workstream LX (M2): Lex re-expressions of the 17 kernel-built-in
--- laws.  Each `Lex/<Law>.lean` is a non-TCB "twin" of the
--- corresponding hand-written law file: it imports both the
--- hand-written law (for the byte-equivalence regression
--- `example`) and `DSL.LexLaw` (for the `lexlaw` macro).  The
--- twin file structure avoids the `pre`/`impl` token clash that
--- arose when threading `DSL.LexLaw` through the hand-written law
--- file directly (see plan §22 audit-2 deviation note and
--- `Laws/Lex/Transfer.lean`'s docstring).
-import LegalKernel.Laws.Lex.Transfer
-import LegalKernel.Laws.Lex.Mint
-import LegalKernel.Laws.Lex.Burn
-import LegalKernel.Laws.Lex.Freeze
-import LegalKernel.Laws.Lex.Reward
-import LegalKernel.Laws.Lex.ReplaceKey
-import LegalKernel.Laws.Lex.RegisterIdentity
-import LegalKernel.Laws.Lex.Deposit
-import LegalKernel.Laws.Lex.Withdraw
-import LegalKernel.Laws.Lex.Dispute
-import LegalKernel.Laws.Lex.LocalPolicy
-import LegalKernel.Laws.Lex.DistributeOthers
-import LegalKernel.Laws.Lex.ProportionalDilute
+-- laws.  After the LX-M2 in-place migration, the Lex re-expressions
+-- of the 9 hand-written laws (transfer, mint, burn, freezeResource,
+-- reward, deposit, withdraw, distributeOthers, proportionalDilute)
+-- live alongside their hand-written counterparts in the same files
+-- under `Laws/`.  The 8 kernel-identity laws (replaceKey,
+-- registerIdentity, dispute pipeline {dispute, disputeWithdraw,
+-- verdict, rollback}, localPolicy {declareLocalPolicy,
+-- revokeLocalPolicy}) are top-level Lex declarations in dedicated
+-- files under `Laws/` (no hand-written counterpart, since their
+-- kernel-level transition is `Laws.freezeResource 0`).
+import LegalKernel.Laws.ReplaceKey
+import LegalKernel.Laws.RegisterIdentity
+import LegalKernel.Laws.Dispute
+import LegalKernel.Laws.LocalPolicy
 import LegalKernel.Events.Types
 import LegalKernel.Events.Extract
 import LegalKernel.Runtime.Hash

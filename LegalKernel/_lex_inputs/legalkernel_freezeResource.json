@@ -1,20 +1,18 @@
 {"version": "1.0.0",
  "source_location":
- {"position": {"line": 39, "column": 0},
-  "file": "LegalKernel/Laws/Lex/Freeze.lean"},
+ {"position": {"line": 77, "column": 0},
+  "file": "LegalKernel/Laws/Freeze.lean"},
  "signed_by": {"name": "deployer", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],
  "registry_effect": {"kind": "none"},
  "proof_overrides": [],
  "pre_expr":
- "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription\n    (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n    (Term.hole \"_\")\n    \":\"\n    [`LegalKernel.State]\n    \")\")]\n  []\n  \"=>\"\n  `True))",
- "params":
- [{"type": "`LegalKernel.ResourceId", "name": "_r", "kind": "explicit"}],
+ "(Term.fun \"fun\" (Term.basicFun [(Term.hole \"_\")] [] \"=>\" `True))",
+ "params": [{"type": "`ResourceId", "name": "_r", "kind": "explicit"}],
  "intent":
- "Mark resource `_r` as frozen.  No-op at the kernel level (Genesis Plan §4.10); deployment commitment to never mutate `_r` after this transition.  Underscore prefix communicates the param's deliberate irrelevance to the kernel-level Transition.",
- "impl_block":
- "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous])) `s \":\" [`LegalKernel.State] \")\")]\n  []\n  \"=>\"\n  `s))",
+ "Mark resource `_r` as frozen.  No-op at the kernel level (Genesis Plan §4.10); deployment commitment to never mutate `_r` after this transition.",
+ "impl_block": "(Term.fun \"fun\" (Term.basicFun [`s] [] \"=>\" `s))",
  "identifier": "legalkernel.freezeResource",
  "events_block": "(«term[_]» \"[\" [] \"]\")",
  "authorized_by":

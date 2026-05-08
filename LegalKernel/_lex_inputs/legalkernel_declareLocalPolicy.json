@@ -1,7 +1,7 @@
 {"version": "1.0.0",
  "source_location":
  {"position": {"line": 47, "column": 0},
-  "file": "LegalKernel/Laws/Lex/LocalPolicy.lean"},
+  "file": "LegalKernel/Laws/LocalPolicy.lean"},
  "signed_by": {"name": "signer", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],

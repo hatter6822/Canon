@@ -1,23 +1,21 @@
 {"version": "1.0.0",
  "source_location":
  {"position": {"line": 40, "column": 0},
-  "file": "LegalKernel/Laws/Lex/RegisterIdentity.lean"},
+  "file": "LegalKernel/Laws/RegisterIdentity.lean"},
  "signed_by": {"name": "bridge", "kind": "actorRef"},
  "schema_version": 1,
  "satisfies": [],
  "registry_effect": {"kind": "registerIdentity"},
  "proof_overrides": [],
  "pre_expr":
- "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription\n    (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n    (Term.hole \"_\")\n    \":\"\n    [`LegalKernel.State]\n    \")\")]\n  []\n  \"=>\"\n  `True))",
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous])) (Term.hole \"_\") \":\" [`State] \")\")]\n  []\n  \"=>\"\n  `True))",
  "params":
- [{"type": "`LegalKernel.ActorId", "name": "_actor", "kind": "explicit"},
-  {"type": "`LegalKernel.Authority.PublicKey",
-   "name": "_pk",
-   "kind": "explicit"}],
+ [{"type": "`ActorId", "name": "_actor", "kind": "explicit"},
+  {"type": "`Authority.PublicKey", "name": "_pk", "kind": "explicit"}],
  "intent":
  "Insert a fresh `(actor, pk)` pair into the `KeyRegistry`, signed by the bridge actor.  Used for first-time identity registrations where `replaceKey` cannot apply (the old key doesn't exist yet).  Kernel-level effect is identity on `State`; the authority-level effect (registry insertion) happens in `apply_admissible` via `applyActionToRegistry`.",
  "impl_block":
- "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous])) `s \":\" [`LegalKernel.State] \")\")]\n  []\n  \"=>\"\n  `s))",
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous])) `s \":\" [`State] \")\")]\n  []\n  \"=>\"\n  `s))",
  "identifier": "legalkernel.registerIdentity",
  "events_block": "(«term[_]» \"[\" [] \"]\")",
  "authorized_by":

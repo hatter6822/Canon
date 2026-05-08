@@ -30,9 +30,9 @@ import LegalKernel.Laws.Freeze
 import LegalKernel.Disputes.Types
 import LegalKernel.DSL.LexLaw
 
-namespace LegalKernel.Laws.Lex
+namespace LegalKernel
+namespace Laws
 
-open LegalKernel
 open LegalKernel.Disputes
 
 /-! ## `dispute` (frozen action index 8) -/
@@ -54,7 +54,7 @@ lexlaw legalkernel_dispute where
 /-- LX.27 byte-equivalence regression for `dispute`. -/
 example (d : Disputes.Dispute) :
     legalkernel_dispute_transition d =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
 /-! ## `disputeWithdraw` (frozen action index 9) -/
 
@@ -75,7 +75,7 @@ lexlaw legalkernel_disputeWithdraw where
 /-- LX.27 byte-equivalence regression for `disputeWithdraw`. -/
 example (idx : Disputes.LogIndex) :
     legalkernel_disputeWithdraw_transition idx =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
 /-! ## `verdict` (frozen action index 10) -/
 
@@ -96,7 +96,7 @@ lexlaw legalkernel_verdict where
 /-- LX.27 byte-equivalence regression for `verdict`. -/
 example (v : Disputes.Verdict) :
     legalkernel_verdict_transition v =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
 /-! ## `rollback` (frozen action index 11) -/
 
@@ -117,6 +117,7 @@ lexlaw legalkernel_rollback where
 /-- LX.27 byte-equivalence regression for `rollback`. -/
 example (targetIdx : Disputes.LogIndex) :
     legalkernel_rollback_transition targetIdx =
-    LegalKernel.Laws.freezeResource 0 := rfl
+    Laws.freezeResource 0 := rfl
 
-end LegalKernel.Laws.Lex
+end Laws
+end LegalKernel

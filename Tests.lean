@@ -75,6 +75,7 @@ import LegalKernel.Test.Encoding.LocalPolicy
 import LegalKernel.Test.LocalPolicy.LawClassification
 import LegalKernel.Test.DSL.Law
 import LegalKernel.Test.DSL.LexLaw
+import LegalKernel.Test.DSL.LexImplLowering
 import LegalKernel.Test.DSL.LexProperty
 import LegalKernel.Test.Tools.LexCommon
 import LegalKernel.Test.Tools.LexCodegen
@@ -173,6 +174,8 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "dsl-law"            DSL.LawTests.tests)
   failed := failed + (← runAll "dsl-lex-law"
                                     DSL.LexLawTests.tests)
+  failed := failed + (← runAll "dsl-lex-impl-lowering"
+                                    DSL.LexImplLoweringTests.tests)
   failed := failed + (← runAll "dsl-lex-property"
                                     DSL.LexPropertyTests.tests)
   failed := failed + (← runAll "tools-lex-common"

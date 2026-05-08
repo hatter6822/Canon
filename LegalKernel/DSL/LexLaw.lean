@@ -79,6 +79,14 @@ import Tools.LexCommon
 import Lean.Elab.Command
 import Lean.Elab.Term
 import Lean.Data.Json
+-- LexImplLowering is NOT imported here.  It registers `to`,
+-- `from`, `as`, `amt` as global Lean tokens; importing it from
+-- `DSL/LexLaw` would activate those tokens in every downstream
+-- file that imports `DSL/LexLaw`, conflicting with parameter
+-- names like `(to : ActorId)` and `from`-bindings in hand-written
+-- law files (`mint_freezePreserving`, etc.).  Users who want the
+-- §6.2 calculus form for `lex_impl` import `DSL/LexImplLowering`
+-- explicitly; the calculus parser is opt-in per file.
 
 namespace LegalKernel.DSL
 
@@ -556,13 +564,22 @@ elab_rules : command
     -- LX-M2: emit a parameterised def when `lex_params` was supplied.
     -- The captured binders are spliced verbatim; an empty `lex_params`
     -- (or a missing clause) produces a parameterless def matching M1.
+    --
+    -- The emitted `def` is wrapped in `set_option linter.deprecated
+    -- false in` because `Law.mk` is `@[deprecated]` since LX-M2 (the
+    -- canonical surface is now `lexlaw`, but the macro itself still
+    -- references `Law.mk` as the underlying combinator).  Without
+    -- the option-suppression, every `lexlaw` invocation would emit
+    -- a deprecation warning, breaking the strict-warnings CI gate.
     let binders := acc.paramsClause.getD #[]
     let txnCmd ←
       if binders.isEmpty then
-        `(def $transitionIdent : LegalKernel.Transition :=
+        `(set_option linter.deprecated false in
+          def $transitionIdent : LegalKernel.Transition :=
             ($lawMkTerm $preTerm $implTerm))
       else
-        `(def $transitionIdent $binders:bracketedBinder* :
+        `(set_option linter.deprecated false in
+          def $transitionIdent $binders:bracketedBinder* :
             LegalKernel.Transition :=
             ($lawMkTerm $preTerm $implTerm))
     -- Track whether the elaborator already had errors so we can

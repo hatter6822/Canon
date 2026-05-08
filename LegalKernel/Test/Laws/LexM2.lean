@@ -12,10 +12,12 @@ regression suite.
 
 LX.30 acceptance: every kernel-built-in law's M2 Lex re-expression
 produces a `Transition` definitionally equal to the hand-written
-form.  The per-law `example` proofs in each `Laws/Lex/<Law>.lean`
-already enforce this at *elaboration time* (an `rfl` failure
-breaks the build); this suite re-asserts the invariants at *test
-time* with explicit value-level checks against fixture inputs.
+form.  After the LX-M2 in-place migration, the per-law `example`
+proofs live INSIDE each `Laws/<Law>.lean` file (alongside the
+hand-written form), enforced at *elaboration time* (an `rfl`
+failure breaks the build); this suite re-asserts the invariants
+at *test time* with explicit value-level checks against fixture
+inputs.
 
 Each test case picks a representative concrete fixture for the
 law's parameters and asserts:
@@ -43,7 +45,6 @@ import LegalKernel.Test.Framework
 open LegalKernel
 open LegalKernel.Test
 open LegalKernel.Laws
-open LegalKernel.Laws.Lex
 open LegalKernel.Authority
 open LegalKernel.Bridge
 open LegalKernel.Disputes
