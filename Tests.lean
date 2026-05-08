@@ -63,6 +63,7 @@ import LegalKernel.Test.Property
 import LegalKernel.Test.Properties.Encoding
 import LegalKernel.Test.Properties.Bridge
 import LegalKernel.Test.Properties.LocalPolicy
+import LegalKernel.Test.Properties.Lex
 import LegalKernel.Test.Encoding.CBOR
 import LegalKernel.Test.Encoding.Encodable
 import LegalKernel.Test.Encoding.Action
@@ -73,6 +74,12 @@ import LegalKernel.Test.Encoding.Disputes
 import LegalKernel.Test.Encoding.LocalPolicy
 import LegalKernel.Test.LocalPolicy.LawClassification
 import LegalKernel.Test.DSL.Law
+import LegalKernel.Test.DSL.LexLaw
+import LegalKernel.Test.DSL.LexProperty
+import LegalKernel.Test.Tools.LexCommon
+import LegalKernel.Test.Tools.LexCodegen
+import LegalKernel.Test.Tools.DiagnosticCoverage
+import LegalKernel.Test.Laws.ExampleLex
 import LegalKernel.Test.Events.Types
 import LegalKernel.Test.Events.Extract
 import LegalKernel.Test.Runtime.Hash
@@ -155,6 +162,18 @@ def main : IO UInt32 := do
   failed := failed + (← runAll "localpolicy-lawclass"
                                     LocalPolicy.LawClassificationTests.tests)
   failed := failed + (← runAll "dsl-law"            DSL.LawTests.tests)
+  failed := failed + (← runAll "dsl-lex-law"
+                                    DSL.LexLawTests.tests)
+  failed := failed + (← runAll "dsl-lex-property"
+                                    DSL.LexPropertyTests.tests)
+  failed := failed + (← runAll "tools-lex-common"
+                                    Tools.LexCommonTests.tests)
+  failed := failed + (← runAll "tools-lex-codegen"
+                                    Tools.LexCodegen.tests)
+  failed := failed + (← runAll "tools-lex-diagnostic-coverage"
+                                    Tools.DiagnosticCoverage.tests)
+  failed := failed + (← runAll "laws-example-lex"
+                                    Laws.ExampleLex.tests)
   failed := failed + (← runAll "events-types"      Events.TypesTests.tests)
   failed := failed + (← runAll "events-extract"    Events.ExtractTests.tests)
   failed := failed + (← runAll "runtime-hash"      Runtime.HashTests.tests)
@@ -185,6 +204,8 @@ def main : IO UInt32 := do
                                     Properties.Bridge.tests)
   failed := failed + (← runAll "property-localpolicy"
                                     Properties.LocalPolicy.tests)
+  failed := failed + (← runAll "property-lex"
+                                    Properties.Lex.tests)
   failed := failed + (← runAll "bridge-verify-adaptor"
                                     Bridge.VerifyAdaptorTests.tests)
   failed := failed + (← runAll "bridge-hash-adaptor"
