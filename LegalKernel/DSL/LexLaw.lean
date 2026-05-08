@@ -99,6 +99,19 @@ syntax (name := lexActionIndexClauseStx) "lex_action_index" num : lawClause
 syntax (name := lexIntentClauseStx) "lex_intent" str : lawClause
 syntax (name := lexSignedByClauseStx) "lex_signed_by" ident : lawClause
 syntax (name := lexAuthorizedByClauseStx) "lex_authorized_by" term : lawClause
+-- LX-M2: a `lex_params (binders)+` clause that takes one or more
+-- bracketedBinder syntax nodes (the standard Lean parameter syntax).
+-- Multiple bracketedBinders are admitted (e.g. `(r : ResourceId) (a : ActorId)`),
+-- and each binder may carry one or more identifiers
+-- (e.g. `(sender receiver : ActorId)`).  The macro splices the
+-- captured binders verbatim into the emitted `def
+-- <name>_transition <binders> : Transition := Law.mk pre impl`.
+--
+-- `bracketedBinder` is a Lean core parser alias (registered in
+-- `Lean/Parser/Term.lean` via `register_parser_alias`) so it's
+-- usable directly in custom-syntax declarations.
+syntax (name := lexParamsClauseStx)
+  "lex_params" bracketedBinder+ : lawClause
 syntax (name := lexPreClauseStx) "lex_pre" ":=" term : lawClause
 syntax (name := lexImplClauseStx) "lex_impl" ":=" term : lawClause
 syntax (name := lexSatisfiesClauseStx)
@@ -131,6 +144,10 @@ private structure ParsedLaw where
   signedByClause : Option Name := none
   /-- The `lex_authorized_by` clause's surface text. -/
   authorizedByClause : Option String := none
+  /-- The `lex_params` clause's captured `bracketedBinder` syntax
+      nodes (LX-M2).  Spliced verbatim into the emitted def
+      header.  None ↦ parameterless law (M1 backward compat). -/
+  paramsClause : Option (Array (TSyntax ``Lean.Parser.Term.bracketedBinder)) := none
   /-- The `lex_pre` clause's surface term + raw text capture. -/
   preClause : Option (Syntax × String) := none
   /-- The `lex_impl` clause's surface term + raw text capture. -/
@@ -227,6 +244,11 @@ private def parseClause (clause : Syntax) (acc : ParsedLaw) :
     return { acc with signedByClause := some a.getId }
   | `(lawClause| lex_authorized_by $e:term) =>
     return { acc with authorizedByClause := some (renderSyntax e) }
+  | `(lawClause| lex_params $binders:bracketedBinder*) =>
+    -- LX-M2: capture the parameter binders for splicing into the
+    -- emitted def header.  Empty array ↦ parameterless (treated
+    -- the same as no clause).
+    return { acc with paramsClause := some binders }
   | `(lawClause| lex_pre := $e:term) =>
     return { acc with preClause := some (e.raw, renderSyntax e) }
   | `(lawClause| lex_impl := $e:term) =>
@@ -280,6 +302,77 @@ private def validateRequiredClauses (parsed : ParsedLaw) (ref : Syntax) :
 
 /-! ## `LawDecl` construction for the JSON sidecar (LX.11) -/
 
+/-- Extract a list of `ParamSpec`s from a `bracketedBinder` syntax
+    node.  An explicit binder `(a b : T)` produces TWO `ParamSpec`s
+    (one per name).  Implicit / strict-implicit / instance binders
+    are recognised but recorded with their kind set accordingly.
+
+    Best-effort: shapes outside the recognised explicit/implicit
+    set (e.g. instance binders) yield an empty list — the JSON
+    sidecar's `params` field is informational, not load-bearing
+    for the kernel-level `rfl`-equivalence regression test (which
+    only depends on the binders being spliced into the def header
+    verbatim).
+
+    The walker matches by syntax-kind directly (the
+    `bracketedBinder` parser produces nodes with the kind
+    `Lean.Parser.Term.explicitBinder`,
+    `Lean.Parser.Term.implicitBinder`,
+    `Lean.Parser.Term.strictImplicitBinder`, or
+    `Lean.Parser.Term.instBinder`).  We extract the contained
+    identifier list and the type term from the structure of each
+    kind. -/
+private def paramSpecsFromBinder (binder : Syntax) :
+    List LegalKernel.Tools.Lex.ParamSpec := Id.run do
+  -- Explicit binder: ( <binderIdent>+ (: <type>)? (:= <default>)? )
+  -- Top-level args: [ "(", <idents>, <typeAscription>, <default>, ")" ]
+  if binder.isOfKind ``Lean.Parser.Term.explicitBinder then
+    let idsArr := (binder.getArg 1).getArgs
+    -- The type ascription is at index 2: it's either `null` (no type)
+    -- or `(": " term)`.  We extract the term if present.
+    let tyStxNode := binder.getArg 2
+    let typeStr :=
+      if tyStxNode.getNumArgs ≥ 2 then renderSyntax (tyStxNode.getArg 1)
+      else ""
+    let kind : LegalKernel.Tools.Lex.BinderKind := .explicit
+    return idsArr.toList.filterMap (fun idStx =>
+      if idStx.isIdent then
+        some { name := toString idStx.getId, type := typeStr, kind }
+      else none)
+  -- Implicit binder: { <binderIdent>+ : <type> }
+  else if binder.isOfKind ``Lean.Parser.Term.implicitBinder then
+    let idsArr := (binder.getArg 1).getArgs
+    let tyStxNode := binder.getArg 2
+    let typeStr :=
+      if tyStxNode.getNumArgs ≥ 2 then renderSyntax (tyStxNode.getArg 1)
+      else ""
+    let kind : LegalKernel.Tools.Lex.BinderKind := .implicit
+    return idsArr.toList.filterMap (fun idStx =>
+      if idStx.isIdent then
+        some { name := toString idStx.getId, type := typeStr, kind }
+      else none)
+  -- Strict-implicit binder: ⦃ <binderIdent>+ : <type> ⦄
+  else if binder.isOfKind ``Lean.Parser.Term.strictImplicitBinder then
+    let idsArr := (binder.getArg 1).getArgs
+    let tyStxNode := binder.getArg 2
+    let typeStr :=
+      if tyStxNode.getNumArgs ≥ 2 then renderSyntax (tyStxNode.getArg 1)
+      else ""
+    let kind : LegalKernel.Tools.Lex.BinderKind := .strictImplicit
+    return idsArr.toList.filterMap (fun idStx =>
+      if idStx.isIdent then
+        some { name := toString idStx.getId, type := typeStr, kind }
+      else none)
+  else
+    return []
+
+/-- Walk every captured `bracketedBinder` and produce the flattened
+    list of `ParamSpec`s for the JSON sidecar. -/
+private def paramSpecsFromBinders
+    (binders : Array (TSyntax ``Lean.Parser.Term.bracketedBinder)) :
+    List LegalKernel.Tools.Lex.ParamSpec :=
+  binders.toList.flatMap (fun b => paramSpecsFromBinder b.raw)
+
 /-- Build a `Tools.Lex.LawDecl` value from a fully-validated
     `ParsedLaw`.  The result is what gets serialised into the
     codegen-input JSON file. -/
@@ -303,13 +396,17 @@ private def buildLawDecl (parsed : ParsedLaw) :
     satisfiesNames.map (fun n =>
       ({ name := n, args := [] } : LegalKernel.Tools.Lex.PropertyClaim))
   let regEff : LegalKernel.Tools.Lex.RegistryEffectKind := .none_
+  let params : List LegalKernel.Tools.Lex.ParamSpec :=
+    match parsed.paramsClause with
+    | some bs => paramSpecsFromBinders bs
+    | none    => []
   ({
     schemaVersion := 1,
     identifier := idStr,
     version := verStr,
     actionIndex := actIdx,
     intent := intentStr,
-    params := [],
+    params := params,
     signedBy := { name := signedByName },
     authorizedBy := { expr := authorizedByExpr },
     preExpr := preText,
@@ -420,9 +517,18 @@ elab_rules : command
     let lawMkTerm : Lean.Term :=
       ⟨mkIdent (Name.mkSimple "LegalKernel" ++ Name.mkSimple "DSL" ++
                 Name.mkSimple "Law" ++ Name.mkSimple "mk")⟩
-    let txnCmd ← `(
-      def $transitionIdent :=
-        ($lawMkTerm $preTerm $implTerm : LegalKernel.Transition))
+    -- LX-M2: emit a parameterised def when `lex_params` was supplied.
+    -- The captured binders are spliced verbatim; an empty `lex_params`
+    -- (or a missing clause) produces a parameterless def matching M1.
+    let binders := acc.paramsClause.getD #[]
+    let txnCmd ←
+      if binders.isEmpty then
+        `(def $transitionIdent : LegalKernel.Transition :=
+            ($lawMkTerm $preTerm $implTerm))
+      else
+        `(def $transitionIdent $binders:bracketedBinder* :
+            LegalKernel.Transition :=
+            ($lawMkTerm $preTerm $implTerm))
     -- Track whether the elaborator already had errors so we can
     -- detect new ones added by `elabCommand txnCmd`.  Use
     -- `getThe Lean.Elab.Command.State` to read the elaborator's

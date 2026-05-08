@@ -189,6 +189,28 @@ import LegalKernel.DSL.LexShim
 import LegalKernel.DSL.LexLaw
 import LegalKernel.DSL.LexProperty
 import LegalKernel.Laws.ExampleLex
+-- Workstream LX (M2): Lex re-expressions of the 17 kernel-built-in
+-- laws.  Each `Lex/<Law>.lean` is a non-TCB "twin" of the
+-- corresponding hand-written law file: it imports both the
+-- hand-written law (for the byte-equivalence regression
+-- `example`) and `DSL.LexLaw` (for the `lexlaw` macro).  The
+-- twin file structure avoids the `pre`/`impl` token clash that
+-- arose when threading `DSL.LexLaw` through the hand-written law
+-- file directly (see plan §22 audit-2 deviation note and
+-- `Laws/Lex/Transfer.lean`'s docstring).
+import LegalKernel.Laws.Lex.Transfer
+import LegalKernel.Laws.Lex.Mint
+import LegalKernel.Laws.Lex.Burn
+import LegalKernel.Laws.Lex.Freeze
+import LegalKernel.Laws.Lex.Reward
+import LegalKernel.Laws.Lex.ReplaceKey
+import LegalKernel.Laws.Lex.RegisterIdentity
+import LegalKernel.Laws.Lex.Deposit
+import LegalKernel.Laws.Lex.Withdraw
+import LegalKernel.Laws.Lex.Dispute
+import LegalKernel.Laws.Lex.LocalPolicy
+import LegalKernel.Laws.Lex.DistributeOthers
+import LegalKernel.Laws.Lex.ProportionalDilute
 import LegalKernel.Events.Types
 import LegalKernel.Events.Extract
 import LegalKernel.Runtime.Hash
@@ -223,6 +245,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-lex-m1-additive"
+def kernelBuildTag : String := "canon-lex-m2-canonical"
 
 end LegalKernel

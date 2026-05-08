@@ -1,0 +1,26 @@
+{"version": "1.0.0",
+ "source_location":
+ {"position": {"line": 41, "column": 0},
+  "file": "LegalKernel/Laws/Lex/Burn.lean"},
+ "signed_by": {"name": "fromActor", "kind": "actorRef"},
+ "schema_version": 1,
+ "satisfies": [],
+ "registry_effect": {"kind": "none"},
+ "proof_overrides": [],
+ "pre_expr":
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [`s]\n  []\n  \"=>\"\n  («term_∧_»\n   («term_≥_» (Term.app `LegalKernel.getBalance [`s `r `fromActor]) \"≥\" `amount)\n   \"∧\"\n   («term_>_» `amount \">\" (num \"0\")))))",
+ "params":
+ [{"type": "`LegalKernel.ResourceId", "name": "r", "kind": "explicit"},
+  {"type": "`LegalKernel.ActorId", "name": "fromActor", "kind": "explicit"},
+  {"type": "`LegalKernel.Amount", "name": "amount", "kind": "explicit"}],
+ "intent":
+ "Burn `amount` units of resource `r` from actor `fromActor`'s balance.  Non-conservative AND non-monotonic by design (Genesis Plan §5.6 + Phase-4 prelude `burn_not_monotonic`).",
+ "impl_block":
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [`s]\n  []\n  \"=>\"\n  (Term.app\n   `LegalKernel.setBalance\n   [`s\n    `r\n    `fromActor\n    (Term.paren\n     (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n     («term_-_» (Term.app `LegalKernel.getBalance [`s `r `fromActor]) \"-\" `amount)\n     \")\")])))",
+ "identifier": "legalkernel.burn",
+ "events_block": "(«term[_]» \"[\" [] \"]\")",
+ "authorized_by":
+ {"kind": "policyRef",
+  "expr":
+  "(Term.paren\n (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n (Term.fun \"fun\" (Term.basicFun [(Term.hole \"_\") (Term.hole \"_\")] [] \"=>\" `True))\n \")\")"},
+ "action_index": 2}

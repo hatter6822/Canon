@@ -1,0 +1,27 @@
+{"version": "1.0.0",
+ "source_location":
+ {"position": {"line": 49, "column": 0},
+  "file": "LegalKernel/Laws/Lex/ReplaceKey.lean"},
+ "signed_by": {"name": "actor", "kind": "actorRef"},
+ "schema_version": 1,
+ "satisfies": [],
+ "registry_effect": {"kind": "none"},
+ "proof_overrides": [],
+ "pre_expr":
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription\n    (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n    (Term.hole \"_\")\n    \":\"\n    [`LegalKernel.State]\n    \")\")]\n  []\n  \"=>\"\n  `True))",
+ "params":
+ [{"type": "`LegalKernel.ActorId", "name": "_actor", "kind": "explicit"},
+  {"type": "`LegalKernel.Authority.PublicKey",
+   "name": "_newKey",
+   "kind": "explicit"}],
+ "intent":
+ "Re-point `actor`'s identity to `newKey` in the `KeyRegistry`, signed by the *old* key.  Kernel-level effect is identity on `State`; the authority-level effect (registry update) happens in `apply_admissible` via `applyActionToRegistry` (Phase 3 / WU 3.10).",
+ "impl_block":
+ "(Term.fun\n \"fun\"\n (Term.basicFun\n  [(Term.typeAscription (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous])) `s \":\" [`LegalKernel.State] \")\")]\n  []\n  \"=>\"\n  `s))",
+ "identifier": "legalkernel.replaceKey",
+ "events_block": "(«term[_]» \"[\" [] \"]\")",
+ "authorized_by":
+ {"kind": "policyRef",
+  "expr":
+  "(Term.paren\n (Term.hygienicLParen \"(\" (hygieneInfo `[anonymous]))\n (Term.fun \"fun\" (Term.basicFun [(Term.hole \"_\") (Term.hole \"_\")] [] \"=>\" `True))\n \")\")"},
+ "action_index": 4}

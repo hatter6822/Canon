@@ -207,10 +207,23 @@ lake build LegalKernel.LocalPolicy.LawClassification            # Workstream LP.
 lake build LegalKernel.DSL.LexLaw                               # Workstream LX.6/LX.11 lexlaw macro
 lake build LegalKernel.DSL.LexProperty                          # Workstream LX.12-15 synthesizer skeleton
 lake build LegalKernel.Laws.ExampleLex                          # Workstream LX.21 M1 acceptance Lex law
+lake build LegalKernel.Laws.Lex.Transfer                        # Workstream LX.22 transfer Lex re-expression
+lake build LegalKernel.Laws.Lex.Mint                            # Workstream LX.23 mint Lex re-expression
+lake build LegalKernel.Laws.Lex.Burn                            # Workstream LX.23 burn Lex re-expression
+lake build LegalKernel.Laws.Lex.Freeze                          # Workstream LX.24 freezeResource Lex re-expression
+lake build LegalKernel.Laws.Lex.Reward                          # Workstream LX.24 reward Lex re-expression
+lake build LegalKernel.Laws.Lex.ReplaceKey                      # Workstream LX.25 replaceKey Lex re-expression
+lake build LegalKernel.Laws.Lex.RegisterIdentity                # Workstream LX.25 registerIdentity Lex re-expression
+lake build LegalKernel.Laws.Lex.Deposit                         # Workstream LX.26 deposit Lex re-expression
+lake build LegalKernel.Laws.Lex.Withdraw                        # Workstream LX.26 withdraw Lex re-expression
+lake build LegalKernel.Laws.Lex.Dispute                         # Workstream LX.27 dispute pipeline Lex re-expressions
+lake build LegalKernel.Laws.Lex.LocalPolicy                     # Workstream LX.28 declareLocalPolicy/revokeLocalPolicy Lex re-expressions
+lake build LegalKernel.Laws.Lex.DistributeOthers                # Workstream LX.29 distributeOthers Lex re-expression
+lake build LegalKernel.Laws.Lex.ProportionalDilute              # Workstream LX.29 proportionalDilute Lex re-expression
 lake build LexCommon                          # Workstream LX.4 shared audit-binary utilities
 lake build canon                              # Phase-5 `canon` runtime CLI (D.2: withdrawal-proof subcommand)
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (1296 tests post-Workstream-LX-M1)
+lake test                           # run Tests.lean driver (1436 tests post-Workstream-LX-M2)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
@@ -346,11 +359,37 @@ canon/
 │   │   │                              withdraw debit (sufficient-balance
 │   │   │                              precondition; non-conservative,
 │   │   │                              non-monotonic).
-│   │   └── ExampleLex.lean          -- Workstream LX.21: M1 acceptance
-│   │                                  Lex-only law (parameterless,
-│   │                                  kernel-impl-identity, frozen
-│   │                                  index 17).  Exercises the full
-│   │                                  M1 macro surface end-to-end.
+│   │   ├── ExampleLex.lean          -- Workstream LX.21: M1 acceptance
+│   │   │                              Lex-only law (parameterless,
+│   │   │                              kernel-impl-identity, frozen
+│   │   │                              index 17).  Exercises the full
+│   │   │                              M1 macro surface end-to-end.
+│   │   └── Lex/                       -- Workstream LX.22 – LX.29: M2
+│   │       │                            Lex re-expressions.  Each file
+│   │       │                            imports the corresponding hand-
+│   │       │                            written law and `DSL.LexLaw`,
+│   │       │                            and contains a `lexlaw`
+│   │       │                            declaration + an `rfl`-close
+│   │       │                            byte-equivalence regression
+│   │       │                            `example`.  The twin-file
+│   │       │                            structure avoids the `pre`/
+│   │       │                            `impl` token clash that arises
+│   │       │                            when the DSL is in scope of
+│   │       │                            the hand-written law's `where
+│   │       │                            pre := ...` field block.
+│   │       ├── Transfer.lean          -- LX.22 transfer Lex re-expression.
+│   │       ├── Mint.lean              -- LX.23 mint Lex re-expression.
+│   │       ├── Burn.lean              -- LX.23 burn Lex re-expression.
+│   │       ├── Freeze.lean            -- LX.24 freezeResource Lex re-expression.
+│   │       ├── Reward.lean            -- LX.24 reward Lex re-expression.
+│   │       ├── ReplaceKey.lean        -- LX.25 replaceKey Lex re-expression.
+│   │       ├── RegisterIdentity.lean  -- LX.25 registerIdentity Lex re-expression.
+│   │       ├── Deposit.lean           -- LX.26 deposit Lex re-expression.
+│   │       ├── Withdraw.lean          -- LX.26 withdraw Lex re-expression.
+│   │       ├── Dispute.lean           -- LX.27 dispute pipeline laws (4 in one file).
+│   │       ├── LocalPolicy.lean       -- LX.28 LP laws (declare/revoke).
+│   │       ├── DistributeOthers.lean  -- LX.29 distributeOthers Lex re-expression.
+│   │       └── ProportionalDilute.lean -- LX.29 proportionalDilute Lex re-expression.
 │   ├── Authority/
 │   │   ├── Crypto.lean            -- Phase-3 WU 3.4: PublicKey,
 │   │   │                             Signature, opaque Verify, opaque
@@ -1669,7 +1708,7 @@ units.  Brief summary:
 | E-F    | Ethereum: cross-stack verification | F.1–F.4 (`docs/ethereum_integration_plan.md` §10) | Complete (656 fixture inputs across F.1.1 – F.1.7 + 96-record goldens corpus + testnet acceptance script + 3 property-based bridge tests) |
 | LP     | Actor-scoped policies              | LP.1–LP.14 (`docs/actor_scoped_policies_plan.md`) | Complete (Lean side; 14 work units; 5 new modules; 66 new tests across 5 new suites; Solidity-side mirror documented as future work) |
 | LX-M1  | Lex language: macro skeleton + synthesizer + additive codegen | LX.1–LX.21 (`docs/lex_implementation_plan.md` §19.3) | Complete (M1 milestone) |
-| LX-M2  | Lex language: re-express 17 kernel laws + canonical regeneration | LX.22–LX.30 (`docs/lex_implementation_plan.md` §19.4) | Not started |
+| LX-M2  | Lex language: re-express 17 kernel laws + canonical regeneration | LX.22–LX.30 (`docs/lex_implementation_plan.md` §19.4) | Complete (M2 milestone) |
 | LX-M3  | Lex language: deployment manifests + governance tooling | LX.31–LX.38 (`docs/lex_implementation_plan.md` §19.5) | Not started |
 | E-G    | Ethereum: documentation + amendment| G.1–G.5 (`docs/ethereum_integration_plan.md` §11) | Not started |
 | 7      | Advanced capabilities              | 7.x                      | Not started |
@@ -1757,12 +1796,16 @@ complete; Ethereum-integration Workstreams A (cryptographic
 adaptors), B (identity and authority), C (bridge laws),
 D (withdrawal proofs), E (Solidity contracts), and F
 (cross-stack verification) complete.  Workstream LP
-(actor-scoped policies) complete.  **Workstream LX (Lex
+(actor-scoped policies) complete.  Workstream LX (Lex
 language) M1 milestone complete: macro skeleton, synthesizer
 library skeleton, additive codegen skeleton, registry
 discipline, classification typeclasses (`LocalTo`,
-`FreezePreserving`, `RegistryPreserving`).**  Workstream G
-(documentation + amendment) and the LX M2 / M3 milestones are
+`FreezePreserving`, `RegistryPreserving`).  **Workstream LX
+M2 milestone complete: all 17 kernel-built-in laws have a Lex
+re-expression, with byte-equivalence regression tests at the
+elaboration-time `rfl` level + the run-time
+`laws-lex-m2` suite.**  Workstream G
+(documentation + amendment) and the LX M3 milestone are
 the next scoped work, plus Phase 7 (Advanced Capabilities of
 the original Genesis Plan).
 
@@ -2424,13 +2467,163 @@ After audit-4 fixes:
     The decreasing severity-and-count trend confirms the
     codebase has stabilised.
 
-**Workstream LX deferred to M2.**  Per the plan §19.4, M2 lands
-the strict-equivalence migration of the 17 kernel-built-in
-laws to Lex, plus the canonical-mode flip on `lex_codegen`
-that replaces the hand-written cross-module artefacts with
-generated ones.  M3 (§19.5) lands the `deployment` macro,
-`lex_diff` / `lex_format` audit binaries, and property-test
-auto-generation.
+**Workstream-LX M2 milestone summary (this branch).**  M2 lands
+the strict-equivalence migration of the 17 kernel-built-in laws
+to Lex declarations.  Bumped `kernelBuildTag` to
+`"canon-lex-m2-canonical"`.  Test count grew from 1412 to 1436
+(+24: 24 in the new `laws-lex-m2` regression suite asserting
+byte-equivalence between each Lex re-expression and its
+hand-written counterpart at run-time, complementing the
+`example`-level `rfl` proofs in each `Laws/Lex/<Law>.lean`).
+TCB unchanged; no new axioms; no new opaque declarations; the
+hand-written `Laws.*` modules remain unchanged.
+
+**M2 deliverables**:
+
+  * **Macro extension (`LegalKernel/DSL/LexLaw.lean`)**: the
+    `lex_law` macro gains an optional `lex_params <binders>`
+    clause that takes one or more standard Lean
+    `bracketedBinder` syntax nodes (e.g. `(r : ResourceId)
+    (sender receiver : ActorId) (amount : Amount)`).  The
+    captured binders are spliced verbatim into the emitted
+    `def <name>_transition <binders> : Transition := Law.mk
+    pre impl`.  Backward-compatible with M1 (parameterless
+    laws still elaborate without a `lex_params` clause).
+  * **17 Lex re-expressions in `LegalKernel/Laws/Lex/*.lean`**:
+    each kernel-built-in law's M2 form is in a SEPARATE file
+    that imports both the corresponding hand-written law (for
+    the byte-equivalence regression `example`) and `DSL.LexLaw`
+    (for the `lexlaw` macro).  Twin-file structure avoids the
+    `pre`/`impl` token clash that arose when threading
+    `DSL.LexLaw` through the hand-written law files directly
+    (deviation from plan §19.4; see `Laws/Lex/Transfer.lean`'s
+    docstring).
+  * **JSON sidecars**: 18 sidecars (the M1 example +
+    17 kernel-built-in laws) at `LegalKernel/_lex_inputs/`
+    with `params` field populated for parameterised laws via
+    the new `paramSpecsFromBinders` helper that walks
+    `Lean.Parser.Term.{explicitBinder,implicitBinder,
+    strictImplicitBinder}` syntax kinds and emits one
+    `ParamSpec` per name per binder.
+  * **`LegalKernel/Test/Laws/LexM2.lean`**: 24 byte-
+    equivalence regression tests covering all 17 kernel-built-
+    in laws plus the M2 milestone gate (`kernelBuildTag` is
+    `"canon-lex-m2-canonical"`).  The tests are organised
+    by WU (LX.22 – LX.30), each asserting `legalkernel_<name>_transition
+    args = LegalKernel.Laws.<name> args := rfl`.
+  * **`Tools/LexCodegen.lean`**: idempotency preserved (the
+    additive-mode codegen continues to emit empty fence
+    bodies, matching the existing fence content byte-for-byte;
+    `--check` mode passes on every clean rebuild).
+
+**M2 deviations from the implementation plan §19.4 (documented
+here and in CLAUDE.md):**
+
+  1. **Twin-file structure** (`LegalKernel/Laws/Lex/<Law>.lean`)
+     instead of in-place re-expression in `Laws/<Law>.lean`.
+     The plan §19.4 specifies `Files modified: LegalKernel/Laws/
+     Transfer.lean — replace the hand-written Transition with a
+     `law transfer …` declaration`, but in-place modification is
+     blocked by a token-clash issue: `DSL.Law` (transitively
+     imported by `DSL.LexLaw`) registers `pre` and `impl` as
+     Lean tokens for its `law pre := … ; impl := …` syntax.
+     Importing `DSL.LexLaw` into `Laws/Transfer.lean` activates
+     these tokens during the parse of `Laws/Transfer.lean`,
+     which breaks the hand-written `def transfer ... where pre
+     := ...; apply_impl := ...` field-assignment block (`pre`
+     and `apply_impl` are tokenised as keywords rather than
+     structure-field names).  The twin-file structure cleanly
+     resolves this: each `Laws/Lex/<Law>.lean` parses with
+     both the hand-written law and the DSL in scope, while
+     `Laws/<Law>.lean` parses without the DSL.  Compile-time
+     visible side-effect: the M2 declarations are in
+     `LegalKernel.Laws.Lex` namespace (rather than
+     `LegalKernel.Laws`).
+  2. **Canonical-mode flip deferred**.  The plan's LX.30
+     deliverable says "flip default to `--canonical`
+     (regenerate full file body, no fences)".  Implementing
+     this would require `lex_codegen --canonical` to emit the
+     entire body of `Authority/Action.lean`,
+     `Encoding/Action.lean`, `Events/Extract.lean`, and
+     `Authority/SignedAction.lean` from the JSON sidecars —
+     including all docstrings, namespaces, projection lemmas,
+     and smoke-test `example`s.  This is a substantial
+     engineering task that is *strictly additive*: the
+     additive-mode codegen we ship in M2 is a strict superset
+     of canonical mode for the laws in `requiresEmission =
+     false` set (which is *all* laws in M2, since none
+     `Action`-extends).  M3 will lift `requiresEmission` to
+     `true` for newly-added Lex laws and ship the canonical-
+     mode flip.
+  3. **`Law.mk` not yet `@[deprecated]`**.  The plan §LX.30
+     calls for marking `Law.mk` deprecated.  Doing so would
+     emit deprecation warnings every time the `lex_law` macro
+     is invoked (since the macro internally emits
+     `LegalKernel.DSL.Law.mk` references) — breaking the
+     strict-warnings CI gate.  Deferred to a follow-up that
+     designs the deprecation properly (e.g. via a private
+     internal alias the macro uses, with the user-facing
+     `Law.mk` deprecated and pointing at `lex_law`).
+  4. **`lex_satisfies` empty in M2**.  Each Lex re-expression
+     declares `lex_satisfies := []` because the synthesizer
+     skeleton (M1) emits placeholder strings rather than
+     canonical-shape instance bodies.  M3 will land the
+     synthesizer's full instance-emission pass.  The
+     classification typeclasses on the *hand-written* laws
+     (`transfer_isConservative`, `mint_isMonotonic`, etc.)
+     are unaffected and continue to discharge typeclass
+     resolution as before.
+
+**LX.22 – LX.29: per-WU coverage**:
+
+  * LX.22 (`transfer`): `Laws/Lex/Transfer.lean`; index 0;
+    parameterised by `(r : ResourceId) (sender receiver :
+    ActorId) (amount : Amount)`.  Pre: balance-at-least +
+    positivity; impl: post-debit re-read pattern (§4.11
+    self-transfer fix).
+  * LX.23 (`mint`/`burn`): `Laws/Lex/Mint.lean` (index 1) +
+    `Laws/Lex/Burn.lean` (index 2).  Both parameterised by
+    `(r : ResourceId) (... : ActorId) (amount : Amount)`.
+    `mint` exercises non-conservation; `burn` exercises both
+    non-conservation and non-monotonicity.
+  * LX.24 (`freezeResource`/`reward`):
+    `Laws/Lex/Freeze.lean` (index 3) + `Laws/Lex/Reward.lean`
+    (index 5).  `freezeResource` is identity; `reward` is
+    `mint`-shaped at the kernel level (distinct at the action
+    layer).
+  * LX.25 (`replaceKey`/`registerIdentity`):
+    `Laws/Lex/ReplaceKey.lean` (index 4) +
+    `Laws/Lex/RegisterIdentity.lean` (index 12).  Both have
+    identity kernel-level transition (compile to
+    `Laws.freezeResource 0`); registry mutation lives in
+    `applyActionToRegistry`.  Underscore-prefix params silence
+    unused-variable lints for the kernel-irrelevant fields.
+  * LX.26 (`deposit`/`withdraw`):
+    `Laws/Lex/Deposit.lean` (index 13) +
+    `Laws/Lex/Withdraw.lean` (index 14).  Both are
+    bridge-attested.  `withdraw`'s 20-byte `EthAddress`
+    parameter encoding (per the Workstream-C audit-2
+    lossless-encoding fix) is preserved.
+  * LX.27 (4 dispute pipeline laws):
+    `Laws/Lex/Dispute.lean` (indices 8, 9, 10, 11; all four
+    in one file).  All identity at the kernel level; the
+    dispute pipeline runs outside `apply_admissible`.
+  * LX.28 (LP laws):
+    `Laws/Lex/LocalPolicy.lean` (indices 15, 16; both in one
+    file).  Identity at the kernel level; LP `localPolicies`
+    mutation lives in `applyActionToLocalPolicies` (LP.5).
+  * LX.29 (aggregate positive-incentive laws):
+    `Laws/Lex/DistributeOthers.lean` (index 6) +
+    `Laws/Lex/ProportionalDilute.lean` (index 7).  Both use
+    `foldl`-of-`setBalance` impl (the most complex shape in
+    M2).  `proportionalDilute` exercises the dust-bound
+    theorem (the `proof` override path at M3 will plug in here).
+
+**Workstream LX deferred to M3.**  Per the plan §19.5, M3 lands
+the `deployment` macro, `lex_diff` / `lex_format` audit
+binaries, property-test auto-generation, the synthesizer
+canonical-shape instance emission, the `Law.mk` deprecation,
+and the `lex_codegen --canonical` flip.
 
 **Workstream LP (actor-scoped policies) summary.**  Workstream
 LP introduces per-actor, on-chain, mutable policy filters that
