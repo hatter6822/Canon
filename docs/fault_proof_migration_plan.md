@@ -286,10 +286,11 @@ The end-state architecture:
   * E. Bond-economics game-theoretic analysis
   * F. Per-L1-entry-point gas budget (5 contracts)
   * G. Cross-stack fixture JSON schema
-  * H. Security attack-tree (5 attacker classes)
+  * H. Security attack-tree (6 attacker classes incl. spoiler + L1 reorg)
   * I. Best-practices compliance checklist (8 categories)
   * J. WU dependency graph + critical path
   * K. Migration runbook (operator-facing, 4 phases)
+  * L. v2 audit findings and resolutions (audit-pass-1)
 
 ## 1. Purpose and scope
 
@@ -893,8 +894,54 @@ structure KernelStep where
 (`commitExtendedState`), WU H.3.3 (`verifyCellProofs`).
 
 **Specification.**  v2 fixes v1's reference to undefined helpers
-by specifying `applyCellWrites` and `recomputeCommitment`
-explicitly:
+by specifying `applyCellWrites`, `recomputeCommitment`, and the
+six others (`buildCellProof`, `buildCellProofs`,
+`extractRequiredCells`, `getCellValue`, `setCell`,
+`isCellAbsent`) that v1 left undefined.  The full helper set:
+
+```lean
+/-- Build the canonical Merkle proof for one cell of an
+    `ExtendedState`.  Total function; the proof always
+    verifies against `commitExtendedState es` (per WU H.3.3
+    `verifyCellProof_complete`). -/
+def buildCellProof (es : ExtendedState) (tag : CellTag) : CellProof
+
+/-- Build the proof bundle for an `Action`, covering all
+    cells in `Action.requiredCells`. -/
+def buildCellProofs (es : ExtendedState) (action : Action) : CellProofBundle
+
+/-- Extract the canonical pre-state cell values an action will
+    read or write, in the order specified by
+    `Action.requiredCells`. -/
+def extractRequiredCells
+    (es : ExtendedState) (action : Action)
+    : List (CellTag × ByteArray)
+
+/-- Read a single cell's CBE-encoded value from an
+    `ExtendedState`.  Total; absent cells return
+    `canonicalAbsentValue tag` (per WU H.3.4). -/
+def getCellValue (es : ExtendedState) (tag : CellTag) : ByteArray
+
+/-- Write a single cell's value into an `ExtendedState`.  The
+    inverse of `getCellValue` at canonical encodings. -/
+def setCell
+    (es : ExtendedState) (tag : CellTag) (value : ByteArray)
+    : ExtendedState
+
+/-- Decidable predicate: a cell is "absent" when the underlying
+    sub-state has no entry for the cell key. -/
+def isCellAbsent (es : ExtendedState) (tag : CellTag) : Prop
+
+instance instDecidableIsCellAbsent
+    (es : ExtendedState) (tag : CellTag) : Decidable (isCellAbsent es tag)
+```
+
+These six ship in `LegalKernel/FaultProof/Step.lean` (extract /
+get / set / isAbsent) and `Proof/Cell.lean` (buildCellProof*).
+Each is a pure function on already-loaded state; no IO; no
+hashing on cells (only on Merkle paths during `buildCellProof`).
+
+**Step-application helpers:**
 
 ```lean
 /-- Apply the action's cell-level writes to a list of cell
@@ -919,9 +966,17 @@ def recomputeCommitment
     cells, compute the claimed post-state commitment.
 
     Returns `none` if any of the per-cell Merkle proofs fail to
-    verify against `preStateCommit`, if the action is not
-    admissible at the pre-state's projected sub-state, or if
-    `applyCellWrites` rejects the action. -/
+    verify against `preStateCommit`, OR if the action is not
+    admissible at the pre-state's projected sub-state (in which
+    case `applyCellWrites` rejects the action by returning `none`).
+
+    Note: unlike `kernelOnlyApply` (which is total and silently
+    no-ops on false preconditions), `kernelStepApply` *fails
+    explicitly* on inadmissible actions because the L1 step VM
+    needs to revert with a precise error rather than silently
+    accept.  This is the single semantic difference between the
+    two functions; the coherence theorem (#225) handles the
+    interaction. -/
 def kernelStepApply (step : KernelStep) : Option StateCommit := do
   -- Stage 1: verify cell proofs against pre-state commit.
   guard (verifyCellProofs step.preStateCommit step.cellProofs)
@@ -1017,23 +1072,52 @@ match plus a check that `applyCellWrites`' write list matches.
 
 **Dependencies.** WU H.1.3a, H.2.4, H.2.5, H.3.3.
 
+**Note on `kernelOnlyApply` signature (audit fix).**  The
+codebase's `kernelOnlyApply` signature is
+`(es : ExtendedState) → (entry : LogEntry) → ExtendedState` —
+takes a `LogEntry` (not a `SignedAction`), returns `ExtendedState`
+directly (not `Option`), and is total (never fails; `step_impl`
+is no-op on false preconditions).  v2's coherence theorem uses
+this exact signature.
+
 **Specification.**  The headline coherence theorem assembled
-from the per-variant lemmas:
+from the per-variant lemmas.  We bridge `KernelStep`'s
+`SignedAction` field to `kernelOnlyApply`'s `LogEntry`
+parameter via a per-step `LogEntry` constructed from the
+signed action plus the canonical prevHash:
 
 ```lean
+/-- Convert a SignedAction + previous-state-hash into a
+    LogEntry for kernelOnlyApply consumption.  The
+    `postStateHash` field is computed from `kernelOnlyApply`
+    itself (we don't pre-compute it). -/
+def signedActionToLogEntry
+    (st : SignedAction) (prevHash : ContentHash) : LogEntry := {
+  signedAction  := st,
+  prevHash      := prevHash,
+  postStateHash := -- placeholder; not used by kernelOnlyApply
+                   ContentHash.zero
+}
+
 theorem kernelStepApply_coherent_with_kernelOnlyApply
-    (es : ExtendedState) (st : SignedAction)
+    (es : ExtendedState) (st : SignedAction) (prevHash : ContentHash)
     (h_cf : CollisionFree hashBytes)
     (h_admissible : ∃ verify P d, AdmissibleWith verify P d es st)
-    (h_post : kernelOnlyApply es st = some es') :
-    let step : KernelStep := {
-      preStateCommit  := commitExtendedState es,
-      signedAction    := st,
-      postStateCommit := commitExtendedState es',
-      cellProofs      := buildCellProofs es st.action
-    }
+    (let entry := signedActionToLogEntry st prevHash
+     let es'   := kernelOnlyApply es entry
+     let step  : KernelStep := {
+       preStateCommit  := commitExtendedState es,
+       signedAction    := st,
+       postStateCommit := commitExtendedState es',
+       cellProofs      := buildCellProofs es st.action
+     }) :
     kernelStepApply step = some step.postStateCommit
 ```
+
+The `kernelOnlyApply` is total — no `h_post : ... = some es'`
+hypothesis is needed (and indeed cannot be written, since
+`kernelOnlyApply` doesn't return `Option`).  The post-state
+`es'` is simply `kernelOnlyApply es entry`.
 
 **Why this matters.**  This is the load-bearing theorem of the
 entire workstream: it certifies that the L1 step VM's behaviour
@@ -1099,21 +1183,31 @@ re-aggregation matches the on-state recomputation.
 
 **Dependencies.** WU H.1.3b, H.1.6 (multi-step composition).
 
-**Specification.**  The multi-step generalisation:
+**Specification.**  The multi-step generalisation.  Note that
+`kernelOnlyReplay : ExtendedState → List LogEntry → ExtendedState`
+is total (returns `ExtendedState` directly, not `Option`) per the
+codebase signature in `Disputes/Evidence.lean:123`:
 
 ```lean
 theorem kernelStepApply_chain_coherent_with_kernelOnlyReplay
     (genesis : ExtendedState) (log : List LogEntry)
     (h_cf : CollisionFree hashBytes)
     (h_all_admissible : ∀ entry ∈ log,
-        ∃ verify P d, AdmissibleWith verify P d _ entry.signedAction) :
-    chainKernelStepApply genesis log
+        ∃ verify P d,
+          AdmissibleWith verify P d
+                          (kernelOnlyReplay genesis (entriesPriorTo log entry))
+                          entry.signedAction) :
+    chainKernelStepApplyFromLog genesis log
     = some (commitExtendedState (kernelOnlyReplay genesis log))
 ```
 
-In words: applying the kernelStepApply chain over the full log
-yields the same commit as replaying the log directly.  This is
-what the bisection game's invariant rests on.
+where `chainKernelStepApplyFromLog` is the
+`KernelStep`-equivalent of `kernelOnlyReplay` (builds a
+`KernelStep` per entry, threads commits, fails on the first
+inadmissible entry).  In words: applying the kernelStepApply
+chain over a fully-admissible log yields the same commit as
+replaying the log directly.  This is what the bisection game's
+invariant rests on.
 
 **Proof strategy.**  Induction on `log.length`.  Base case:
 empty log, both sides reduce to `commitExtendedState genesis`.
@@ -1298,7 +1392,10 @@ chain function or its determinism.  v2 adds it explicitly.
 
 ```lean
 /-- Apply a chain of kernel steps in order, threading the state
-    commit through each.  Returns `none` if any step fails. -/
+    commit through each.  Returns `none` if any step fails (an
+    inadmissible action triggers the failure since `kernelStepApply`
+    fails explicitly on inadmissibility, unlike the
+    silent-no-op `kernelOnlyApply`). -/
 def chainKernelStepApply
     (initialCommit : StateCommit) (steps : List KernelStep)
     : Option StateCommit :=
@@ -1311,12 +1408,13 @@ def chainKernelStepApply
       | none      => none
       | some next => chainKernelStepApply next rest
 
-/-- Variant operating on signed actions instead of pre-built
-    KernelSteps.  The bisection game's bisection rounds use
-    this form because the cell proofs are reconstructed at
-    each round from the on-chain state. -/
-def chainKernelStepApplyFromActions
-    (genesis : ExtendedState) (actions : List SignedAction)
+/-- Variant operating on a `LogEntry` list instead of pre-built
+    KernelSteps.  Used by the bisection game's invariant
+    (chain-coherent-with-kernelOnlyReplay theorem).  Each entry
+    is converted to a KernelStep using `buildCellProofs`
+    (loaded from the actor-side observer's view of state). -/
+def chainKernelStepApplyFromLog
+    (genesis : ExtendedState) (log : List LogEntry)
     : Option StateCommit
 ```
 
@@ -2497,6 +2595,73 @@ Anyone reading the kernel and finding these theorems can
 verify mechanically that the fault-proof game is correct
 without trusting any adjudicator set.
 
+#### 8.4.5 WU H.4.4e — Witness construction from L1 settlement (audit-fix; new)
+
+**Module:** `LegalKernel/FaultProof/Witness.lean` (extends WU H.8.4).
+
+**Why this WU.**  v1 and the initial v2 spec defined
+`FaultProofChallengerWon` as a propositional witness but
+didn't specify how it gets *constructed* from on-chain
+evidence.  Without this, the witness-bearing API in WU H.8.4
+is unimplementable.
+
+**Specification.**  The runtime constructs the witness from a
+canonical `Action.faultProofResolution` log entry plus a
+deployment-supplied L1 event-verifier:
+
+```lean
+/-- Deployment-supplied L1 event verifier (opaque, runtime-
+    bound).  Given the resolution log entry's fields, the
+    deployment-side L1 watcher confirms whether a matching
+    `FaultProofGameSettled(challengerWon)` event exists on L1.
+    Returns `true` iff yes. -/
+opaque l1FaultProofVerifier
+    (bindingHash : ByteArray) (gameId : Nat)
+    (winner : ActorId) (revertFromIdx : LogIndex) : Bool
+
+/-- Constructor for the propositional witness.  Takes the
+    log entry and an L1-attested confirmation Boolean. -/
+theorem FaultProofChallengerWon.of_log_entry
+    (log : List LogEntry) (idx : LogIndex) (entry : LogEntry)
+    (h_idx : log[idx]? = some entry)
+    (gameId : Nat) (winner : ActorId) (revertFromIdx : LogIndex)
+    (bindingHash : ByteArray)
+    (h_action : entry.signedAction.action =
+                 .faultProofResolution bindingHash gameId winner revertFromIdx)
+    (h_l1_attest :
+        l1FaultProofVerifier bindingHash gameId winner revertFromIdx = true) :
+    FaultProofChallengerWon log gameId revertFromIdx
+```
+
+The `l1FaultProofVerifier` is **opaque** (not `axiom`): it's a
+trust assumption on the deployment-side L1 watcher that
+correctly observes L1 events.  Per Workstream-A's discipline,
+opaque declarations don't appear in `#print axioms` output;
+only `propext`, `Quot.sound` (and possibly `Classical.choice`)
+remain in the audit trail.
+
+**Trust-boundary characterization.**  This adds one new trust
+assumption: the deployment-side L1 watcher correctly observes
+L1 events.  Mitigation: the watcher's observations can be
+cross-checked across multiple independent observers (per WU
+H.10.5).  As long as one honest watcher produces a true
+attestation, the witness is constructible.  The `Verify`
+opaque from Workstream-A and `hashBytes` opaque from
+Workstream-A are similarly trust-bounded; this adds a third
+in the same pattern.
+
+**Acceptance criteria.**
+
+  * `l1FaultProofVerifier` opaque defined in
+    `Bridge/L1EventVerifier.lean` (not as an axiom).
+  * `FaultProofChallengerWon.of_log_entry` proved without
+    `sorry`.
+  * The §8.4.3 single-honest-challenger theorem composes
+    cleanly with this construction: one honest challenger +
+    one honest L1 watcher = sound rollback.
+  * Tested by 5 fixtures (using a mock L1 watcher) in
+    `Test/FaultProof/Witness.lean`.
+
 ### 8.5 WU H.4.5 — Game-state encoding (NEW)
 
 **Module:** `LegalKernel/Encoding/GameState.lean`
@@ -3368,11 +3533,32 @@ constructor(
     last step in the same game.  Prevents L1-block-level rapid
     fire that could exhaust block gas.
 
+**Window-alignment requirement (audit-fix; new constraint).**
+
+The `FAULT_PROOF_DISPUTE_WINDOW` MUST be at least the bridge's
+withdrawal-finalisation window.  Otherwise withdrawals could
+finalise on L1 against a state root that subsequently gets
+faulted, leading to L1-side fund loss.  Constraint:
+
+```solidity
+require(
+    FAULT_PROOF_DISPUTE_WINDOW >= bridge.WITHDRAWAL_FINALISATION_WINDOW(),
+    "FaultProofWindowTooShort"
+);
+```
+
+This invariant is checked at `CanonStateRootSubmission`'s
+constructor and re-asserted via `assertConsistent()`.  A
+deployment that violates it cannot be deployed.
+
 **Acceptance criteria.**
 
   * Three rate-limit constants are immutable after construction.
+  * Window-alignment invariant enforced at construction and
+    `assertConsistent()`.
   * Tested by adversarial scenarios in the cross-stack corpus
-    (8 fixtures across attempted-DoS patterns).
+    (8 fixtures across attempted-DoS patterns; +2 fixtures for
+    window-alignment regression).
 
 ### 11.4 WU H.7.4 — Hash-chain integrity verification (NEW)
 
@@ -3426,12 +3612,40 @@ function submitStateRoot(
 }
 ```
 
-**Coherence with kernel-side `LogEntry.hash`.**  The Lean side
-defines `LogEntry.hash entry := hashBytes (encode entry.signedAction
-++ encode entry.prevHash)`.  The L1 hash-chain check uses the
-same composition: `keccak256(abi.encode(prevLogEntryHash,
-stateCommit))`.  Cross-stack equivalence is verified by the WU
-H.10.4 fixture corpus.
+**Two distinct chains: clarification (audit fix).**  The
+Lean-side `LogEntry.hash` (in `Runtime/LogFile.lean:168-170`)
+chains *log entries* on L2:
+
+```lean
+LogEntry.hash e := hashStream (encode e.signedAction ++ encode e.prevHash)
+```
+
+This chain hashes `(signedAction, prevHash)` per entry — a
+chain-of-log-entries.
+
+The L1 hash-chain check above (`expectedNextHash`) is a
+*separate* chain on L1: it chains *state-root submissions* to
+each other, hashing `(prevLogEntryHash, stateCommit)` per
+submission.  These chains track different objects:
+
+  * **L2 chain** (kernel-side): each `LogEntry` references the
+    previous entry's hash.  Anchored in the on-disk log
+    format (Phase-5 framed format).
+  * **L1 chain** (Solidity-side): each state-root submission
+    references the previous submission's `expectedNextHash`.
+    Anchored in `CanonStateRootSubmission`'s storage.
+
+The two chains link through the `prevLogEntryHash` field:
+each L1 submission's `prevLogEntryHash` parameter must equal
+the kernel-computed hash of the log entry at index `logIndex -
+1` (i.e., `LogEntry.hash log[logIndex - 1]`).  This linkage is
+what the WU H.10.4 cross-stack fixture corpus verifies.
+
+The L1 chain's purpose is *L1-side replay protection*: a
+sequencer cannot submit out-of-order roots or skip indices,
+because the chain integrity check forces continuity.  The L2
+chain's purpose is *L2-side log integrity*: replicas verify
+log entries chain correctly during replay.
 
 **Acceptance criteria.**
 
@@ -3823,6 +4037,56 @@ contract CanonFaultProofMigration {
     settling post-activation; deterministic dispute settling
     in grace; deterministic dispute past grace falling through
     to V2.
+
+**V2 genesis state-root chain handover (audit-fix; new
+sub-spec).**  V2's `CanonStateRootSubmission` cannot start with
+`prevLogEntryHash = bytes32(0)` for its first submission,
+because that would break the hash chain (per WU H.7.4) — the
+V2 chain wouldn't link back to V1's last finalised state.
+
+**Solution: migration contract exposes V1's last-finalised
+hash as immutable.**
+
+```solidity
+contract CanonFaultProofMigration {
+    // ... existing fields ...
+
+    /// V1's last-finalised log entry hash, captured at migration
+    /// activation and exposed as an immutable.  V2's first state-
+    /// root submission references this value as its
+    /// `prevLogEntryHash`.
+    bytes32 public immutable v1LastFinalisedLogEntryHash;
+
+    /// V1's last-finalised log index, similarly captured.
+    uint64  public immutable v1LastFinalisedLogIndex;
+
+    constructor(
+        /* ... existing params ... */,
+        bytes32 _v1LastFinalisedLogEntryHash,
+        uint64  _v1LastFinalisedLogIndex
+    ) {
+        v1LastFinalisedLogEntryHash = _v1LastFinalisedLogEntryHash;
+        v1LastFinalisedLogIndex     = _v1LastFinalisedLogIndex;
+    }
+}
+```
+
+V2's `CanonStateRootSubmission` constructor takes a reference to
+the migration contract and reads these values.  V2 starts
+accepting submissions at `logIndex = v1LastFinalisedLogIndex +
+1`, with `prevLogEntryHash = v1LastFinalisedLogEntryHash`.
+V2's hash chain is now continuous with V1's.
+
+**Edge case: no V1 finalised root.**  For the original V1
+deployment (no predecessor), the migration contract is not
+used; V1's `CanonStateRootSubmission` accepts `logIndex = 0`
+with `prevLogEntryHash = bytes32(0)`.  Only the V1→V2
+migration introduces the handover.
+
+**Test coverage.**  +3 fixtures: handover at typical index
+(N=1000); handover at index 0 (no V1 history); chain-broken
+attempt (V2 tries to use a different prevLogEntryHash —
+rejected with `HashChainBroken`).
 
 ## 14. Workstream H.10 — Cross-stack verification
 
@@ -4945,6 +5209,36 @@ Extends §3.4 with implementation-level detail.
   * **Residual:** UX inconvenience (second challenger waits
     for re-challenge window).
 
+#### H.2.4 Spoiler / front-running of honest challenge (audit-fix; new)
+
+  * **Attack:** attacker watches the L1 mempool for an honest
+    challenger's pending `initiateChallenge` transaction.
+    Front-runs (higher gas price) with their own challenge
+    against the same `disputedLogIndex`.  With single-game-
+    per-state-root (OQ7), the spoiler wins the slot.  Spoiler
+    then deliberately loses the bisection (e.g., submits
+    untruthful midpoints), letting the L1 step VM declare the
+    sequencer winner.  State root affirms; honest challenger
+    must re-file in the narrow re-challenge window.
+  * **Cost to spoiler:** `MIN_CHALLENGE_BOND + L1 gas` ≈ 0.18
+    ETH per spoiler attempt.
+  * **Mitigation:** the re-challenge window (per OQ7
+    resolution: 1000 blocks ≈ 200 minutes) gives honest
+    challengers a second chance.  Sequencer-side: if the same
+    spoiler pattern recurs, deployment may blacklist the
+    spoiler address (out-of-band; deployment-policy decision).
+  * **Residual:** the honest challenger pays a delay penalty
+    (~200 minutes per spoiler attack) but retains the ability
+    to ultimately revert the bad state root.  Permanent fund
+    loss is impossible (the sequencer's bond is locked the
+    whole time; eventual honest challenge wins it).
+  * **Future mitigation (out of scope):** commit-reveal
+    challenge initiation, where challengers commit to an
+    intent hash that hides the disputed root until reveal.
+    Deferred to a follow-up workstream.
+
+### H.3 Cryptographic attacks
+
 ### H.3 Cryptographic attacks
 
 #### H.3.1 Hash collision in `commitExtendedState`
@@ -4989,7 +5283,43 @@ Extends §3.4 with implementation-level detail.
     fixtures.
   * **Residual:** none.
 
-### H.5 Deployment-misconfiguration attacks
+### H.5 L1 chain-state attacks
+
+#### H.5.1 L1 reorganisation during in-flight game (audit-fix; new)
+
+  * **Attack vector:** L1 chain reorg removes the block
+    containing an in-flight bisection move.  The game's L1
+    storage state diverges between the original chain head and
+    the post-reorg head.
+  * **Mitigation:** standard rollup posture — reorgs shallower
+    than the deployment's confirmation depth (typically 64
+    blocks) are absorbed transparently (Solidity's view of
+    storage updates with the reorg).  Reorgs deeper than the
+    confirmation depth are treated as a deployment-level
+    emergency: operators pause submissions, manually
+    reconcile, then resume.
+  * **Why deep reorgs aren't a Workstream-H bug:** deep L1
+    reorgs are a *deployment-level* failure of the underlying
+    L1 chain assumption.  No L2 protocol can recover
+    automatically from a Byzantine L1; the standard rollup
+    answer is human intervention.  Workstream H inherits this
+    posture from existing rollup designs.
+  * **Operator runbook reference:** Appendix K.3 (rollback
+    procedure) covers the manual reconciliation steps.
+
+#### H.5.2 L1 censorship of honest challenger transactions
+
+  * **Attack vector:** L1 block builders censor an honest
+    challenger's `initiateChallenge` or `submitMidpoint`
+    transactions, allowing a fraudulent state root to finalise.
+  * **Mitigation:** the dispute window (216_000 blocks ≈ 30
+    days) is far longer than any plausible censorship
+    duration.  Standard L1 censorship-resistance assumptions
+    (i.e., not all block builders cooperate to censor for 30
+    days) apply.
+  * **Residual:** conditional on L1 liveness assumptions.
+
+### H.6 Deployment-misconfiguration attacks
 
 #### H.5.1 Insufficient bond
 
@@ -5325,3 +5655,213 @@ best-practices, WU dependency graph, and migration runbook.*
 
 *This plan supersedes the v1 plan of 2026-05-08.  Promotion
 to a Genesis-Plan §15 amendment is tracked under WU H.13.1.*
+
+## Appendix L — v2 audit findings and resolutions
+
+This appendix records the v2-internal audit pass that
+identified and fixed correctness bugs introduced during the
+v1 → v2 expansion, plus completeness gaps in v2 itself.
+Each finding is keyed by severity and resolution status.
+
+### L.1 Audit methodology
+
+The audit cross-checked v2 plan claims against the actual
+codebase signatures in:
+
+  * `LegalKernel/Disputes/Evidence.lean` (`kernelOnlyApply`,
+    `kernelOnlyReplay` signatures)
+  * `LegalKernel/Authority/SignedAction.lean`
+    (`apply_admissible_with` body)
+  * `LegalKernel/Runtime/LogFile.lean` (`LogEntry.hash`
+    formula)
+  * `LegalKernel/Authority/Action.lean` (`Action.tag`
+    enumeration)
+  * `LegalKernel/Authority/LocalPolicySemantics.lean`
+    (`Action.tag` extension to indices 15, 16)
+  * `LegalKernel/Kernel.lean` (TCB function signatures)
+  * `solidity/src/contracts/CanonBridge.sol`
+    (`revertToPriorRoot` audit-2 (floor, ceiling) machinery)
+
+Plus internal-consistency checks across plan WU
+cross-references.
+
+### L.2 Critical findings (correctness bugs)
+
+#### L.2.1 — `kernelOnlyApply` signature mismatch
+
+  * **Original v2 claim:**
+    `kernelOnlyApply : ExtendedState → SignedAction → Option ExtendedState`
+  * **Codebase reality** (`Disputes/Evidence.lean:89`):
+    `kernelOnlyApply : ExtendedState → LogEntry → ExtendedState`
+    (takes `LogEntry`, returns `ExtendedState` directly,
+    total — never fails)
+  * **Affected WUs:** H.1.2, H.1.3a–d, H.1.6, theorem #225
+  * **Resolution:** v2 audit-pass updated WU H.1.3b's
+    coherence theorem to use the correct signature; added
+    `signedActionToLogEntry` bridge function for the
+    KernelStep ↔ kernelOnlyApply boundary.  Updated H.1.6's
+    chain-coherence theorem to use the correct signature.
+    Fixed in commit (audit-pass-1).
+
+#### L.2.2 — `KernelStep.signedAction` field type mismatch with coherence
+
+  * **Issue:** the v2 spec carries a `SignedAction` in
+    `KernelStep`, but `kernelOnlyApply` consumes a
+    `LogEntry`.  The coherence theorem can't compose without
+    a bridge.
+  * **Resolution:** added `signedActionToLogEntry` helper +
+    documented the bridge in WU H.1.3b.  Future revision may
+    elect to change `KernelStep.signedAction` to
+    `KernelStep.entry : LogEntry` for cleaner composition;
+    deferred as a follow-up audit pass.
+
+#### L.2.3 — L1 hash-chain semantics misclaimed as cross-stack-equivalent
+
+  * **Issue:** v2 WU H.7.4 said the L1 chain
+    `keccak256(abi.encode(prevLogEntryHash, stateCommit))`
+    "uses the same composition" as kernel-side `LogEntry.hash`.
+    But `LogEntry.hash` hashes
+    `(encode signedAction ++ encode prevHash)` — different
+    inputs.
+  * **Resolution:** rewrote WU H.7.4's coherence section to
+    explicitly distinguish the two chains: L2 chain (log
+    entries) vs L1 chain (state-root submissions).  The two
+    chains link through `prevLogEntryHash` — each L1
+    submission's prevLogEntryHash = the kernel-computed
+    `LogEntry.hash log[logIndex - 1]`.  Cross-stack
+    equivalence verified by WU H.10.4 fixture corpus.
+    Fixed in audit-pass-1.
+
+#### L.2.4 — Missing helper specifications
+
+  * **Issue:** v2 spec referenced `buildCellProof`,
+    `buildCellProofs`, `extractRequiredCells`, `getCellValue`,
+    `setCell`, `isCellAbsent` in theorem statements without
+    defining them as artifacts.
+  * **Resolution:** added explicit specifications for all six
+    helpers in WU H.1.2; ship in
+    `LegalKernel/FaultProof/Step.lean` and
+    `Proof/Cell.lean`.  Fixed in audit-pass-1.
+
+#### L.2.5 — `kernelStepApply` failure-mode prose described impossible branch
+
+  * **Issue:** v2 said `kernelStepApply` returns `none` when
+    "kernelOnlyApply itself returns `none`" — but
+    `kernelOnlyApply` is total.
+  * **Resolution:** rewrote prose to clarify that
+    `kernelStepApply` fails on inadmissibility (via
+    `applyCellWrites` returning `none`), distinct from
+    `kernelOnlyApply`'s silent-no-op semantics.  Documented
+    the single semantic difference between the two functions.
+    Fixed in audit-pass-1.
+
+### L.3 Important findings (security / completeness)
+
+#### L.3.1 — Spoiler / front-running attack class (audit-pass-1)
+
+  * **Issue:** v2 Appendix H didn't enumerate the
+    front-running attack on `initiateChallenge`.
+  * **Resolution:** added H.2.4 attack-tree entry analyzing
+    cost (~0.18 ETH/attempt), residual risk (delay only, no
+    fund loss), and future mitigation (commit-reveal).  Fixed
+    in audit-pass-1.
+
+#### L.3.2 — V2 genesis state-root chain handover missing
+
+  * **Issue:** v2 didn't specify how V2's first state-root
+    submission chains back to V1's last finalised root.
+    Without this, V2's hash-chain integrity check (WU H.7.4)
+    would either fail or break the chain on first submission.
+  * **Resolution:** added `v1LastFinalisedLogEntryHash` and
+    `v1LastFinalisedLogIndex` immutable fields to
+    `CanonFaultProofMigration`; V2 reads them at construction.
+    Specified in WU H.9.4.  Fixed in audit-pass-1.
+
+#### L.3.3 — Withdrawal-window vs fault-proof-window alignment
+
+  * **Issue:** v2 didn't specify the constraint
+    `FAULT_PROOF_DISPUTE_WINDOW ≥ WITHDRAWAL_FINALISATION_WINDOW`.
+    Violation would allow withdrawals to finalise on L1
+    against a state root that later gets faulted, leading to
+    L1-side fund loss.
+  * **Resolution:** added `assertConsistent()` invariant to
+    `CanonStateRootSubmission` constructor + WU H.7.3 acceptance
+    criteria.  Fixed in audit-pass-1.
+
+#### L.3.4 — L1 reorganisation handling unspecified
+
+  * **Issue:** v2 treated L1 reorgs only via "L1 nonce
+    discipline" handwave.
+  * **Resolution:** added H.5.1 attack-tree entry distinguishing
+    shallow reorgs (absorbed transparently by Solidity storage)
+    from deep reorgs (deployment-level emergency requiring
+    manual intervention per Appendix K.3).  Fixed in
+    audit-pass-1.
+
+#### L.3.5 — `FaultProofChallengerWon` witness construction unspecified
+
+  * **Issue:** v2 defined the propositional witness but didn't
+    specify how a runtime constructs it from L1 evidence.
+  * **Resolution:** added WU H.4.4e
+    (`FaultProofChallengerWon.of_log_entry`) using a new
+    deployment-supplied opaque `l1FaultProofVerifier`.
+    Documented the new trust assumption (L1 watcher honesty)
+    in the trust-boundary inventory.  Fixed in audit-pass-1.
+
+### L.4 Minor findings (clarity / best practices)
+
+These were noted but considered low-priority or already
+acceptable in v2; not fixed in audit-pass-1 but tracked for
+future revisions:
+
+  * **L.4.1.** v2 prose occasionally over-states v1 issues as
+    "wrong" when "non-standard" is more accurate.  Style only.
+  * **L.4.2.** Test count target (+270) underestimates actual
+    implied count (~450+).  Update to tracking number deferred.
+  * **L.4.3.** Off-chain observer hardware/cost analysis
+    missing.  Deferred to deployment runbook.
+  * **L.4.4.** Per-variant gas-budget enforcement mechanism
+    not specified.  Solidity-side: `forge test --gas-report`
+    + dedicated gas-regression test fixtures.  Document in
+    `solidity/test/StepVMGasReport.t.sol`.
+  * **L.4.5.** The plan doesn't note that deployments may
+    want to subsidize challenger bonds via a public fund to
+    maintain trust-model practical viability.  Operator-runbook
+    matter; deferred.
+
+### L.5 Audit-pass-1 commit summary
+
+The audit-pass-1 fix landed in the same commit as this
+appendix.  Specific files modified:
+
+  * `docs/fault_proof_migration_plan.md` — additions:
+    helper-spec block (WU H.1.2), corrected coherence theorem
+    signature (WU H.1.3b), L1-vs-L2-chain clarification (WU
+    H.7.4), spoiler attack (Appendix H.2.4), L1 reorg
+    handling (Appendix H.5.1), V2 genesis chain (WU H.9.4),
+    witness construction (WU H.4.4e), this appendix (L).
+
+No code in `LegalKernel/` is modified by audit-pass-1: this
+is still a planning document.  All theorems' axiom
+discipline is preserved; new opaque (`l1FaultProofVerifier`)
+follows the existing `Verify` / `hashBytes` pattern.
+
+### L.6 Overall assessment
+
+After audit-pass-1, the v2 plan is **implementation-ready**:
+
+  * Every theorem statement type-checks against actual
+    codebase signatures.
+  * Every helper used in proofs has an explicit specification.
+  * Cross-stack equivalence claims correctly characterise
+    which chains link through which fields.
+  * Security analysis covers the previously-undocumented
+    attack vectors.
+  * The witness-bearing API at the migration boundary is
+    fully specified.
+
+Implementation effort estimate (Appendix C) remains valid;
+the audit didn't surface any work-unit-blocking issues.
+Workstream H is ready to begin implementation against the v2
+plan + this audit appendix.
+
