@@ -68,7 +68,16 @@ lexlaw legalkernel_burn where
     fun s => getBalance s r fromActor ≥ amount ∧ amount > 0
   lex_impl            :=
     fun s => setBalance s r fromActor (getBalance s r fromActor - amount)
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.23: `burn` claims only `local`,
+  -- `freeze_preserving`, `nonce_advances`, `registry_preserving`.
+  -- `conservative` and `monotonic` are correctly omitted: burn is
+  -- non-conservative AND non-monotonic by design (the explicit
+  -- `burn_not_conservative` and `burn_not_monotonic` negative
+  -- witnesses in this file are the kernel-level proofs of these
+  -- omissions; `synth_conservative` and `synth_monotonic` would
+  -- both fail L004 on burn).
+  lex_satisfies       := [«local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.23 byte-equivalence regression for `burn`. -/

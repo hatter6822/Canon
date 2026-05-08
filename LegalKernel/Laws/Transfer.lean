@@ -109,7 +109,14 @@ lexlaw legalkernel_transfer where
       let s1      := setBalance s r sender (fromBal - amount)
       let toBal   := getBalance s1 r receiver
       setBalance s1 r receiver (toBal + amount)
-  lex_satisfies       := []
+  -- The `local` claim uses French-quoted form `«local»` because
+  -- bare `local` is a Lean reserved keyword; the macro extracts
+  -- the identifier name "local" from the quoted form, which the
+  -- synthesizer's `parsePropertyName` correctly maps to
+  -- `PropertyKind.localTo`.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.22 byte-equivalence regression: the Lex re-expression

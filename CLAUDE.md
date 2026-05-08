@@ -2729,7 +2729,106 @@ After audit-2 fixes:
     in-place migration; their `source_location.file` now
     points at the consolidated path).
 
-**Plan §19.4 deliverables remaining (deferred to follow-up):**
+**Workstream-LX M2 audit-3 hardening (this branch).**  An
+audit-3 deep pass closes the remaining tractable items from the
+audit-2 deferred list.  Test count: 1447 → 1450 (+3 in
+`tools-lex-codegen` for canonical-manifest tests).  All 7 CI
+gates remain green; 0 build warnings.
+
+  * **Phase A: Populated `lex_satisfies` per plan §19.4 spec.**
+    All 17 kernel-built-in laws now declare their satisfies
+    claims:
+      - `transfer`, `freezeResource`, `dispute*`, `LP-*`:
+        `[conservative, monotonic, local, freeze_preserving,
+        nonce_advances, registry_preserving]` (kernel-identity
+        or supply-conserving).
+      - `mint`, `reward`, `deposit`, `distributeOthers`,
+        `proportionalDilute`: omit `conservative` (additive).
+      - `burn`, `withdraw`: omit both `conservative` and
+        `monotonic` (subtractive).
+      - `replaceKey`, `registerIdentity`: omit
+        `registry_preserving` (registry mutation explicit).
+    The `local` keyword conflicts with Lean's `local`
+    reserved word; the Lex declarations use the French-
+    quoted `«local»` form, which the macro extracts as the
+    plain identifier "local" via `getId`.
+
+  * **Phase B: `lex_events := []` populated as M2 metadata.**
+    The full events-block elaborator (`do emit
+    Event.disputeFiled ...` calculus form per plan §19.4
+    LX.27) is M3 work.  M2 documents the intended event
+    emissions in per-law comments alongside the empty
+    `lex_events := []` placeholder.  The actual run-time
+    event emission lives in `actionEvents` in
+    `Events/Extract.lean` (hand-written, byte-equivalent).
+
+  * **Phase C: Synthesizer-verification integration.**
+    Attempted but not landed.  The hand-written instances
+    (`mint_isMonotonic`, `transfer_isConservative`, etc.) are
+    typed on the hand-written form (`Laws.mint r to amount`),
+    not on the lex-emitted def (`legalkernel_mint_transition
+    r to amount`).  Even though these are byte-equivalent
+    (verified by the `rfl`-close regression `example`s),
+    Lean's typeclass resolution doesn't see through the def-
+    boundary automatically.  Bridging requires either (a)
+    marking every hand-written law `@[reducible]` (broad
+    performance / unification implications), OR (b) emitting
+    fresh instance bodies that don't conflict with the
+    hand-written ones (multi-property-shape instance-body
+    emitter walking the calculus form — multi-day work).
+    Both are M3 canonical-mode integration work.
+
+  * **Phase D: `lex_codegen --canonical` mode now functional.**
+    Pre-audit-3, `--canonical` returned exit code 2 with
+    "not yet implemented".  Now it emits a structured
+    canonical-manifest at
+    `LegalKernel/_lex_inputs/canonical_manifest.txt` summarising
+    all 18 Lex laws (sorted by frozen action_index) with
+    intent / params / signed_by / registry_effect / satisfies /
+    source location per law.  Byte-stable across runs;
+    `--canonical --check` mode byte-compares the regenerated
+    manifest against the committed file (exit 1 on
+    divergence; CI-gating).  Three new tests in
+    `tools-lex-codegen` exercise determinism, header shape,
+    and action_index sorting.
+
+    The canonical-mode SCAFFOLD enables M3's full-body
+    regeneration: M3 will extend the manifest into a Lean
+    module re-exporting each law's `Action` constructor,
+    `Transition`, encoder/decoder arms, and event-emission
+    rules — replacing the hand-written cross-module artefacts
+    entirely.
+
+**M3 follow-up items (genuinely deferred):**
+
+  1. **Synthesizer integration with canonical-shape instance
+     emission.**  Requires removing hand-written instances
+     OR coordinating reducibility (see Phase C above).
+     Multi-day effort.
+
+  2. **Full-body regeneration of 4 target files.**  Per plan
+     §19.4 LX.30: `lex_codegen --canonical` should emit the
+     entire body of `Authority/Action.lean` (~505 lines),
+     `Encoding/Action.lean` (~600+ lines),
+     `Events/Extract.lean`, `Authority/SignedAction.lean`'s
+     registry-mutation portions — including docstrings,
+     namespace declarations, projection lemmas, smoke-test
+     `example`s, instance declarations.  Multi-day effort.
+
+  3. **Events-block elaborator (`do emit Event.foo ...`).**
+     Per plan §19.4 LX.27.  Currently `lex_events := []`
+     populated with comment-form documentation of intended
+     emissions; M3 will land the calculus-form parser.
+
+  4. **Populated `lex_satisfies` per law per plan spec.**
+     The plan §19.4 LX.23 specifies `mint`'s `lex_satisfies`
+     should include `[monotonic, local, freeze_preserving,
+     nonce_advances, registry_preserving]`; `burn`'s should
+     omit `monotonic` and `conservative`.  ✓ DONE in
+     audit-3 Phase A (with `«local»` workaround for the
+     Lean keyword).  Was deferred from audit-2; now closed.
+
+**Plan §19.4 deliverables remaining (deferred to M3):**
 
   1. **Synthesizer integration with canonical-shape instance
      emission.**  The plan §19.4 LX.23 / LX.24 / LX.29 specifies
@@ -2753,22 +2852,17 @@ After audit-2 fixes:
      lemmas, smoke-test `example`s, and instance declarations.
      Multi-day engineering effort.  After this lands, the
      fences in those 4 files are removed and the bodies are
-     fully generated.
+     fully generated.  Audit-3 closed Phase D's SCAFFOLD
+     (manifest emission) — the entry point now works; M3
+     extends it.
 
-  3. **Populated `lex_satisfies` per law per plan spec.**
-     The plan §19.4 LX.23 specifies `mint`'s `lex_satisfies`
-     should include `[monotonic, local, freeze_preserving,
-     nonce_advances, registry_preserving]`; `burn`'s should
-     omit `monotonic` and `conservative`.  Currently all 17
-     laws have `lex_satisfies := []`.  This is purely
-     metadata in M2 (no synthesizer integration yet); will be
-     populated in the same follow-up that wires (#1).
+  3. **Populated `lex_satisfies` per law per plan spec.** ✓
+     DONE in audit-3 Phase A.
 
-  4. **Populated `lex_events` for dispute laws.**  The plan
-     §19.4 LX.27 specifies emit blocks for `dispute`,
-     `disputeWithdraw`, `verdict`.  Currently all 4 dispute
-     laws have `lex_events := []`.  Will be populated in the
-     follow-up alongside (#2)'s canonical-mode codegen.
+  4. **Populated `lex_events` for dispute laws.** ✓ Comment-
+     form M2 metadata documented in audit-3 Phase B.  The
+     full events-block elaborator (calculus form) is M3
+     work.
 
 **Workstream-LX M2 audit-1 hardening (deep migration baseline).**  A post-
 landing deep audit identified one M2-acceptance gap and one

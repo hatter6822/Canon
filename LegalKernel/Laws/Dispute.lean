@@ -48,7 +48,24 @@ lexlaw legalkernel_dispute where
   lex_params          (_d : LegalKernel.Disputes.Dispute)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.27: dispute-pipeline laws are kernel-level
+  -- identity, so they trivially satisfy all kernel-level
+  -- properties (conservative, monotonic, local, freeze_preserving,
+  -- nonce_advances, registry_preserving).  The dispute pipeline's
+  -- observable effects (verdict-driven rollback, dispute filing)
+  -- live OUTSIDE `apply_admissible` — they don't show up at the
+  -- kernel-Transition level.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
+  -- Per plan §19.4 LX.27: this law's events block should emit
+  -- `Event.disputeFiled` per filing.  The full events-block
+  -- elaborator (`do emit Event.disputeFiled ...` form) is M3
+  -- work; the actual run-time emission is currently hard-coded
+  -- in `actionEvents` in `Events/Extract.lean`.  M2 leaves this
+  -- as `[]` (informational placeholder) so the JSON sidecar
+  -- records the empty-events shape; M3's canonical-mode codegen
+  -- will populate this from a dedicated events-calculus DSL.
   lex_events          := []
 
 /-- LX.27 byte-equivalence regression for `dispute`. -/
@@ -69,7 +86,16 @@ lexlaw legalkernel_disputeWithdraw where
   lex_params          (_idx : LegalKernel.Disputes.LogIndex)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.27: dispute-pipeline laws are kernel-level
+  -- identity, so they trivially satisfy all kernel-level
+  -- properties (conservative, monotonic, local, freeze_preserving,
+  -- nonce_advances, registry_preserving).  The dispute pipeline's
+  -- observable effects (verdict-driven rollback, dispute filing)
+  -- live OUTSIDE `apply_admissible` — they don't show up at the
+  -- kernel-Transition level.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX.27 byte-equivalence regression for `disputeWithdraw`. -/
@@ -90,7 +116,16 @@ lexlaw legalkernel_verdict where
   lex_params          (_v : LegalKernel.Disputes.Verdict)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.27: dispute-pipeline laws are kernel-level
+  -- identity, so they trivially satisfy all kernel-level
+  -- properties (conservative, monotonic, local, freeze_preserving,
+  -- nonce_advances, registry_preserving).  The dispute pipeline's
+  -- observable effects (verdict-driven rollback, dispute filing)
+  -- live OUTSIDE `apply_admissible` — they don't show up at the
+  -- kernel-Transition level.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX.27 byte-equivalence regression for `verdict`. -/
@@ -111,7 +146,16 @@ lexlaw legalkernel_rollback where
   lex_params          (_targetIdx : LegalKernel.Disputes.LogIndex)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.27: dispute-pipeline laws are kernel-level
+  -- identity, so they trivially satisfy all kernel-level
+  -- properties (conservative, monotonic, local, freeze_preserving,
+  -- nonce_advances, registry_preserving).  The dispute pipeline's
+  -- observable effects (verdict-driven rollback, dispute filing)
+  -- live OUTSIDE `apply_admissible` — they don't show up at the
+  -- kernel-Transition level.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX.27 byte-equivalence regression for `rollback`. -/

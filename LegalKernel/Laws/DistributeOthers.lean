@@ -89,7 +89,18 @@ lexlaw legalkernel_distributeOthers where
       toReward.foldl
         (fun s' kv => setBalance s' r kv.1 (getBalance s' r kv.1 + amount))
         s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.29: `distributeOthers` claims `monotonic`
+  -- (positive-incentive tier — every actor's balance can only
+  -- increase via the foldl-of-setBalance pattern), `local`,
+  -- `freeze_preserving`, `nonce_advances`, `registry_preserving`.
+  -- NOT `conservative` (additive — distributes new tokens).
+  -- The plan calls for `proof monotonic := by exact
+  -- distributeOthers_isMonotonic ...` override since the
+  -- synthesizer would fail on the for-loop impl shape; in M2
+  -- the synthesizer skeleton emits placeholder bodies (M3
+  -- integration), so the override is metadata-only.
+  lex_satisfies       := [monotonic, «local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.29 byte-equivalence regression for `distributeOthers`. -/

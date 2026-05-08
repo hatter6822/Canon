@@ -84,7 +84,18 @@ lexlaw legalkernel_freezeResource where
   lex_params          (_r : ResourceId)
   lex_pre             := fun _ => True
   lex_impl            := fun s => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.24: `freezeResource` exercises `LocalTo {}`
+  -- (touches no balance cell — empty `local` set since the
+  -- transition is identity) and `FreezePreserving [*]` (no
+  -- balance change preserves any frozen invariant).  Also
+  -- `conservative`, `monotonic`, `nonce_advances`,
+  -- `registry_preserving` (all hold for an identity transition).
+  -- The `local` claim is parameterised in M3 (`local []` for the
+  -- empty set); M2 uses the unparameterised form (synthesizer
+  -- skips when impl is identity).
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.24 byte-equivalence regression for `freezeResource`. -/

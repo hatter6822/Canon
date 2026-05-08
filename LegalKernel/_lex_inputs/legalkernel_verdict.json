@@ -1,10 +1,16 @@
 {"version": "1.0.0",
  "source_location":
- {"position": {"line": 83, "column": 0},
+ {"position": {"line": 109, "column": 0},
   "file": "LegalKernel/Laws/Dispute.lean"},
  "signed_by": {"name": "adjudicator", "kind": "actorRef"},
  "schema_version": 1,
- "satisfies": [],
+ "satisfies":
+ [{"name": "conservative", "args": []},
+  {"name": "monotonic", "args": []},
+  {"name": "local", "args": []},
+  {"name": "freeze_preserving", "args": []},
+  {"name": "nonce_advances", "args": []},
+  {"name": "registry_preserving", "args": []}],
  "registry_effect": {"kind": "none"},
  "proof_overrides": [],
  "pre_expr":

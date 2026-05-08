@@ -69,7 +69,17 @@ lexlaw legalkernel_replaceKey where
   lex_params          (_actor : ActorId) (_newKey : Authority.PublicKey)
   lex_pre             := fun (_ : State) => True
   lex_impl            := fun (s : State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.25: `replaceKey` claims all kernel-level
+  -- properties (it's an identity transition at the kernel level)
+  -- EXCEPT `registry_preserving` — it explicitly mutates the
+  -- registry via `applyActionToRegistry` in `apply_admissible`.
+  -- The plan note: "RegistryPreserving is **not** claimed in
+  -- satisfies for either law (correctly so; both mutate the
+  -- registry)."  Conservative / monotonic / local / freeze-
+  -- preserving / nonce_advances all hold trivially for the
+  -- kernel-level identity.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances]
   lex_events          := []
 
 /-- LX-M2 LX.25 byte-equivalence regression for `replaceKey`. -/

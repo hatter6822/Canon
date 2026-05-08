@@ -84,7 +84,12 @@ lexlaw legalkernel_deposit where
   lex_pre             := fun _ => True
   lex_impl            :=
     fun s => setBalance s r recipient (getBalance s r recipient + amount)
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.26: `deposit` is `mint`-style: claims
+  -- `monotonic`, `local`, `freeze_preserving`, `nonce_advances`,
+  -- `registry_preserving`.  NOT `conservative` (additive supply
+  -- increase by `amount`).
+  lex_satisfies       := [monotonic, «local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.26 byte-equivalence regression for `deposit`. -/

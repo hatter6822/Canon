@@ -74,7 +74,14 @@ lexlaw legalkernel_reward where
   lex_pre             := fun _ => amount > 0
   lex_impl            :=
     fun s => setBalance s r to (getBalance s r to + amount)
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.24: `reward` claims `monotonic` (succeeds
+  -- via synth_monotonic, like `mint`), `local`,
+  -- `freeze_preserving`, `nonce_advances`, `registry_preserving`.
+  -- `conservative` is correctly omitted (reward is non-
+  -- conservative by design — it adds tokens, just like `mint`,
+  -- modulo the action-layer authorisation distinction).
+  lex_satisfies       := [monotonic, «local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.24 byte-equivalence regression for `reward`. -/

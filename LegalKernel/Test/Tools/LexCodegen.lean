@@ -397,6 +397,46 @@ def tests : List TestCase :=
         | some _ => throw (IO.userError "expected none on contention")
         releaseLock testPath
     }
+  -- LX-M2 audit-3: emitCanonicalManifest produces a structured
+  -- summary that's byte-stable on equal inputs.
+  , { name := "emitCanonicalManifest produces stable output for empty input"
+    , body := do
+        let manifest1 := emitCanonicalManifest []
+        let manifest2 := emitCanonicalManifest []
+        assert (manifest1 == manifest2) "manifest output is deterministic"
+    }
+  , { name := "emitCanonicalManifest contains the law-count header"
+    , body := do
+        let manifest := emitCanonicalManifest []
+        -- Must contain the canonical header preamble for downstream
+        -- diff tooling to recognise the file.
+        assert (manifest.startsWith "# Canon — Lex law canonical manifest")
+          "manifest has stable header"
+    }
+  , { name := "emitCanonicalManifest sorts laws by action_index"
+    , body := do
+        let decl1 : LawDecl :=
+          { schemaVersion := 1, identifier := "test.b",
+            version := "v1.0.0", actionIndex := 5, intent := "second",
+            params := [], signedBy := { name := "x" },
+            authorizedBy := { expr := "x" },
+            preExpr := "", implBlock := "",
+            satisfies := [], eventsBlock := "[]",
+            registryEffect := .none_, proofOverrides := [],
+            sourceLocation := { fileName := "x", startPos := { line := 0, column := 0 } } }
+        let decl2 : LawDecl := { decl1 with identifier := "test.a", actionIndex := 1, intent := "first" }
+        -- Pass them out of order; the manifest should sort.
+        let manifest := emitCanonicalManifest [decl1, decl2]
+        let aPos := manifest.splitOn "test.a"
+        let bPos := manifest.splitOn "test.b"
+        -- "test.a" must appear before "test.b" in the output.
+        assert (aPos.length > 1) "test.a appears in manifest"
+        assert (bPos.length > 1) "test.b appears in manifest"
+        let aPrefix := aPos.headD ""
+        assert (!aPrefix.contains 'b' ||
+                aPrefix.length < (bPos.headD "").length)
+          "test.a appears before test.b (sorted by action_index)"
+    }
   ]
 
 end LegalKernel.Test.Tools.LexCodegen

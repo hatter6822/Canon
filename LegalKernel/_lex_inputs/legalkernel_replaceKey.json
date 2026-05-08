@@ -4,7 +4,12 @@
   "file": "LegalKernel/Laws/ReplaceKey.lean"},
  "signed_by": {"name": "actor", "kind": "actorRef"},
  "schema_version": 1,
- "satisfies": [],
+ "satisfies":
+ [{"name": "conservative", "args": []},
+  {"name": "monotonic", "args": []},
+  {"name": "local", "args": []},
+  {"name": "freeze_preserving", "args": []},
+  {"name": "nonce_advances", "args": []}],
  "registry_effect": {"kind": "replaceKey"},
  "proof_overrides": [],
  "pre_expr":

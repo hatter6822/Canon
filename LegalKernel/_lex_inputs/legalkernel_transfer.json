@@ -4,7 +4,13 @@
   "file": "LegalKernel/Laws/Transfer.lean"},
  "signed_by": {"name": "sender", "kind": "actorRef"},
  "schema_version": 1,
- "satisfies": [],
+ "satisfies":
+ [{"name": "conservative", "args": []},
+  {"name": "monotonic", "args": []},
+  {"name": "local", "args": []},
+  {"name": "freeze_preserving", "args": []},
+  {"name": "nonce_advances", "args": []},
+  {"name": "registry_preserving", "args": []}],
  "registry_effect": {"kind": "none"},
  "proof_overrides": [],
  "pre_expr":

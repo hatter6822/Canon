@@ -76,7 +76,15 @@ lexlaw legalkernel_mint where
   lex_pre             := fun _ => amount > 0
   lex_impl            :=
     fun s => setBalance s r to (getBalance s r to + amount)
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.23: `mint` claims `monotonic` (succeeds via
+  -- synth_monotonic), `local` (touches only resource `r`),
+  -- `freeze_preserving` (other resources untouched),
+  -- `nonce_advances` (signed_by `to`), and `registry_preserving`
+  -- (no registry mutation).  `conservative` is correctly omitted
+  -- (mint is non-conservative by design — `synth_conservative`
+  -- would fail L004).
+  lex_satisfies       := [monotonic, «local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.23 byte-equivalence regression: the Lex re-expression

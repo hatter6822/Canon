@@ -94,7 +94,15 @@ lexlaw legalkernel_proportionalDilute where
         (fun s' kv =>
           setBalance s' r kv.1 (getBalance s' r kv.1 + totalReward * kv.2 / S))
         s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.29: `proportionalDilute` claims
+  -- `monotonic` (every actor's balance can only increase or stay
+  -- the same — Nat floor never decreases), `local`,
+  -- `freeze_preserving`, `nonce_advances`, `registry_preserving`.
+  -- NOT `conservative` (additive — distributes new tokens, with
+  -- floor-division dust discarded per the
+  -- `proportionalDilute_distributed_le_totalReward` dust bound).
+  lex_satisfies       := [monotonic, «local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.29 byte-equivalence regression for `proportionalDilute`. -/

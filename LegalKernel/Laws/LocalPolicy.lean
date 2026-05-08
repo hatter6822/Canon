@@ -55,7 +55,19 @@ lexlaw legalkernel_declareLocalPolicy where
   lex_params          (_policy : LegalKernel.Authority.LocalPolicy)
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.28: local-policy laws are kernel-level
+  -- identity transitions; the `localPolicies` mutation lives in
+  -- `applyActionToLocalPolicies` (LP.5 helper, separate from
+  -- `applyActionToRegistry`).  All kernel-level properties hold
+  -- trivially.  `registry_preserving` is claimed because the
+  -- KEY REGISTRY is preserved (the local-policy mutation lives
+  -- in the SEPARATE `localPolicies` table); this is consistent
+  -- with the `lex_registry_effect localPolicy` annotation
+  -- routing the codegen to `applyActionToLocalPolicies` rather
+  -- than `applyActionToRegistry`.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX.28 byte-equivalence regression for `declareLocalPolicy`. -/
@@ -76,7 +88,19 @@ lexlaw legalkernel_revokeLocalPolicy where
   lex_registry_effect localPolicy
   lex_pre             := fun (_ : LegalKernel.State) => True
   lex_impl            := fun (s : LegalKernel.State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.28: local-policy laws are kernel-level
+  -- identity transitions; the `localPolicies` mutation lives in
+  -- `applyActionToLocalPolicies` (LP.5 helper, separate from
+  -- `applyActionToRegistry`).  All kernel-level properties hold
+  -- trivially.  `registry_preserving` is claimed because the
+  -- KEY REGISTRY is preserved (the local-policy mutation lives
+  -- in the SEPARATE `localPolicies` table); this is consistent
+  -- with the `lex_registry_effect localPolicy` annotation
+  -- routing the codegen to `applyActionToLocalPolicies` rather
+  -- than `applyActionToRegistry`.
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances,
+                          registry_preserving]
   lex_events          := []
 
 /-- LX.28 byte-equivalence regression for `revokeLocalPolicy`. -/

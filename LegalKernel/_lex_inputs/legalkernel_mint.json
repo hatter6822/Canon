@@ -3,7 +3,12 @@
  {"position": {"line": 68, "column": 0}, "file": "LegalKernel/Laws/Mint.lean"},
  "signed_by": {"name": "to", "kind": "actorRef"},
  "schema_version": 1,
- "satisfies": [],
+ "satisfies":
+ [{"name": "monotonic", "args": []},
+  {"name": "local", "args": []},
+  {"name": "freeze_preserving", "args": []},
+  {"name": "nonce_advances", "args": []},
+  {"name": "registry_preserving", "args": []}],
  "registry_effect": {"kind": "none"},
  "proof_overrides": [],
  "pre_expr":

@@ -48,7 +48,11 @@ lexlaw legalkernel_registerIdentity where
   lex_params          (_actor : ActorId) (_pk : Authority.PublicKey)
   lex_pre             := fun (_ : State) => True
   lex_impl            := fun (s : State) => s
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.25: same as `replaceKey` — claims all
+  -- kernel-level properties EXCEPT `registry_preserving` (the
+  -- registry is mutated by the authority layer).
+  lex_satisfies       := [conservative, monotonic, «local»,
+                          freeze_preserving, nonce_advances]
   lex_events          := []
 
 /-- LX-M2 LX.25 byte-equivalence regression for `registerIdentity`. -/

@@ -74,7 +74,12 @@ lexlaw legalkernel_withdraw where
   lex_pre             := fun s => getBalance s r sender ≥ amount
   lex_impl            :=
     fun s => setBalance s r sender (getBalance s r sender - amount)
-  lex_satisfies       := []
+  -- Per plan §19.4 LX.26: `withdraw` is `burn`-style: claims
+  -- `local`, `freeze_preserving`, `nonce_advances`,
+  -- `registry_preserving`.  NOT `conservative` AND NOT
+  -- `monotonic` (subtractive — supply decreases by `amount`).
+  lex_satisfies       := [«local», freeze_preserving,
+                          nonce_advances, registry_preserving]
   lex_events          := []
 
 /-- LX-M2 LX.26 byte-equivalence regression for `withdraw`. -/
