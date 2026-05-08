@@ -333,6 +333,35 @@ def tests : List TestCase :=
         assertEq (expected := content) (actual := read) "content preserved"
         IO.FS.removeFile testPath
     }
+  -- Audit-4 regression: BinderKind.inst variant round-trips.
+  -- Pre-audit-4, the BinderKind enum had only 3 variants
+  -- (explicit/implicit/strictImplicit); the macro's
+  -- paramSpecsFromBinder silently dropped instance binders
+  -- ([Inhabited α]) on M3 deployment-private laws.  Audit-4
+  -- adds the `inst` variant so the JSON sidecar's `params`
+  -- field captures every binder.
+  , { name := "audit-4: BinderKind.inst encode round-trip"
+    , body := do
+        let kind : BinderKind := .inst
+        let json := encodeBinderKind kind
+        match decodeBinderKind json with
+        | .ok decoded =>
+          assertEq (expected := BinderKind.inst) (actual := decoded) "round-trip"
+        | .error e => throw (IO.userError s!"decode failed: {e}")
+    }
+  , { name := "audit-4: encodeBinderKind .inst → \"inst\""
+    , body := do
+        match encodeBinderKind .inst with
+        | Lean.Json.str "inst" => pure ()
+        | other => throw (IO.userError s!"unexpected encoding: {other.compress}")
+    }
+  , { name := "audit-4: decodeBinderKind handles all four variants"
+    , body := do
+        for variant in ["explicit", "implicit", "strict_implicit", "inst"] do
+          match decodeBinderKind (Lean.Json.str variant) with
+          | .ok _ => pure ()
+          | .error e => throw (IO.userError s!"variant {variant} failed: {e}")
+    }
   ]
 
 end LegalKernel.Test.Tools.LexCommonTests

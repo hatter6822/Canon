@@ -37,7 +37,7 @@ statement becoming the input state of the next.
                                  mutation lives in the authority
                                  layer).
   * `register_identity _a _k`  — kernel-level identity.
-  * `id`                       — kernel-level identity (no-op).
+  * `nop`                      — kernel-level identity (no-op).
 
 # Compositional semantics
 
@@ -47,7 +47,7 @@ statement sequence.
 
 A single statement `lex_do <stmt>` lowers to `fun s => <stmt> s`.
 
-The empty body `lex_do id` lowers to `fun s => s`.
+The empty body `lex_do nop` lowers to `fun s => s`.
 
 # Compatibility with the current macro
 
@@ -178,7 +178,7 @@ private partial def lowerStmt (stmt : Syntax) : MacroM Term :=
       s!"lex_do: unrecognised calculus statement; admissible \
          primitives are `flow`, `mint`, `burn`, `reward`, \
          `freeze_resource`, `register_key`, `register_identity`, \
-         `id`."
+         `nop`."
 
 /-- Compose a list of `State → State` terms left-to-right via
     function application: `compose [f1, f2, f3]` produces a term

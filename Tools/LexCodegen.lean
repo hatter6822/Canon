@@ -763,9 +763,10 @@ def emitCanonicalManifest (decls : List LawDecl) : String := Id.run do
     else
       for p in decl.params do
         let kindStr : String := match p.kind with
-          | .explicit => "explicit"
-          | .implicit => "implicit"
+          | .explicit       => "explicit"
+          | .implicit       => "implicit"
           | .strictImplicit => "strict_implicit"
+          | .inst           => "inst"
         buf := buf ++ s!"  - {p.name} : {p.type} ({kindStr})\n"
     buf := buf ++ s!"signed_by: {decl.signedBy.name}\n"
     let regEffStr : String := match decl.registryEffect with
@@ -838,9 +839,22 @@ def main (args : List String) : IO UInt32 := do
           IO.eprintln "  run `lake exe lex_codegen --canonical` to generate"
           return 1
       else
-        atomicWriteIfChanged manifestPath manifest
-        IO.println s!"lex_codegen --canonical: emitted {decls.length} law(s) to {manifestPath.toString}"
-        return 0
+        -- Audit-4: wrap the manifest write in `withFileLock` so
+        -- concurrent `--canonical` invocations serialise.
+        -- Pre-audit-4, the canonical-mode write bypassed the
+        -- advisory lock (only the default-mode `appendToTargetFile`
+        -- had lock protection), allowing two concurrent
+        -- invocations to race.  The lock is now held over the
+        -- full write so the canonical manifest's byte-stability
+        -- holds even under concurrent invocations.
+        match (← withFileLock manifestPath
+                  (atomicWriteIfChanged manifestPath manifest)) with
+        | none =>
+          IO.eprintln s!"lex_codegen --canonical: another invocation holds the advisory lock for {manifestPath.toString}"
+          return 1
+        | some _ =>
+          IO.println s!"lex_codegen --canonical: emitted {decls.length} law(s) to {manifestPath.toString}"
+          return 0
   -- Load codegen inputs.
   match (← loadCodegenInputs opts.inputDir) with
   | .error msg =>

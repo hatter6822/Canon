@@ -2729,6 +2729,85 @@ After audit-2 fixes:
     in-place migration; their `source_location.file` now
     points at the consolidated path).
 
+**Workstream-LX M2 audit-4 hardening (this branch).**  A fourth
+deep audit (parallelised across the 17 law files and the macro/
+codegen infrastructure) found three issues — one MEDIUM
+correctness gap, one MEDIUM lock-management defect, and one LOW
+documentation drift.  All closed in this branch.
+
+  * **MEDIUM (correctness gap): `paramSpecsFromBinder` silently
+    dropped instance binders.**  Pre-audit-4, the binder walker
+    handled `explicitBinder` / `implicitBinder` /
+    `strictImplicitBinder` syntax kinds but had a catch-all
+    `else => []` arm that silently swallowed `instBinder`
+    (`[Inhabited α]`-style typeclass parameters).  The
+    consequence: any deployment-private law using `[]`-style
+    parameters would have its instance-binder metadata
+    DROPPED from the JSON sidecar's `params` field — silent
+    JSON-vs-source drift.  None of the 17 kernel-built-in laws
+    use instance binders, so the drift was dormant.
+
+    Fix: extended `BinderKind` (in `Tools/LexCommon.lean`) with
+    a fourth `inst` variant; updated `encodeBinderKind` /
+    `decodeBinderKind`; extended `paramSpecsFromBinder` to
+    handle `Lean.Parser.Term.instBinder` syntax kind, capturing
+    both named (`[h : Inhabited α]`) and anonymous
+    (`[Inhabited α]`) forms.  Three new regression tests in
+    `tools-lex-common` exercise the new variant: round-trip
+    encoding, encoding-form, and decoder-handles-all-four-
+    variants.  Audit-4 closed an M3-risk drift before any law
+    actually hit the codepath.
+
+  * **MEDIUM (lock leak): canonical-mode emit bypassed
+    `withFileLock`.**  Pre-audit-4, the `lex_codegen --canonical`
+    mode wrote `canonical_manifest.txt` directly via
+    `atomicWriteIfChanged`, with no advisory-lock wrapper.  Two
+    concurrent `--canonical` invocations (e.g. CI + a developer
+    running locally) could race: both observe the absent lock,
+    both invoke `atomicWriteIfChanged`, and the second
+    `IO.FS.rename` silently overwrites the first's atomic
+    commit, producing inconsistent canonical-manifest state.
+
+    Fix: wrapped the canonical-mode write in `withFileLock
+    manifestPath`, mirroring the default-mode `appendToTargetFile`
+    discipline.  The wrapper releases the lock on every exit
+    path (success / structured error / exception); concurrent
+    invocations now serialise.  The lock contention path
+    returns exit code 1 with a precise diagnostic
+    ("another invocation holds the advisory lock").
+
+  * **LOW (documentation drift): `id` vs `nop` no-op naming.**
+    Pre-audit-4, the `LexImplLowering.lean` module's docstring
+    listed `id` as the kernel-level no-op calculus statement
+    (line 40), and the diagnostic message at the unrecognised-
+    statement catch-all also listed `id` as admissible (line
+    181).  But the actual parser kind was `lexCalcNop` matching
+    the `nop` keyword (the `id` keyword had been renamed earlier
+    to avoid clashing with the `lex_id` macro clause's
+    antiquote naming).  Users typing `lex_do id` would receive
+    a confusing diagnostic listing `id` as admissible.
+
+    Fix: corrected both docstring instances and the diagnostic
+    message to say `nop`.  Module-level documentation is now
+    consistent with the actual parser surface.
+
+  * **Audit-4 also performed mutation-test verification of the
+    `rfl`-equivalence regression examples.**  Empirically
+    confirmed that:
+    - Mutating the hand-written `Laws.reward.apply_impl` body
+      from `+ amount` to `- amount` triggers an `omega` failure
+      in `reward_isMonotonic` proof (downstream protection).
+    - Mutating ONLY the Lex declaration's `lex_impl` body (in
+      `Laws.Mint.lean`) triggers a precise `Type mismatch` at
+      the regression `example`'s `:= rfl` (the byte-equivalence
+      invariant catches drift).
+    Both protections continue to work after audit-4 fixes.
+
+  * **Test count after audit-4: 1453 (+3) across 83 suites.**
+    The 3 new tests in `tools-lex-common` cover the new
+    `BinderKind.inst` variant.  All 7 CI gates remain green;
+    0 build warnings on a clean rebuild.
+
 **Workstream-LX M2 audit-3 hardening (this branch).**  An
 audit-3 deep pass closes the remaining tractable items from the
 audit-2 deferred list.  Test count: 1447 → 1450 (+3 in

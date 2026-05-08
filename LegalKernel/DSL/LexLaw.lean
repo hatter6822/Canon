@@ -403,6 +403,41 @@ private def paramSpecsFromBinder (binder : Syntax) :
       if idStx.isIdent then
         some { name := toString idStx.getId, type := typeStr, kind }
       else none)
+  -- Instance binder: [ <ident>? : <type> ] or [ <type> ] (anonymous).
+  -- Audit-4: previously dropped silently, causing JSON-vs-source
+  -- drift for any law that happens to use `[Inhabited α]`-style
+  -- parameters.  The walker now records every named instance binder
+  -- with its type; anonymous instance binders (no leading ident)
+  -- are emitted as a single ParamSpec with `name = "_"` so the
+  -- count of recorded params still matches the count of binders.
+  --
+  -- Lean's `instBinder` syntax has shape:
+  --   [ (ident :)? <type> ]
+  -- where the `(ident :)?` is optional.  The kind name is
+  -- `Lean.Parser.Term.instBinder`.
+  else if binder.isOfKind ``Lean.Parser.Term.instBinder then
+    -- For an instance binder, the structure is:
+    --   args[0] = "["
+    --   args[1] = <optional binderIdent ":" prefix> (a "binderName"-shaped node)
+    --   args[2] = <type term>
+    --   args[3] = "]"
+    -- The binderIdent prefix may be absent for anonymous form.
+    let typeStr :=
+      let arg2 := binder.getArg 2
+      renderSyntax arg2
+    let nameOpt : Option String :=
+      let arg1 := binder.getArg 1
+      if arg1.getNumArgs ≥ 1 then
+        let firstChild := arg1.getArg 0
+        if firstChild.isIdent then some (toString firstChild.getId)
+        else none
+      else none
+    let nameStr : String := nameOpt.getD "_"
+    return [{
+      name := nameStr,
+      type := typeStr,
+      kind := .inst
+    }]
   else
     return []
 
