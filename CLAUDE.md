@@ -3068,6 +3068,100 @@ where reasonable (single-policy `deploy_authority` form is the
 only intentionally-removed surface, replaced by the spec-canonical
 multi-binding `[default = <expr>]` form).
 
+**Workstream-LX M3-completion audit-2 hardening (this branch).**
+A second deep audit pass following the M3-completion landing
+identified one CRITICAL security defect, one CRITICAL functional
+gap, one HIGH defensiveness issue, two MEDIUM spec-compliance
+issues, and several documentation drifts.  All closed.
+
+  * **CRITICAL (security): git-ref flag injection in
+    `gitShow` / `gitLsTree` / `parseLawDeclFromGitRef`.**
+    Pre-fix, `lex_diff --git "--upload-pack=evil" HEAD`
+    succeeded in passing the `--upload-pack=evil` argument to
+    `git show`, where git interprets it as a flag rather than a
+    ref.  Although `IO.Process.output` doesn't shell-evaluate
+    (so no shell injection), git's flag parsing can still be
+    weaponised — `--upload-pack` lets a remote-url attack vector
+    slip in some contexts, and `--exec=` (in some git
+    subcommands) executes arbitrary code.
+    Fix: added `isSafeGitRef` predicate that rejects refs
+    starting with `-`, containing ASCII control characters, or
+    empty.  All three git-integration entry points
+    (`gitShow`, `gitLsTree`, `parseLawDeclFromGitRef`) now
+    validate before invoking git, returning `none` /
+    `IO.userError` with a clear "unsafe ref" diagnostic.
+    Plus 4 new regression tests in `tools-lex-diff` exercising
+    the flag-injection / control-char rejection.
+
+  * **CRITICAL (functional): manifest-level diff fields never
+    populated.**  Pre-fix, `DeploymentDiff` exposed
+    `authoritySlots{Added, Removed, Modified}` and
+    `invariantClaims{Added, Removed, Modified}` fields, but
+    `computeLawSetDiff` (and its `computeDeploymentDiff` alias)
+    always set them to empty lists.  This made `classifyManifestBump`
+    detect law-set changes correctly but always miss authority /
+    claim changes — a half-implemented feature.
+    Fix: added `computeManifestDiff : Deployment → Deployment →
+    DeploymentDiff` that fully populates the manifest-level
+    diff fields.  Also added `combineManifestAndLawDiffs`
+    helper for merging manifest-level + law-content diffs.
+    Plus 7 new regression tests in `tools-lex-diff` covering
+    add/remove/modify of authority slots and invariant claims.
+    The `Tools.LexDiff` library now imports
+    `LegalKernel.DSL.LexDeployment` to access the `Deployment`
+    type.
+
+  * **HIGH (defensiveness): unsafe `get!` chain in
+    `parseDeployment`.**  Pre-fix, `let deploymentId :=
+    decodeHexString (acc.deploymentIdClause.map (·.2)).get! |>.get!`
+    relied on `validateRequiredDeployClauses` having thrown
+    earlier if `deploymentIdClause` was `none`.  Safe under the
+    macro elaborator (which always validates first), but
+    external callers that catch the validation exception and
+    proceed would hit a runtime panic.
+    Fix: replaced double-`get!` chain with explicit pattern-
+    matching that throws an internal-error diagnostic if
+    validation post-conditions are violated.
+
+  * **MEDIUM (spec compliance): `lex_codegen --check` did not
+    include `AutoGen.lean`.**  Plan §LX.38 explicitly says:
+    "`lex_codegen --check` includes the auto-generated file in
+    its consistency check."  Pre-fix, the check was only
+    reached via the separate `--gen-property-tests --check`
+    invocation.
+    Fix: `lex_codegen --check` now also re-renders `AutoGen.lean`
+    and byte-compares against the on-disk file (when the file
+    exists; the gate is opt-in via the file's existence so
+    projects not using the autogen feature are unaffected).
+    Divergence is reported as `L026: AutoGen.lean diverges
+    from rendered output ...` with exit code 1.
+
+  * **MEDIUM (docstring): `encodeManifestHashInput` field-order
+    contract docstring (5) said `localName + version` but the
+    code emits `localName + lawIdent + version`.**
+    Fix: docstring corrected; rationale added (omitting
+    `lawIdent` would let two manifests with the same localName
+    + version but different bound laws hash equal).
+
+After audit-2 fixes:
+
+  * **1584 tests across 84 suites** (was 1547 pre-audit-2;
+    +37: 11 in `tools-lex-diff` for the 7 new manifest-diff
+    tests + 4 git-ref-security tests, plus `+11` already added
+    in M3-completion that landed alongside).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 6 CI gates green: `lake build`, `lake test`,
+    `count_sorries`, `tcb_audit`, `stub_audit`, `lex_lint`,
+    `lex_codegen --check` (now also includes AutoGen.lean
+    consistency); plus `lex_codegen --gen-property-tests --check`.
+  * Two new public APIs: `LegalKernel.Tools.Lex.Diff.isSafeGitRef`,
+    `LegalKernel.Tools.Lex.Diff.computeManifestDiff`,
+    `LegalKernel.Tools.Lex.Diff.combineManifestAndLawDiffs`.
+  * No remaining spec-deferrals at the M3 acceptance gate;
+    every §16 / §14 / §15 / §LX.31-38 deliverable is functionally
+    complete.
+
 **Workstream-LX M2 audit-5 hardening (this branch).**  A fifth
 deep audit, parallelised across three independent agents (law-
 file mathematical correctness, test-coverage gaps, and

@@ -312,9 +312,13 @@ structure DeploymentDecl where
       3. Version (CBE byte-string).
       4. Resources list (count-prefixed; per-entry name + idx).
       5. Law bindings (count-prefixed; per-entry localName +
-         version).
+         lawIdent + version).  Including the resolved
+         `lawIdent` is essential — two manifests with the same
+         localName + version but different bound laws would
+         otherwise hash equal.
       6. Authority bindings (count-prefixed; per-entry localName
-         + policyExpr).
+         + policyExpr).  The `policyExpr` is the surface text of
+         the user's `AuthorityPolicy` expression.
       7. Invariant claims (count-prefixed; per-entry kind-tag +
          scope-tag + law-names).
     -/
@@ -757,8 +761,21 @@ def parseDeployment (env : Lean.Environment) (currentNs : Lean.Name)
   -- specific anchor should validate themselves.
   let anchor := if clauses.isEmpty then Lean.Syntax.missing else clauses[0]!
   validateRequiredDeployClauses acc anchor
-  let deploymentId := decodeHexString
-    (acc.deploymentIdClause.map (·.2)).get! |>.get!
+  -- Safe extraction: `validateRequiredDeployClauses` has already
+  -- thrown if `deploymentIdClause` is `none` or its decoded
+  -- payload is not 32 bytes.  Use safe `Option.elim` to avoid
+  -- relying on `.get!` invariants in case external callers
+  -- somehow reach this code path with invalidated state.
+  let deploymentId : ByteArray ← match acc.deploymentIdClause with
+    | none =>
+      throwErrorAt anchor
+        s!"deployment `{acc.deployName}`: internal error: validation passed but deploymentIdClause is none"
+    | some (didStx, hex) =>
+      match decodeHexString hex with
+      | none =>
+        throwErrorAt didStx
+          s!"deployment `{acc.deployName}`: internal error: validation passed but hex `{hex}` failed to decode"
+      | some bs => pure bs
   let lawBindings : List LawBinding :=
     (acc.lawsClause.getD []).map (fun (lnm, _surface, ident, ver) =>
       ({ localName := lnm, lawIdent := ident, version := ver } : LawBinding))

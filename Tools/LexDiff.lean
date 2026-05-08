@@ -60,6 +60,7 @@ governance gates) but cannot violate any kernel invariant.
 -/
 
 import Tools.LexCommon
+import LegalKernel.DSL.LexDeployment
 
 namespace LegalKernel.Tools.Lex.Diff
 
@@ -365,9 +366,35 @@ def loadCodegenDir (dir : FilePath) :
 
 /-! ## Git integration (LX.34 spec) -/
 
+/-- Validate that a git ref is safe to pass to `git show` /
+    `git ls-tree`.  Rejects refs that:
+
+      * Start with `-` (would be interpreted as a flag by git's
+        argument parser, allowing flag injection like
+        `--upload-pack=evil`).
+      * Contain ASCII control characters (defense-in-depth).
+      * Are empty.
+
+    Returns `true` if the ref is safe.
+
+    **Threat model**: a malicious ref supplied by an untrusted
+    caller (e.g. CI inputs) could exploit git's flag-parsing to
+    cause arbitrary command execution via flags like
+    `--upload-pack` or `--exec`.  We defend by rejecting
+    flag-shaped refs at the binary boundary.
+
+    `IO.Process.output` already passes args directly (no shell);
+    this validation closes the remaining flag-injection vector. -/
+def isSafeGitRef (ref : String) : Bool :=
+  !ref.isEmpty ∧
+  !ref.startsWith "-" ∧
+  ref.toList.all (fun c => c.toNat ≥ 0x20 ∧ c.toNat < 0x7F)
+
 /-- Run `git show <ref>:<path>` and capture stdout.  Returns
-    `none` on git failure. -/
+    `none` on git failure or if the ref is unsafe. -/
 def gitShow (ref : String) (path : String) : IO (Option String) := do
+  if !isSafeGitRef ref then
+    return none
   let proc := { cmd := "git",
                 args := #[s!"show", s!"{ref}:{path}"] : IO.Process.SpawnArgs }
   let output ← IO.Process.output proc
@@ -380,10 +407,14 @@ def gitShow (ref : String) (path : String) : IO (Option String) := do
     Uses `git show <ref>:<path>` to fetch the file at the named
     revision.
 
-    Returns `IO LawDecl`; raises `IO.userError` on git failure or
-    parse failure. -/
+    Returns `IO LawDecl`; raises `IO.userError` on git failure,
+    parse failure, OR if the ref is unsafe (flag injection
+    defense). -/
 def parseLawDeclFromGitRef (ref : String) (filePath : System.FilePath) :
     IO LawDecl := do
+  if !isSafeGitRef ref then
+    throw <| IO.userError
+      s!"git ref `{ref}` is unsafe (starts with `-`, contains control chars, or is empty); refusing to pass to git for security"
   let pathStr := filePath.toString
   match (← gitShow ref pathStr) with
   | none =>
@@ -399,6 +430,9 @@ def parseLawDeclFromGitRef (ref : String) (filePath : System.FilePath) :
     Uses `git ls-tree <ref> -- <dir>` to get the listing. -/
 def gitLsTree (ref : String) (dir : String) :
     IO (Except String (List String)) := do
+  if !isSafeGitRef ref then
+    return .error
+      s!"git ref `{ref}` is unsafe (starts with `-`, contains control chars, or is empty); refusing to pass to git for security"
   let proc := { cmd := "git",
                 args := #["ls-tree", "--name-only", ref, "--", dir]
                 : IO.Process.SpawnArgs }
@@ -475,6 +509,122 @@ def computeLawSetDiff (before after : List LawDecl) :
 /-- Backward-compat alias for the law-set-only diff (the
     pre-M3-completion API). -/
 def computeDeploymentDiff := computeLawSetDiff
+
+/-! ## Manifest-level diffing (LX.35)
+
+`computeManifestDiff` takes two `Deployment` records and produces
+a complete `DeploymentDiff` covering law-set / authority-set /
+claim-set adds / removes / modifications.
+
+Per §14.4: adding/removing laws or authority bindings is a major
+manifest bump; per-binding edits are minor.  Combine with
+`computeLawSetDiff` to get full per-law content diffs (which
+require `LawDecl` JSON sidecars beyond what the `Deployment`
+record carries).
+
+The function does not require git or filesystem access — it
+operates on `Deployment` Lean values directly.  Tooling that
+needs to compare two manifests at git refs should:
+
+  1. Elaborate / load the `Deployment` records at each ref.
+  2. Optionally also load the `LawDecl` JSON sidecars at each
+     ref via `loadCodegenDirFromGitRef`.
+  3. Combine via `computeManifestDiff` (manifest-level) +
+     `computeLawSetDiff` (per-law content). -/
+
+/-- Render an `InvariantClaim` as a comma-joined "<kind>:<lawnames>"
+    string for diff comparison. -/
+private def invariantClaimToString
+    (c : LegalKernel.DSL.InvariantClaim) : String :=
+  let kindStr : String := match c.kind with
+    | .monotonicLawSet        => "monotonic_law_set"
+    | .conservativeLawSet     => "conservative_law_set"
+    | .freezePreservingLawSet => "freeze_preserving_law_set"
+  let scopeStr : String := match c.scope with
+    | .explicit names => "[" ++ String.intercalate "," names ++ "]"
+    | .wildcard       => "[all_laws]"
+  s!"{kindStr} {scopeStr}"
+
+/-- Compute a manifest-level diff between two `Deployment`
+    records.  Populates law / authority / invariant-claim
+    add/remove/modify lists.
+
+    The `lawsModified` field is left empty by this function —
+    populating it requires `LawDecl` JSON sidecars (the
+    `Deployment` record carries `LawBinding` summaries, not
+    full law content).  Use `computeLawSetDiff` separately for
+    per-law content diffs. -/
+def computeManifestDiff
+    (before after : LegalKernel.DSL.Deployment) :
+    DeploymentDiff := Id.run do
+  -- Law bindings (compared by localName).
+  let beforeLawNames := before.laws.map (·.localName)
+  let afterLawNames := after.laws.map (·.localName)
+  let lawsAdded := afterLawNames.filter (fun n => !beforeLawNames.contains n)
+  let lawsRemoved := beforeLawNames.filter (fun n => !afterLawNames.contains n)
+  -- Authority slots.
+  let beforeAuthSlots := before.authority.map (·.localName)
+  let afterAuthSlots := after.authority.map (·.localName)
+  let authAdded := afterAuthSlots.filter (fun s => !beforeAuthSlots.contains s)
+  let authRemoved := beforeAuthSlots.filter (fun s => !afterAuthSlots.contains s)
+  let mut authModified : List AuthorityBindingDiff := []
+  for b in before.authority do
+    if let some a := after.authority.find? (fun ab => ab.localName == b.localName) then
+      if b.policyExpr != a.policyExpr then
+        authModified := authModified ++ [{
+          slotName := b.localName,
+          diff := { before := b.policyExpr, after := a.policyExpr }
+        }]
+  -- Invariant claims (compared by their string-render).
+  let beforeClaims := before.invariantClaims.map invariantClaimToString
+  let afterClaims := after.invariantClaims.map invariantClaimToString
+  let claimsAdded := afterClaims.filter (fun c => !beforeClaims.contains c)
+  let claimsRemoved := beforeClaims.filter (fun c => !afterClaims.contains c)
+  -- Modified claims: same kind with different scope.
+  let mut claimsModified : List InvariantClaimDiff := []
+  for b in before.invariantClaims do
+    -- Find an `after` claim with the same kind.
+    let kindMatches := after.invariantClaims.filter (fun a => a.kind == b.kind)
+    let beforeMatchCount := (before.invariantClaims.filter
+        (fun bb => bb.kind == b.kind)).length
+    if kindMatches.length == 1 ∧ beforeMatchCount == 1 then
+      let a := kindMatches.head!
+      let bScope := match b.scope with
+        | .explicit names => String.intercalate "," names
+        | .wildcard       => "<all_laws>"
+      let aScope := match a.scope with
+        | .explicit names => String.intercalate "," names
+        | .wildcard       => "<all_laws>"
+      if bScope != aScope then
+        let kindStr : String := match b.kind with
+          | .monotonicLawSet        => "monotonic_law_set"
+          | .conservativeLawSet     => "conservative_law_set"
+          | .freezePreservingLawSet => "freeze_preserving_law_set"
+        claimsModified := claimsModified ++ [{
+          kindName := kindStr,
+          diff := { before := bScope, after := aScope }
+        }]
+  pure {
+    lawsAdded := lawsAdded,
+    lawsRemoved := lawsRemoved,
+    lawsModified := [],  -- requires LawDecl sidecars
+    authoritySlotsAdded := authAdded,
+    authoritySlotsRemoved := authRemoved,
+    authoritySlotsModified := authModified,
+    invariantClaimsAdded := claimsAdded,
+    invariantClaimsRemoved := claimsRemoved,
+    invariantClaimsModified := claimsModified
+  }
+
+/-- Combine a manifest-level diff with a per-law content diff.
+    The `lawsModified` field is taken from the law-content diff
+    (since manifest-level diffing can't see per-law content);
+    other fields are taken from the manifest-level diff. -/
+def combineManifestAndLawDiffs
+    (manifestDiff : DeploymentDiff) (lawDiff : DeploymentDiff) :
+    DeploymentDiff :=
+  { manifestDiff with
+      lawsModified := lawDiff.lawsModified }
 
 /-! ## Output formatting (§14.1) -/
 

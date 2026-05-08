@@ -384,6 +384,185 @@ def versionBumpToDisplay : TestCase := {
     assertEq (expected := "major") (actual := VersionBump.major.toDisplay) "major"
 }
 
+/-! ## Audit-amendment: manifest-level diffing tests
+    (LX.35 spec — the previously-empty authority/claim diff fields). -/
+
+/-- A canonical `Deployment` for testing. -/
+def fixtureDeployment : LegalKernel.DSL.Deployment := {
+  identifier := "ex.test",
+  deploymentId := ByteArray.mk (Array.replicate 32 (0 : UInt8)),
+  version := "1.0.0",
+  resources := [("USD", 0)],
+  laws := [{ localName := "Transfer",
+             lawIdent := Lean.Name.anonymous,
+             version := "1.0.0" }],
+  authority := [{ localName := "default",
+                  policyExpr := "AuthorityPolicy.unrestricted" }],
+  invariantClaims := [],
+  manifestHashBytes := ByteArray.mk #[0]
+}
+
+/-- Equal `Deployment`s produce an empty manifest diff. -/
+def manifestDiffEmptyOnEqual : TestCase := {
+  name := "audit: computeManifestDiff is empty when both equal"
+  body := do
+    let diff := computeManifestDiff fixtureDeployment fixtureDeployment
+    assertEq (expected := 0) (actual := diff.lawsAdded.length) "0 added"
+    assertEq (expected := 0) (actual := diff.lawsRemoved.length) "0 removed"
+    assertEq (expected := 0) (actual := diff.authoritySlotsAdded.length) "0 auth added"
+    assertEq (expected := 0) (actual := diff.authoritySlotsRemoved.length) "0 auth removed"
+    assertEq (expected := 0) (actual := diff.authoritySlotsModified.length) "0 auth modified"
+    assertEq (expected := 0) (actual := diff.invariantClaimsAdded.length) "0 claims added"
+    assertEq (expected := 0) (actual := diff.invariantClaimsRemoved.length) "0 claims removed"
+}
+
+/-- Adding an authority slot is detected. -/
+def manifestDiffAuthorityAdded : TestCase := {
+  name := "audit: computeManifestDiff detects added authority slots"
+  body := do
+    let after := { fixtureDeployment with
+      authority := fixtureDeployment.authority ++
+                   [{ localName := "extra_policy",
+                      policyExpr := "AuthorityPolicy.empty" }] }
+    let diff := computeManifestDiff fixtureDeployment after
+    assertEq (expected := 1) (actual := diff.authoritySlotsAdded.length) "1 added"
+    assertEq (expected := "extra_policy")
+             (actual := diff.authoritySlotsAdded.head!) "added slot"
+}
+
+/-- Removing an authority slot is detected. -/
+def manifestDiffAuthorityRemoved : TestCase := {
+  name := "audit: computeManifestDiff detects removed authority slots"
+  body := do
+    let before := { fixtureDeployment with
+      authority := fixtureDeployment.authority ++
+                   [{ localName := "to_remove",
+                      policyExpr := "AuthorityPolicy.empty" }] }
+    let diff := computeManifestDiff before fixtureDeployment
+    assertEq (expected := 1) (actual := diff.authoritySlotsRemoved.length) "1 removed"
+}
+
+/-- Modifying an authority slot's policy expression is detected. -/
+def manifestDiffAuthorityModified : TestCase := {
+  name := "audit: computeManifestDiff detects modified authority slots"
+  body := do
+    let after := { fixtureDeployment with
+      authority := [{ localName := "default",
+                      policyExpr := "AuthorityPolicy.empty" }] }  -- different expr
+    let diff := computeManifestDiff fixtureDeployment after
+    assertEq (expected := 1) (actual := diff.authoritySlotsModified.length) "1 modified"
+}
+
+/-- Adding an invariant claim is detected. -/
+def manifestDiffClaimsAdded : TestCase := {
+  name := "audit: computeManifestDiff detects added invariant claims"
+  body := do
+    let after := { fixtureDeployment with
+      invariantClaims := [{ kind := .monotonicLawSet,
+                            scope := .explicit ["Transfer"] }] }
+    let diff := computeManifestDiff fixtureDeployment after
+    assertEq (expected := 1) (actual := diff.invariantClaimsAdded.length) "1 added"
+}
+
+/-- Modifying an invariant claim's law list is detected. -/
+def manifestDiffClaimsModified : TestCase := {
+  name := "audit: computeManifestDiff detects modified invariant claims"
+  body := do
+    let before := { fixtureDeployment with
+      invariantClaims := [{ kind := .monotonicLawSet,
+                            scope := .explicit ["Transfer"] }] }
+    let after := { fixtureDeployment with
+      invariantClaims := [{ kind := .monotonicLawSet,
+                            scope := .explicit ["Transfer", "Mint"] }] }
+    let diff := computeManifestDiff before after
+    assertEq (expected := 1) (actual := diff.invariantClaimsModified.length) "1 modified"
+}
+
+/-- `combineManifestAndLawDiffs` correctly merges the two diff sources. -/
+def combineDiffsTest : TestCase := {
+  name := "audit: combineManifestAndLawDiffs merges manifest + per-law diffs"
+  body := do
+    let manifestDiff := { (computeManifestDiff fixtureDeployment fixtureDeployment) with
+      authoritySlotsAdded := ["new_slot"] }
+    let lawDiff : DeploymentDiff := {
+      lawsAdded := [],
+      lawsRemoved := [],
+      lawsModified := [{
+        identifier := "ex.test",
+        versionBefore := "1.0.0",
+        versionAfter := "1.1.0",
+        versionBump := .minor,
+        preDiff := some { before := "x", after := "y" },
+        implDiff := none, satisfiesDiff := none, eventsDiff := none,
+        intentDiff := none, signedByDiff := none, authDiff := none,
+        actionIndexDiff := none, paramsDiff := none,
+        proofOverridesDiff := none, registryEffectDiff := none,
+        refinementProofPresent := false
+      }],
+      authoritySlotsAdded := [],
+      authoritySlotsRemoved := [],
+      authoritySlotsModified := [],
+      invariantClaimsAdded := [],
+      invariantClaimsRemoved := [],
+      invariantClaimsModified := []
+    }
+    let combined := combineManifestAndLawDiffs manifestDiff lawDiff
+    -- Manifest-level fields preserved from manifestDiff
+    assertEq (expected := 1) (actual := combined.authoritySlotsAdded.length)
+      "manifest auth fields preserved"
+    -- Law-level fields taken from lawDiff
+    assertEq (expected := 1) (actual := combined.lawsModified.length)
+      "law-level fields taken from lawDiff"
+}
+
+/-! ## Audit-amendment: git ref security tests (LX.34 + audit). -/
+
+/-- `isSafeGitRef` rejects flag-shaped refs. -/
+def gitRefRejectsFlagInjection : TestCase := {
+  name := "audit: isSafeGitRef rejects flag-shaped refs"
+  body := do
+    assert (!isSafeGitRef "--upload-pack=evil")
+      "should reject --upload-pack=evil"
+    assert (!isSafeGitRef "-rf")
+      "should reject -rf"
+    assert (!isSafeGitRef "--exec=cmd")
+      "should reject --exec=cmd"
+}
+
+/-- `isSafeGitRef` rejects empty + control-char refs. -/
+def gitRefRejectsControlChars : TestCase := {
+  name := "audit: isSafeGitRef rejects empty + control-char refs"
+  body := do
+    assert (!isSafeGitRef "") "should reject empty"
+    assert (!isSafeGitRef "ref\nwith\nnewlines") "should reject newlines"
+    assert (!isSafeGitRef "ref\twith\ttabs") "should reject tabs"
+}
+
+/-- `isSafeGitRef` accepts canonical ref formats. -/
+def gitRefAcceptsCanonical : TestCase := {
+  name := "audit: isSafeGitRef accepts canonical ref formats"
+  body := do
+    assert (isSafeGitRef "main") "main branch"
+    assert (isSafeGitRef "v1.0.0") "tag"
+    assert (isSafeGitRef "feature/foo") "branch with slash"
+    assert (isSafeGitRef "abc123def456") "hash"
+    assert (isSafeGitRef "HEAD~1") "relative ref"
+}
+
+/-- `parseLawDeclFromGitRef` rejects unsafe refs without invoking git. -/
+def gitRefValidationInParseLawDeclFromGitRef : TestCase := {
+  name := "audit: parseLawDeclFromGitRef rejects unsafe refs"
+  body := do
+    -- This test verifies behavior; we expect an IO.userError.
+    try
+      let _ ← parseLawDeclFromGitRef "--evil-flag" "/dev/null"
+      throw (IO.userError "expected IO.userError, got success")
+    catch e =>
+      let msg := e.toString
+      let hasSecurityMsg := (msg.splitOn "unsafe").length > 1
+      assert hasSecurityMsg s!"expected 'unsafe' in error msg; got `{msg}`"
+}
+
 /-! ## Combined test suite -/
 
 /-- Complete LX.34/LX.35 test suite. -/
@@ -414,7 +593,20 @@ def tests : List TestCase :=
     manifestBumpNoneOnEqual,
     formatLawDiffNonEmpty,
     reformattingProducesEmptyDiff,
-    versionBumpToDisplay ]
+    versionBumpToDisplay,
+    -- Audit-amendment: manifest-level diff tests
+    manifestDiffEmptyOnEqual,
+    manifestDiffAuthorityAdded,
+    manifestDiffAuthorityRemoved,
+    manifestDiffAuthorityModified,
+    manifestDiffClaimsAdded,
+    manifestDiffClaimsModified,
+    combineDiffsTest,
+    -- Audit-amendment: git ref security tests
+    gitRefRejectsFlagInjection,
+    gitRefRejectsControlChars,
+    gitRefAcceptsCanonical,
+    gitRefValidationInParseLawDeclFromGitRef ]
 
 end LexDiffTests
 end LegalKernel.Test.Tools

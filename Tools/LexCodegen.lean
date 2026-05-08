@@ -1305,6 +1305,20 @@ def main (args : List String) : IO UInt32 := do
         allViolations := allViolations ++ evV
         let saV ← checkTargetFile opts.outputs.signedActionFile signedBodies
         allViolations := allViolations ++ saV
+        -- LX.38 amendment: also check `AutoGen.lean` if it exists.
+        -- Per spec: "`lex_codegen --check` includes the auto-
+        -- generated file in its consistency check."  We check it
+        -- only when present so the gate is opt-in (via existing
+        -- AutoGen.lean) — running on a project that doesn't use
+        -- the autogen feature shouldn't fail.
+        let autoGenPath : System.FilePath :=
+          FilePath.mk "LegalKernel/Test/Properties/AutoGen.lean"
+        if (← autoGenPath.pathExists) then
+          let autoGenSrc := emitAutoGenLean decls
+          let existing ← IO.FS.readFile autoGenPath
+          if existing != autoGenSrc then
+            allViolations := allViolations ++
+              [s!"L026: AutoGen.lean diverges from rendered output at {autoGenPath.toString}"]
         if allViolations.isEmpty then
           IO.println s!"lex_codegen --check: {decls.length} input(s); no divergence; OK"
           return 0
