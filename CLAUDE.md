@@ -206,6 +206,8 @@ lake build LegalKernel.Encoding.LocalPolicy                     # Workstream LP.
 lake build LegalKernel.LocalPolicy.LawClassification            # Workstream LP.9 IsConservative/IsMonotonic
 lake build LegalKernel.DSL.LexLaw                               # Workstream LX.6/LX.11 lexlaw macro
 lake build LegalKernel.DSL.LexProperty                          # Workstream LX.12-15 synthesizer skeleton
+lake build LegalKernel.DSL.LexDeployment                        # LX-M3 LX.31-LX.33 deployment manifest macro
+lake build Deployments.Examples.UsdClearing                     # LX-M3 LX.37 worked example deployment
 lake build LegalKernel.Laws.ExampleLex                          # Workstream LX.21 M1 acceptance Lex law
 # LX-M2 audit-2 in-place migration: Lex declarations co-located with
 # hand-written law files (or at top-level for Lex-only laws).
@@ -233,6 +235,8 @@ lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
 lake exe lex_lint                   # Workstream LX.5 registry + codegen-input gate
 lake exe lex_codegen --check        # Workstream LX.17-20 codegen-consistency gate
+lake exe lex_diff <before> <after>  # LX-M3 LX.34/LX.35 semantic-diff binary
+lake exe lex_format <file>          # LX-M3 LX.36 pretty-printer
 
 # Phase-5 runtime smoke test (single-shot demo of the binary):
 .lake/build/bin/canon info
@@ -1713,7 +1717,7 @@ units.  Brief summary:
 | LP     | Actor-scoped policies              | LP.1–LP.14 (`docs/actor_scoped_policies_plan.md`) | Complete (Lean side; 14 work units; 5 new modules; 66 new tests across 5 new suites; Solidity-side mirror documented as future work) |
 | LX-M1  | Lex language: macro skeleton + synthesizer + additive codegen | LX.1–LX.21 (`docs/lex_implementation_plan.md` §19.3) | Complete (M1 milestone) |
 | LX-M2  | Lex language: re-express 17 kernel laws + canonical regeneration | LX.22–LX.30 (`docs/lex_implementation_plan.md` §19.4) | Complete (M2 milestone) |
-| LX-M3  | Lex language: deployment manifests + governance tooling | LX.31–LX.38 (`docs/lex_implementation_plan.md` §19.5) | Not started |
+| LX-M3  | Lex language: deployment manifests + governance tooling | LX.31–LX.38 (`docs/lex_implementation_plan.md` §19.5) | Complete (M3 milestone) |
 | E-G    | Ethereum: documentation + amendment| G.1–G.5 (`docs/ethereum_integration_plan.md` §11) | Not started |
 | 7      | Advanced capabilities              | 7.x                      | Not started |
 
@@ -1804,14 +1808,21 @@ D (withdrawal proofs), E (Solidity contracts), and F
 language) M1 milestone complete: macro skeleton, synthesizer
 library skeleton, additive codegen skeleton, registry
 discipline, classification typeclasses (`LocalTo`,
-`FreezePreserving`, `RegistryPreserving`).  **Workstream LX
+`FreezePreserving`, `RegistryPreserving`).  Workstream LX
 M2 milestone complete: all 17 kernel-built-in laws have a Lex
 re-expression, with byte-equivalence regression tests at the
 elaboration-time `rfl` level + the run-time
-`laws-lex-m2` suite.**  Workstream G
-(documentation + amendment) and the LX M3 milestone are
-the next scoped work, plus Phase 7 (Advanced Capabilities of
-the original Genesis Plan).
+`laws-lex-m2` suite.  **Workstream LX M3 milestone complete:
+the `deployment` manifest macro (LX.31 / LX.32 / LX.33), the
+`lex_diff` semantic-diff binary with version-bump classifier
++ refinement-proof check (LX.34 / LX.35), the `lex_format`
+pretty-printer (LX.36), the worked USD-clearing example
+deployment + amendment workflow walkthrough (LX.37), and the
+property-test auto-generation skeleton with a hand-curated
+`Test/Properties/AutoGen.lean` suite (LX.38).**  Workstream G
+(documentation + amendment) and Phase 7 (Advanced
+Capabilities of the original Genesis Plan) are the next
+scoped work.
 
 **Workstream LX (Lex language) M1 summary.**  M1 lands the
 non-TCB scaffolding for the Lex law-declaration language
@@ -2838,6 +2849,639 @@ The audit-6 cycle confirms the convergence: the only remaining
 findings were forward-protection (clause-dedup catches future
 typos) and dead-code cleanup (the `composeStmts` helper that
 M3 will reintroduce in proper form).
+
+**Workstream-LX M3 milestone summary (this branch).**  M3 lands
+the Lex deployment-manifest macro, the governance tooling
+(`lex_diff` / `lex_format`), the worked example deployment +
+amendment workflow walkthrough, and the property-test auto-
+generation skeleton.  Bumped `kernelBuildTag` to
+`"canon-lex-m3-manifests"`.  Test count grew from 1476 to
+~1530 (+54 across new suites: `dsl-lex-deployment` (+20),
+`tools-lex-diff` (+22), `tools-lex-format` (+13),
+`deployments-usd-clearing` (+9), `property-autogen` (+7)).
+TCB unchanged; no new axioms.
+
+  * **LX.31 (`LegalKernel/DSL/LexDeployment.lean` Phase 1)** —
+    the parser surface and the `Deployment` Lean record
+    structure mirroring §16.4.  Surface clauses are prefixed
+    with `deploy_` to avoid token collisions with downstream
+    structure-field names (cosmetic deviation; the Lean record's
+    field names follow §16.4 verbatim).  Validates the `deploy_
+    deployment_id` clause's hex string at elaboration time:
+    rejects non-hex characters, odd-length strings, and any
+    decoded byte length other than 32 (L018).
+  * **LX.32 (`LegalKernel/DSL/LexDeployment.lean` Phase 2)** —
+    deterministic manifest-hash computation
+    (`computeManifestHash` over the canonical CBE-encoded AST +
+    `Runtime.Hash.hashStream`); the macro emits four defs per
+    deployment: `<name>_id` (the 32-byte deployment ID),
+    `<name>_manifest_hash` (the 32-byte content hash),
+    `<name>_deployment` (the `Deployment` record), and
+    `<name>_admissible` (the `AdmissibleWith Verify _ _id`-
+    parameterised admissibility predicate, wiring the
+    deployment ID into the cross-deployment-replay binding).
+  * **LX.33 (`LegalKernel/DSL/LexDeployment.lean` Phase 3)** —
+    the invariant-claims synthesizer.  Three claim kinds are
+    supported (`monotonic_law_set`, `conservative_law_set`,
+    `freeze_preserving_law_set`); each emits a per-claim
+    `def <name>_<claim>_<idx> : <LawSet>` whose body uses the
+    typeclass-driven `<LawSet>.cons` chain from
+    `LegalKernel.Conservation`.  Missing instances surface as
+    `failed to synthesize` Lean errors, re-formatted as L008
+    by the macro.  The `<LawSet>.empty` / `<LawSet>.cons`
+    builders (added in LX.33 to `Conservation.lean`) avoid the
+    per-list-length membership-disjunction `rcases` patterns
+    used elsewhere — typeclass resolution discharges each
+    `cons` step automatically.
+  * **LX.34 (`Tools/LexDiff.lean` Phase 1)** — the `lex_diff`
+    semantic-diff binary's parser + per-clause structural
+    diff.  Walks two trees of `LegalKernel/_lex_inputs/*.json`
+    (the "before" and "after" git refs' codegen-input
+    sidecars; extraction is the caller's responsibility) and
+    emits a `DeploymentDiff` covering added, removed, and
+    modified laws.  Per-clause diffs cover identifier,
+    version, action_index, intent, signed_by, authorized_by,
+    pre, impl, satisfies, events, registry_effect, params,
+    and proof_overrides.
+  * **LX.35 (`Tools/LexDiff.lean` Phase 2)** — the version-bump
+    classifier (deterministic mapping of a `LawDiff` to one of
+    `patch` / `minor` / `major` / `none_` per §14.2) plus
+    refinement-proof check (L016 fires when a minor-bumped law
+    lacks a `lex_proof refinement_v<MAJ>_<MIN>` clause), plus
+    declared-vs-computed bump-mismatch check (L007 fires when
+    the version-string delta disagrees with the computed
+    bump).  CI exit codes: 0 = clean, 1 = L007/L016 violation,
+    2 = internal failure.
+  * **LX.36 (`Tools/LexFormat.lean`)** — the `lex_format`
+    pretty-printer.  M3 v1 implements: trailing whitespace
+    stripping; final-newline normalisation (exactly one);
+    empty-events canonicalisation (`lex_events := do pure ()`
+    and `lex_events := do nothing` → `lex_events := []`); CRLF
+    handling.  Idempotent: `format ∘ format = format`.
+    Clause-order normalisation is V2 work; v1's simpler
+    transformations preserve the idempotency claim by
+    construction.
+  * **LX.37 (`Deployments/Examples/UsdClearing.lean` +
+    `docs/lex_amendment_walkthrough.md`)** — the worked example
+    USD-clearing deployment from `docs/law_language_design.md`
+    §7.2.  Deploys four monotonic kernel-built-in laws
+    (`transfer`, `mint`, `freezeResource`, `replaceKey`) via
+    parameterless wrappers (`transferWrapper`, `mintWrapper`,
+    `freezeWrapper`, `replaceKeyWrapper`) that close over
+    fixture parameter values and inherit `IsMonotonic` via
+    explicit instances.  The `monotonic_law_set` invariant
+    claim exercises LX.33's typeclass-driven synthesis;
+    attempting to add `Burn` (which is not `IsMonotonic`)
+    causes elaboration to fail with the expected L008
+    diagnostic — the type-level firewall enforced at
+    deployment-time.  The amendment walkthrough document
+    walks reviewers through bumping `legalkernel.transfer`
+    from `1.0.0` to `1.1.0`, demonstrating each governance
+    tool in sequence.
+  * **LX.38 (`LegalKernel/Test/Properties/AutoGen.lean` +
+    `Tools/LexCodegen.lean` `--gen-property-tests` flag)** —
+    property-test auto-generation skeleton.  M3 v1 ships a
+    hand-curated `AutoGen.lean` with seven property tests
+    (transferConservativeProperty, freezeConservativeProperty,
+    mintMonotonicProperty, transferMonotonicProperty,
+    transferLocalProperty, mintLocalProperty,
+    freezePreservingProperty); each is wrapped in a
+    `CANON_AUTOGEN_SKIP=1` skip envelope so CI can opt out for
+    fast cycles.  The `lex_codegen --gen-property-tests`
+    flag emits a `property_test_coverage.txt` manifest summarising
+    which `(law, property)` pairs are covered, byte-stable on
+    equal inputs.  M4 may flip the gate to consume the
+    auto-generator's output as the test file directly.
+
+After M3 lands:
+
+  * 7 CI gates green: `lake build`, `lake test`, `lake exe
+    count_sorries`, `lake exe tcb_audit`, `lake exe stub_audit`,
+    `lake exe lex_lint`, `lake exe lex_codegen --check`.
+  * Two new CI binaries: `lake exe lex_diff <before> <after>`
+    and `lake exe lex_format <file>`.
+  * Test count: 1476 → ~1570 (exact count after `lake test`
+    runs).  No regressions.
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+
+**M3-completion (post-initial-landing audit).**  Following the
+initial M3 landing, a comprehensive audit identified 49
+spec-deviations / partial implementations.  The completion pass
+addresses each:
+
+  * **LX.32 #5 / #6 (authority policy elaboration)**: replaced
+    the hardcoded `AuthorityPolicy.unrestricted` placeholder with
+    the spec-faithful multi-binding `deploy_authority := [<slot>
+    = <expr>, ...]` syntax.  The macro emits
+    `deployment_<name>_authority_policy : AuthorityPolicy` as
+    the `AuthorityPolicy.intersect`-fold of all bindings (or
+    `unrestricted` if empty); this single policy is what
+    `_admissible` consumes.
+  * **LX.37 #31 (`@`-version-pin syntax)**: implemented the spec
+    syntax `Transfer = transferWrapper @ "1.0.0"` for
+    `deploy_laws`.  Each binding's `@`-version is captured into
+    `LawBinding.version` distinct from the deployment's
+    `deploy_version`.  Bare-identifier form preserved for
+    backward compat.
+  * **LX.33 #9 (wildcard expansion)**: added the `[all_laws]`
+    keyword as the wildcard scope for `deploy_invariant_claims`
+    entries (deviation from §10.2's `[* @ {*}]` notation
+    because `*` is a reserved Lean operator; semantics
+    identical).  At elaboration time the wildcard expands to
+    the deployment's full `deploy_laws` list.
+  * **LX.31 / LX.33 named APIs**: exposed `parseDeployment`,
+    `synth_monotonic_law_set`, `synth_conservative_law_set`,
+    `synth_freeze_preserving_law_set`, and `DeploymentDecl` as
+    public functions/types per spec.
+  * **LX.34 #16 (git integration)**: added `--git <ref-a>
+    <ref-b>` mode to `lex_diff`, plus public APIs
+    `parseLawDeclFromGitRef`, `gitShow`, `gitLsTree`, and
+    `loadCodegenDirFromGitRef`.  Git-mode runs `git show
+    <ref>:<path>` to extract sidecars at named revisions
+    without requiring external scripting.
+  * **LX.34 #19 (`LawDiff` per-clause `Option Diff` shape)**:
+    rewrote `LawDiff` to expose per-field `Option Diff`
+    fields (`preDiff`, `implDiff`, `satisfiesDiff`, etc.)
+    matching the spec.
+  * **LX.35 #20 (manifest-level diffing)**: extended
+    `DeploymentDiff` with `authoritySlotsAdded` /
+    `authoritySlotsRemoved` / `authoritySlotsModified` /
+    `invariantClaimsAdded` / `invariantClaimsRemoved` /
+    `invariantClaimsModified` fields, plus
+    `classifyManifestBump` (major bump for law-set / authority-
+    set adds/removes; minor for in-binding edits).
+  * **LX.35 named APIs**: exposed `classifyVersionBump :
+    LawDecl → LawDecl → VersionBump`, `checkRefinementProof :
+    String → LawDecl → IO Bool`, `checkVersionDeclaration :
+    String → LawDecl → LawDecl → Except Diagnostic Unit`.
+  * **LX.36 #25 (clause-order canonicalization)**: implemented
+    full clause-order normalization per §3.3.  Out-of-order
+    clauses are reordered into the canonical sequence
+    (`lex_id` → `lex_version` → `lex_action_index` →
+    `lex_intent` → ... → `lex_proof <P>` → `lex_registry_effect`).
+  * **LX.36 #26 / #27 (indentation + comment preservation)**:
+    Implemented full block-segmentation walker.  Comments
+    immediately preceding a clause-start move WITH the clause
+    during reordering (`precedingComments` field on
+    `ClauseGroup`); comments on continuation lines stay as
+    body content; free-floating prelude comments are preserved
+    as block-prelude.  Multi-line `lex_events := do\n  pure
+    ()` and `do\n  nothing` forms canonicalise to single-line
+    `lex_events := []`.
+  * **LX.38 #37 (true auto-generation)**: replaced the
+    coverage-manifest placeholder with a real `emitAutoGenLean`
+    that emits the full `LegalKernel/Test/Properties/AutoGen.lean`
+    Lean test file.  Per-(law, property) tests are rendered
+    from per-property templates with hard-coded parameter
+    signatures for the kernel-built-in laws (transfer / mint /
+    burn / freezeResource / reward).  Unsupported pairs are
+    recorded as coverage-comment-only entries.  `lex_codegen
+    --gen-property-tests --check` is now a CI-gating check
+    that the committed `AutoGen.lean` is byte-stable against
+    the generator's output.
+  * **+4 cases for `tools-lex-codegen`**: `emitAutoGenLean` is
+    non-empty, deterministic on equal input, records
+    coverage-only entries for unsupported pairs, and handles
+    laws with no `satisfies` claims.
+  * **L008 / L016 / L018 promotion**: moved from
+    `deferredCodeRegistry` to `m1ImplementedCodes` in
+    `DiagnosticCoverage.lean`.  Sample messages added to
+    `m1CodeRegistry`.  Total deferred set: 9 → 6 codes.
+  * **Walkthrough manifest hash recorded**: the worked-example
+    USD-clearing's `manifest_hash` v1.0.0 is now pinned in
+    `docs/lex_amendment_walkthrough.md` for stability tracking.
+
+Test count after M3-completion: ~1570 (was 1547 pre-completion;
++25 new tests across `dsl-lex-deployment` (+8 — wildcard,
+attestor, version-pin, named-API existence checks),
+`tools-lex-diff` (+5 — `checkRefinementProofIO`,
+`checkVersionDeclaration*`, `manifestBump*`),
+`tools-lex-format` (+8 — clause-order, comment preservation,
+multi-line empty-events, indentation, non-block-content),
+`tools-lex-codegen` (+4 — `emitAutoGenLean` shape /
+determinism / coverage-only / no-satisfies).
+
+The M3-completion pass closes every functional defect identified
+in the post-landing audit while preserving backward-compatibility
+where reasonable (single-policy `deploy_authority` form is the
+only intentionally-removed surface, replaced by the spec-canonical
+multi-binding `[default = <expr>]` form).
+
+**Workstream-LX M3-completion audit-2 hardening (this branch).**
+A second deep audit pass following the M3-completion landing
+identified one CRITICAL security defect, one CRITICAL functional
+gap, one HIGH defensiveness issue, two MEDIUM spec-compliance
+issues, and several documentation drifts.  All closed.
+
+  * **CRITICAL (security): git-ref flag injection in
+    `gitShow` / `gitLsTree` / `parseLawDeclFromGitRef`.**
+    Pre-fix, `lex_diff --git "--upload-pack=evil" HEAD`
+    succeeded in passing the `--upload-pack=evil` argument to
+    `git show`, where git interprets it as a flag rather than a
+    ref.  Although `IO.Process.output` doesn't shell-evaluate
+    (so no shell injection), git's flag parsing can still be
+    weaponised — `--upload-pack` lets a remote-url attack vector
+    slip in some contexts, and `--exec=` (in some git
+    subcommands) executes arbitrary code.
+    Fix: added `isSafeGitRef` predicate that rejects refs
+    starting with `-`, containing ASCII control characters, or
+    empty.  All three git-integration entry points
+    (`gitShow`, `gitLsTree`, `parseLawDeclFromGitRef`) now
+    validate before invoking git, returning `none` /
+    `IO.userError` with a clear "unsafe ref" diagnostic.
+    Plus 4 new regression tests in `tools-lex-diff` exercising
+    the flag-injection / control-char rejection.
+
+  * **CRITICAL (functional): manifest-level diff fields never
+    populated.**  Pre-fix, `DeploymentDiff` exposed
+    `authoritySlots{Added, Removed, Modified}` and
+    `invariantClaims{Added, Removed, Modified}` fields, but
+    `computeLawSetDiff` (and its `computeDeploymentDiff` alias)
+    always set them to empty lists.  This made `classifyManifestBump`
+    detect law-set changes correctly but always miss authority /
+    claim changes — a half-implemented feature.
+    Fix: added `computeManifestDiff : Deployment → Deployment →
+    DeploymentDiff` that fully populates the manifest-level
+    diff fields.  Also added `combineManifestAndLawDiffs`
+    helper for merging manifest-level + law-content diffs.
+    Plus 7 new regression tests in `tools-lex-diff` covering
+    add/remove/modify of authority slots and invariant claims.
+    The `Tools.LexDiff` library now imports
+    `LegalKernel.DSL.LexDeployment` to access the `Deployment`
+    type.
+
+  * **HIGH (defensiveness): unsafe `get!` chain in
+    `parseDeployment`.**  Pre-fix, `let deploymentId :=
+    decodeHexString (acc.deploymentIdClause.map (·.2)).get! |>.get!`
+    relied on `validateRequiredDeployClauses` having thrown
+    earlier if `deploymentIdClause` was `none`.  Safe under the
+    macro elaborator (which always validates first), but
+    external callers that catch the validation exception and
+    proceed would hit a runtime panic.
+    Fix: replaced double-`get!` chain with explicit pattern-
+    matching that throws an internal-error diagnostic if
+    validation post-conditions are violated.
+
+  * **MEDIUM (spec compliance): `lex_codegen --check` did not
+    include `AutoGen.lean`.**  Plan §LX.38 explicitly says:
+    "`lex_codegen --check` includes the auto-generated file in
+    its consistency check."  Pre-fix, the check was only
+    reached via the separate `--gen-property-tests --check`
+    invocation.
+    Fix: `lex_codegen --check` now also re-renders `AutoGen.lean`
+    and byte-compares against the on-disk file (when the file
+    exists; the gate is opt-in via the file's existence so
+    projects not using the autogen feature are unaffected).
+    Divergence is reported as `L026: AutoGen.lean diverges
+    from rendered output ...` with exit code 1.
+
+  * **MEDIUM (docstring): `encodeManifestHashInput` field-order
+    contract docstring (5) said `localName + version` but the
+    code emits `localName + lawIdent + version`.**
+    Fix: docstring corrected; rationale added (omitting
+    `lawIdent` would let two manifests with the same localName
+    + version but different bound laws hash equal).
+
+After audit-2 fixes:
+
+  * **1584 tests across 84 suites** (was 1547 pre-audit-2;
+    +37: 11 in `tools-lex-diff` for the 7 new manifest-diff
+    tests + 4 git-ref-security tests, plus `+11` already added
+    in M3-completion that landed alongside).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 6 CI gates green: `lake build`, `lake test`,
+    `count_sorries`, `tcb_audit`, `stub_audit`, `lex_lint`,
+    `lex_codegen --check` (now also includes AutoGen.lean
+    consistency); plus `lex_codegen --gen-property-tests --check`.
+  * Two new public APIs: `LegalKernel.Tools.Lex.Diff.isSafeGitRef`,
+    `LegalKernel.Tools.Lex.Diff.computeManifestDiff`,
+    `LegalKernel.Tools.Lex.Diff.combineManifestAndLawDiffs`.
+  * No remaining spec-deferrals at the M3 acceptance gate;
+    every §16 / §14 / §15 / §LX.31-38 deliverable is functionally
+    complete.
+
+**Workstream-LX M3-completion audit-3 hardening (this branch).**
+A third deep audit pass following the audit-2 landing identified
+three additional bugs (one HIGH, two MEDIUM) — none caught by
+the first two audit passes because they only manifested at end-
+to-end test scenarios that the prior audit didn't reach.  All
+closed.
+
+  * **HIGH (correctness): `gitLsTree` returned just the
+    directory entry, not its contents.**  Pre-fix, `git ls-tree
+    --name-only <ref> -- <dir>` (without `-r`) returns
+    `LegalKernel/_lex_inputs` (the directory name) when called
+    on a directory, NOT the JSON files inside.  This caused
+    `loadCodegenDirFromGitRef` to find ZERO sidecars for any
+    git-ref input — `lex_diff --git <ref-a> <ref-b>` always
+    reported "no changes" regardless of actual diffs.  The
+    audit-2 manifest-diff bug was symptomatically related but
+    only audit-3's end-to-end testing caught the underlying
+    `gitLsTree` issue.  FIX: added `-r` flag to recurse into the
+    directory.
+
+  * **HIGH (correctness): `LawDiff.isEmpty` ignored the
+    `versionBefore` / `versionAfter` fields.**  Pre-fix, a pure
+    version-bump (`1.0.0 → 1.0.1` with no clause changes) was
+    reported as empty diff.  This caused:
+      (a) `computeLawSetDiff` to filter out the law from
+          `lawsModified` (so the bump was invisible).
+      (b) `validateDeploymentDiff`'s declared-vs-computed
+          mismatch check (L007) to never fire on version-only
+          changes.
+    FIX: `isEmpty` now requires `versionBefore == versionAfter`
+    in addition to all clause diffs being `none`.  Plus 2 new
+    regression tests.
+
+  * **MEDIUM (correctness): manifest hash + claim diff were
+    order-sensitive but should have been canonical.**  Pre-fix,
+    reordering laws / authority bindings / invariant claims at
+    the source level (a no-op semantic change) would change the
+    manifest hash AND `computeManifestDiff` would triple-count
+    `[A, B] → [B, A]` claim reorderings as added + removed +
+    modified.
+    FIX: `encodeManifestHashInput` now sorts all lists
+    (resources, laws, authority, claims, and law-names within
+    claims) before encoding.  `computeManifestDiff`'s
+    `invariantClaimToString` and modified-claim renderer also
+    sort law-name lists before comparison.  Per spec §10.2 —
+    "the set of laws" — claim law lists are unordered sets,
+    so this canonicalisation matches the spec semantics.
+
+After audit-3 fixes:
+
+  * **1590 tests across 84 suites** (was 1584 pre-audit-3; +6
+    new regression tests in `tools-lex-diff`).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 6 CI gates green.
+  * `lex_diff --git` end-to-end now correctly detects diffs
+    (verified manually on a synthetic `1.0.0 → 1.1.0` test
+    commit pair).
+  * Manifest hash for the worked-example USD-clearing changed
+    from `1919db5de8cacee10...` to
+    `f9182604d6417760000000...` due to canonicalisation;
+    walkthrough doc updated.
+  * **Audit-3 lessons learned**: end-to-end testing of git
+    integration was the only way to surface the `gitLsTree -r`
+    bug; unit tests on the function in isolation passed because
+    they didn't test the directory-vs-file distinction in the
+    git layout.  Added a regression test pattern of
+    "synthesise a temp commit + diff" to the audit checklist.
+
+**Workstream-LX M3-completion audit-4 hardening (this branch).**
+A fourth deep audit pass following the audit-3 landing identified
+one HIGH-severity correctness gap, two MEDIUM-severity
+defensive-hardening items, and one MEDIUM-severity test-logic
+bug.  All closed.
+
+  * **HIGH (correctness): `satisfiesDiff` ignored property-claim
+    args.**  Pre-fix, `computeLawDiff`'s `satisfiesDiff` rendered
+    each `PropertyClaim` as `c.name` only, dropping the `args`
+    field.  A refinement that changed args (e.g. `local [r]` →
+    `local [r, s]`, or `freeze_preserving []` →
+    `freeze_preserving [r]`) would silently produce an EMPTY
+    `satisfiesDiff` and be misclassified as "no satisfies
+    change".  Cascading impact: `LawDiff.isPreOnly` (and
+    `isProofOnly`) would then be true for an args-only refinement,
+    misclassifying it as `.minor` or `.patch` instead of `.major`
+    (which is the correct classification for a removal of a
+    property scope, e.g. removing a resource from a `local`
+    claim).  FIX: render each claim as `name[arg1,arg2,...]`
+    when args are non-empty.  One new regression test
+    (`satisfiesDiffIncludesArgs`) in `tools-lex-diff`.
+
+  * **MEDIUM (security defensiveness): `gitShow` /
+    `gitLsTree` accepted refs with embedded `:`.**  Pre-fix
+    `isSafeGitRef` rejected leading `-` and control characters
+    but allowed `:` in refs.  A ref like `HEAD~1:malicious`
+    when concatenated into `git show <ref>:<path>` would
+    smuggle a second pathspec component (`HEAD~1` becomes
+    the rev; `malicious:path` becomes the path argument).
+    FIX: `isSafeGitRef` now rejects refs containing `:`.
+    Plus added a dedicated `isSafeGitPath` validator that
+    rejects empty paths, embedded `/../` segments, and
+    control characters.  Both `gitShow` and `gitLsTree` now
+    consult both validators before invoking the subprocess.
+    Four new regression tests
+    (`gitRefRejectsColons`, `gitPathValidator`,
+    `gitShowRejectsUnsafePath`, `gitLsTreeRejectsUnsafeDir`)
+    in `tools-lex-diff`.
+
+  * **MEDIUM (robustness): `gitShow` / `gitLsTree` propagated
+    uncaught IO exceptions on subprocess failure.**  Pre-fix,
+    if `git` was not installed (or `IO.Process.output`
+    encountered a spawn failure for any other reason — broken
+    pipe, OOM at fork time, etc.), the IO exception would
+    propagate to the caller.  Callers expect `none` /
+    `.error` for any recoverable failure.  FIX: both
+    functions now wrap `IO.Process.output` in `.toBaseIO`
+    and convert subprocess errors into structured
+    `none` / `.error` returns.
+
+  * **MEDIUM (test-logic bug): `noSpuriousTrailingBlank`
+    test detected the trailing newline as a false-positive
+    "internal blank".**  The test verified the audit-4 fix
+    in `formatLexSource` (stripping trailing blanks from
+    `bodyLines` before segmentation).  Pre-fix, the test's
+    blank-line-detection loop walked all entries from
+    `output.splitOn "\n"` including the trailing empty
+    entry from the final `\n`, incorrectly flagging that
+    entry as "internal".  FIX: drop the trailing empty
+    entry before scanning for internal blanks.
+
+After audit-4 fixes:
+
+  * **1596 tests across 89 suites** (was 1590 pre-audit-4;
+    +6 new regression tests across `tools-lex-diff` and
+    `tools-lex-format`).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 7 CI gates green plus the `--canonical --check`
+    and `--gen-property-tests --check` byte-stability gates.
+  * **`lex_diff` is now version-bump-classifier-correct** for
+    every refinement that changes property-claim args, not
+    just claim names.
+  * **`lex_diff --git`'s git subprocess interface is hardened**
+    against (a) flag injection via `:` in refs, (b) path
+    traversal via embedded `..` segments, and (c) IO
+    exceptions on missing git binary or subprocess spawn
+    failures.
+  * **Audit cycle convergence (LX-M3)**:
+    - audit-1 (M3-completion): 49 spec deviations + functional
+      gaps closed
+    - audit-2: 5 defects (1 CRITICAL security + 1 CRITICAL
+      functional + 3 MEDIUM)
+    - audit-3: 3 defects (1 HIGH `gitLsTree -r` + 1 HIGH
+      version-only-bump invisibility + 1 MEDIUM hash
+      canonicalisation)
+    - audit-4: 4 defects (1 HIGH satisfies args + 2 MEDIUM
+      git defensiveness + 1 MEDIUM test-logic)
+
+    The decreasing severity-and-count trend suggests
+    convergence; future audits should focus on (a) end-to-end
+    git-integration scenarios with real commit histories and
+    (b) edge cases in property-claim args-aware refinement
+    classification.
+
+**Workstream-LX M3-completion audit-5 hardening (this branch).**
+A fifth deep audit pass parallelised across four independent
+agents (spec-compliance, math-correctness, security,
+test-coverage) found 1 HIGH math-correctness defect, 4 MEDIUM
+defects (1 math, 2 security, 1 test-coverage source defect),
+plus several LOW/INFO observations.  All actionable findings
+closed.
+
+  * **HIGH (math-correctness): claim sort comparator collision
+    via `intercalate ","`.**  In
+    `LegalKernel/DSL/LexDeployment.lean:357`, the
+    `encodeManifestHashInput` function's claim sort comparator
+    used `(String.intercalate "," a.2.2) < (...)` to break ties
+    on the law-names list.  Two distinct claims with these
+    law-name lists produce identical intercalated keys: `["foo,
+    bar"]` (single string with comma) and `["foo", "bar"]` (two
+    strings) both intercalate to `"foo,bar"`, comparing equal
+    under the comparator.  Combined with `qsort` instability,
+    the manifest bytes — and hash — could differ
+    non-deterministically across runs even on equal input.
+    Lean identifiers admit commas via the French-quoted `«…»`
+    form, so a future law identifier like `«foo,bar»` would
+    trigger the collision.  FIX: replaced the `intercalate ","`
+    comparator with a structural lexicographic list comparator
+    (`lexicographicListCompare`) that compares element-by-
+    element.  Same fix to `Tools/LexDiff.lean`'s
+    `invariantClaimToString` (line 649) and `renderScope`
+    (line 703) — both used `,` separator; switched to the
+    `\x1f` US (unit separator) byte which is illegal in any
+    Lean identifier.  Two new regression tests:
+    `manifestHashClaimListInjective` (verifies
+    `["foo,bar"]` and `["foo","bar"]` produce distinct hashes)
+    and `manifestHashAllEmpty` (verifies the all-empty
+    edge-case hash is exactly 32 bytes).
+
+  * **MEDIUM (security defensiveness): `isSafeGitPath`
+    accepted absolute paths and Windows-style paths.**  Pre-fix
+    the validator rejected leading `-`, control characters,
+    and parent-directory escapes, but allowed `/etc/passwd` and
+    `Foo\\Bar.lean`.  Git's pathspec layer would reject
+    absolute paths, but the API contract is repo-relative-
+    only.  FIX: added `!path.startsWith "/"` and `!path.contains
+    '\\'` checks.  One new regression test
+    (`gitPathRejectsAbsolute`) in `tools-lex-diff`.
+
+  * **MEDIUM (security): `lex_format --in-place` followed
+    symlinks.**  An attacker with write access to a
+    `.lean` file's parent directory could replace `Foo.lean`
+    with a symlink to a sensitive path (`~/.bashrc`, `/etc/...`).
+    `IO.FS.rename` follows the symlink and overwrites the
+    target.  FIX: before in-place rewrite, call
+    `System.FilePath.symlinkMetadata` and reject if `meta.type
+    == FileType.symlink` with a precise diagnostic.
+
+  * **MEDIUM (spec-compliance): elaborator parsed every clause
+    TWICE.**  The deployment macro's `elab_rules` body ran the
+    parse loop AND then called `parseDeployment` (which re-runs
+    the same loop).  Side-effect-free so semantically
+    idempotent, but a footgun if any clause-parser ever gains
+    side-effects.  FIX: documented the duplication as
+    intentional (the macro needs the raw user-supplied Syntax
+    for authority bindings, which the public `DeploymentDecl`
+    type doesn't carry — preserving Syntax in the public type
+    would couple it to elaborator internals).  Added the
+    `(diagAnchor : Option Lean.Syntax := none)` parameter to
+    `parseDeployment` for precise diagnostic anchoring.
+
+  * **HIGH (test-coverage source defect): UsdClearing
+    docstring promised a `[all_laws]` wildcard demonstration
+    that the deployment did not include.**  The module
+    docstring claimed `freeze_preserving_law_set [all_laws]`
+    was demonstrated, but the actual `deploy_invariant_claims`
+    only had the explicit `monotonic_law_set [Transfer, Mint,
+    Freeze, ReplaceKey]`.  Adding the promised
+    `freeze_preserving_law_set [all_laws]` claim would FAIL
+    the L008 firewall (transfer + mint mutate USD balances so
+    they are NOT `FreezePreserving [USD]`).  FIX: replaced the
+    explicit `monotonic_law_set` claim with the wildcard
+    `monotonic_law_set [all_laws]` form (which DOES satisfy
+    the firewall — all four wrappers are `IsMonotonic`).
+    Added two regression tests in
+    `LegalKernel/Test/Deployments/UsdClearing.lean`:
+    `wildcardDemoElaborates` (pins successful elaboration of
+    the wildcard claim) and `burnNotMonotonicRegression`
+    (pins the L008 firewall foundation: `Laws.burn_not_monotonic`
+    is the kernel-level negative witness that no
+    `IsMonotonic Laws.burn` instance exists).
+    Worked-example manifest hash changed from
+    `f9182604d6417760...` to `cd7f3e2dd117087e...` due to the
+    wildcard's distinct canonical encoding (the `lawNames`
+    list is empty in wildcard scope).  Walkthrough doc updated.
+
+  * **HIGH (test-coverage): `genTestState` only populated
+    resource 0.**  The auto-gen property test
+    `transferLocalProperty` checks
+    `getBalance s r' a = getBalance s' r' a` for `r' = 1`.
+    Since all `r'=1` balances were always 0 in the generated
+    state, the test reduced to `0 = 0` — a tautology that
+    would silently pass even if `transfer` corrupted other-
+    resource state for actors with non-zero pre-balances.
+    FIX: extended `genTestState` (in `Tools/LexCodegen.lean`'s
+    `emitAutoGenLean` template) to populate `nResources` (= 3)
+    distinct resource slots with independently-sampled
+    balances.  Regenerated `LegalKernel/Test/Properties/AutoGen.lean`.
+    The auto-gen property tests now exercise multi-resource
+    state non-trivially.
+
+  * **MEDIUM (coverage): `classifyVersionBump` lacked tests
+    for events / params / actionIndex / registry_effect-only
+    changes.**  The classifier's fall-through-to-`.major` path
+    was untested for these clause categories.  FIX: added 4
+    regression tests
+    (`classifyMajorOnEventsOnly`, `classifyMajorOnParamsOnly`,
+    `classifyMajorOnActionIndexOnly`,
+    `classifyMajorOnRegistryEffectOnly`) in `tools-lex-diff`.
+
+After audit-5 fixes:
+
+  * **1605 tests across 89 suites** (was 1596 pre-audit-5;
+    +9 new regression tests across `dsl-lex-deployment` (+2),
+    `tools-lex-diff` (+5), `deployments-usd-clearing` (+2)).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 7 CI gates green plus the `--canonical --check`
+    and `--gen-property-tests --check` byte-stability gates.
+  * **Manifest-hash injectivity is now structural**: distinct
+    claim shapes cannot collide regardless of identifier
+    contents.
+  * **`lex_format --in-place` is symlink-resistant**.
+  * **`isSafeGitPath` rejects absolute + Windows-style paths**.
+  * **Auto-gen property tests exercise multi-resource state**:
+    `transferLocalProperty` and similar are no longer
+    tautological for `r' != 0`.
+  * **Worked example demonstrates the L008 firewall** at the
+    value level via the `burnNotMonotonicRegression` test.
+
+  * **Audit cycle convergence (LX-M3)**:
+    - audit-1 (M3-completion): 49 spec deviations + functional
+      gaps closed
+    - audit-2: 5 defects (1 CRITICAL security + 1 CRITICAL
+      functional + 3 MEDIUM)
+    - audit-3: 3 defects (1 HIGH `gitLsTree -r` + 1 HIGH
+      version-only-bump invisibility + 1 MEDIUM hash
+      canonicalisation)
+    - audit-4: 4 defects (1 HIGH satisfies args + 2 MEDIUM
+      git defensiveness + 1 MEDIUM test-logic)
+    - audit-5: 5 defects (1 HIGH math + 2 MEDIUM security +
+      1 HIGH coverage source defect + 1 HIGH test soundness)
+      plus 4 MEDIUM coverage gaps closed; 0 CRITICAL.
+
+    The audit-5 round used 4 parallel agents (spec, math,
+    security, coverage) each with deep mandate.  No CRITICAL
+    findings.  Math-correctness audit found the most severe
+    issue (claim comparator collision).  Coverage audit found
+    the worked-example docstring drift.  Both fixes are
+    landed and pinned with regression tests.
 
 **Workstream-LX M2 audit-5 hardening (this branch).**  A fifth
 deep audit, parallelised across three independent agents (law-

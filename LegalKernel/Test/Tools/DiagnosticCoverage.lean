@@ -59,18 +59,15 @@ Coverage strategy:
   * `L026` — `lex_codegen --check` divergence (LX.20 / LexCodegen.lean)
   * `L027` — bare `s` reference inside events (LX.10 / LexEvents.lean)
 
-# M2/M3 deferred set (9 codes)
+# M2/M3+ deferred set (6 codes; post-M3-completion: L008 / L016 / L018 moved to implemented set)
 
-  * `L008` — manifest invariant claim not satisfiable (M3 — manifests)
-  * `L012` — registry-mutating non-replaceKey law (M3 — extension)
-  * `L015` — `intent` edited without version bump (M3 — `lex_diff`)
-  * `L016` — refinement proof missing for minor bump (M3 — `lex_diff`)
-  * `L017` — major bump without tombstone (M3 — `lex_diff`)
-  * `L018` — manifest deployment_id not 32 bytes (M3 — manifests)
+  * `L012` — registry-mutating non-replaceKey law (M3+ — extension)
+  * `L015` — `intent` edited without version bump (M3+ — `lex_diff`)
+  * `L017` — major bump without tombstone (M3+ — `lex_diff`)
   * `L019` — `for` iter is not statically a List (M2 — needs AST-parsed
             for-loop iter; M1 ships only the `L019Message` formatter,
             consumed by future `lex_lint` cross-pass).
-  * `L021` — law has no impl effects (M3 — manifests)
+  * `L021` — law has no impl effects (M3+ — manifests)
   * `L023` — `impl` calls untagged helper (M2 — needs AST-parsed
             function-call shape; M1 ships only the `L023Message`
             formatter.  In M1, `bareTerm` is a recognized escape
@@ -128,9 +125,11 @@ open LegalKernel.Tools.Lex
     their detection walkers require AST-parsed for-loop / function-
     call shapes that M1 explicitly defers to M2). -/
 def m1ImplementedCodes : List String :=
-  [ "L001", "L002", "L003", "L004", "L005", "L006", "L007"
+  -- M3-completion: L008 / L016 / L018 are now implemented.
+  [ "L001", "L002", "L003", "L004", "L005", "L006", "L007", "L008"
   , "L009", "L010", "L011"
   , "L013", "L014"
+  , "L016", "L018"
   , "L020"
   , "L022", "L024", "L025", "L026", "L027" ]
 
@@ -181,6 +180,12 @@ def m1CodeRegistry : List DiagnosticEntry :=
   , mkEntry "L025" "error" (L025Message "conservative")
   , mkEntry "L026" "error" "L026: fence content in target file diverges from rendered output"
   , mkEntry "L027" "error" L027Message
+  -- M3-completion: L008 / L016 / L018 fired by the deployment
+  -- macro / lex_diff binary; canonical sample messages below
+  -- match the prefixes their respective emitters produce.
+  , mkEntry "L008" "error" "L008: deployment `usd_clearing`'s invariant claim 0 failed to synthesize: failed to synthesize IsMonotonic ..."
+  , mkEntry "L016" "error" "L016: law `legalkernel.transfer` minor-bumped from 1.0.0 but is missing a refinement proof"
+  , mkEntry "L018" "error" "L018: deployment `usd_clearing`'s `deploy_deployment_id` is 30 bytes; deployment IDs must be exactly 32 bytes (64 hex characters)"
   ]
 
 /-- The M2/M3-deferred diagnostics, with their landing-milestone
@@ -199,14 +204,12 @@ structure DeferredEntry where
     is deferred — `lex_lint` (LX.5) consumes the formatters at the
     lint layer when the AST infrastructure is ready. -/
 def deferredCodeRegistry : List DeferredEntry :=
-  [ { code := "L008", milestone := "M3 (manifest invariants)" }
-  , { code := "L012", milestone := "M3 (extension)" }
-  , { code := "L015", milestone := "M3 (lex_diff)" }
-  , { code := "L016", milestone := "M3 (lex_diff)" }
-  , { code := "L017", milestone := "M3 (lex_diff)" }
-  , { code := "L018", milestone := "M3 (manifests)" }
+  -- L008 / L016 / L018 moved to m1CodeRegistry post-M3-completion.
+  [ { code := "L012", milestone := "M3+ (extension)" }
+  , { code := "L015", milestone := "M3+ (lex_diff intent-edit detector)" }
+  , { code := "L017", milestone := "M3+ (lex_diff major-bump tombstone)" }
   , { code := "L019", milestone := "M2 (AST-parsed for-loop iter)" }
-  , { code := "L021", milestone := "M3 (manifests)" }
+  , { code := "L021", milestone := "M3+ (manifests)" }
   , { code := "L023", milestone := "M2 (AST-parsed function call)" }
   ]
 
@@ -258,9 +261,9 @@ def tests : List TestCase :=
           assert (!isDeferred code)
             s!"{code} is in BOTH the implemented and deferred set — contradiction"
     }
-  , { name := "deferredCodeRegistry totals 9 codes (M2/M3 backlog; audit-2 added L019 + L023)"
+  , { name := "deferredCodeRegistry totals 6 codes (M3-completion: L008 / L016 / L018 moved to implemented)"
     , body := do
-        assertEq (expected := (9 : Nat)) (actual := deferredCodeRegistry.length)
+        assertEq (expected := (6 : Nat)) (actual := deferredCodeRegistry.length)
           "deferred set size"
     }
   , { name := "v1 catalogue has exactly 27 codes (excluding retired L042)"

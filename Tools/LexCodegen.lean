@@ -108,6 +108,14 @@ structure CodegenOptions where
       regenerates the entire target body rather than the fence
       contents.  Not yet implemented in M1. -/
   canonical : Bool := false
+  /-- `--gen-property-tests` mode flag (LX.38).  When `true`, the
+      binary regenerates `LegalKernel/Test/Properties/AutoGen.lean`
+      from the codegen-input JSONs' `satisfies` claims.  In M3 v1,
+      the file is hand-curated and this flag's renderer is a
+      structural placeholder (the M3 acceptance gate runs against
+      the hand-curated file directly; M4 may flip the gate to the
+      generated form). -/
+  genPropertyTests : Bool := false
   /-- Codegen-input directory. -/
   inputDir : FilePath := codegenInputsDir
   /-- Output target paths. -/
@@ -117,8 +125,8 @@ structure CodegenOptions where
 instance : Inhabited CodegenOptions := ⟨{}⟩
 
 /-- Parse argv into a `CodegenOptions`.  Supports `--check`,
-    `--canonical`, and ignores other arguments (forward-
-    compatibility for v2 flags). -/
+    `--canonical`, `--gen-property-tests`, and ignores other
+    arguments (forward-compatibility for v2 flags). -/
 def parseOptions (args : List String) : CodegenOptions := Id.run do
   let mut opts : CodegenOptions := {}
   for arg in args do
@@ -126,6 +134,8 @@ def parseOptions (args : List String) : CodegenOptions := Id.run do
       opts := { opts with checkOnly := true }
     else if arg == "--canonical" then
       opts := { opts with canonical := true }
+    else if arg == "--gen-property-tests" then
+      opts := { opts with genPropertyTests := true }
   pure opts
 
 /-! ## Fence helpers (§12.10)
@@ -838,6 +848,333 @@ def emitCanonicalManifest (decls : List LawDecl) : String := Id.run do
     buf := buf ++ "\n"
   pure buf
 
+/-! ## Property-test auto-generator (LX.38)
+
+The `--gen-property-tests` flag emits a real
+`LegalKernel/Test/Properties/AutoGen.lean` Lean test file
+containing one property-test invocation per `(law, property)`
+pair declared in the codegen-input JSONs.
+
+# Coverage matrix
+
+For each kernel-built-in law in the codegen-input directory,
+the generator produces:
+
+  * `conservative` ⇒ `<law>ConservativeProperty` — sample state,
+    apply law, assert `TotalSupply` unchanged at the law's
+    resource.
+  * `monotonic` ⇒ `<law>MonotonicProperty` — sample state,
+    apply law, assert `TotalSupply` non-decreasing.
+  * `local` ⇒ `<law>LocalProperty` — sample state, apply law,
+    assert other resources' balances unchanged.
+  * `freeze_preserving` ⇒ `<law>FreezePreservingProperty` —
+    sample state, apply law, assert touched resources'
+    balances unchanged.
+  * Other property kinds (`nonce_advances`, `registry_preserving`,
+    `local`-without-resource-set) are recorded in a coverage
+    comment but not auto-tested (they require authority-layer
+    setup beyond the kernel-level sampling harness).
+
+# Per-law parameter signatures
+
+The generator hard-codes the parameter signatures of the
+17 kernel-built-in laws (because their parameter shapes are
+known statically and will not change without an action-index
+re-allocation).  For deployment-private Lex laws the
+generator emits a coverage-comment-only entry (since the
+parameter shapes are not exposed in the JSON sidecar's
+`params` list in a synthesizer-consumable form).
+
+# Skip envelope
+
+Each emitted test wraps in `if env CANON_AUTOGEN_SKIP = "1"
+then return ()` per §LX.38, so CI can opt out for fast cycles
+(e.g. when iterating on the kernel proof set). -/
+
+/-- The set of kernel-built-in law identifiers that the auto-
+    generator can produce per-property tests for.  Each entry
+    maps the canonical identifier to a synthesizable test
+    profile: the parameterless wrapper expression and per-
+    property test renderers. -/
+private def autoGenSupportedLaws : List String :=
+  [ "legalkernel.transfer",
+    "legalkernel.mint",
+    "legalkernel.burn",
+    "legalkernel.freezeResource",
+    "legalkernel.reward" ]
+
+/-- Sanitise a law identifier into a Lean-test-name fragment
+    (replace dots with underscores, no other transformations). -/
+private def sanitiseLawIdForTestName (identifier : String) : String :=
+  identifier.replace "." "_"
+
+/-- Wrap a per-property test body in the canonical TestCase
+    template with skip-envelope, seed loading, and the `forAll`
+    driver. -/
+private def renderTestCaseTemplate (testDefName : String)
+    (testDisplayName : String) (lawTerm : String) : String :=
+  "/-- Auto-gen LX.38: " ++ testDisplayName ++ ". -/\n" ++
+  "def " ++ testDefName ++ " : TestCase := {\n" ++
+  "  name := \"auto-gen LX.38: " ++ testDisplayName ++ "\"\n" ++
+  "  body := do\n" ++
+  "    match (← IO.getEnv \"CANON_AUTOGEN_SKIP\") with\n" ++
+  "    | some \"1\" =>\n" ++
+  "      IO.println \"  (skipped via CANON_AUTOGEN_SKIP=1)\"\n" ++
+  "      return ()\n" ++
+  "    | _ => pure ()\n" ++
+  "    let seed ← readSeed\n" ++
+  "    let n ← readIterations\n" ++
+  "    forAll (T := State) n seed (genTestState 4 50) (fun s =>\n" ++
+  "      " ++ lawTerm ++ ")\n" ++
+  "}\n\n"
+
+/-- Render a `conservative` property test for a known kernel-
+    built-in law.  Returns `none` if the law's `conservative`
+    property is unsupported by v1's auto-generator. -/
+private def renderConservativeTest (lawId : String) : Option String :=
+  let safe := sanitiseLawIdForTestName lawId
+  let lawNameSuffix := lawId.splitOn "." |>.getLast?.getD lawId
+  let lawTerm? : Option String := match lawNameSuffix with
+    | "transfer" => some
+        ("let r : ResourceId := 0\n      let sender : ActorId := 0\n" ++
+         "      let receiver : ActorId := 1\n      let bal := getBalance s r sender\n" ++
+         "      let amount := if bal > 0 then 1 else 0\n" ++
+         "      let t := Laws.transfer r sender receiver amount\n" ++
+         "      if _ : t.pre s then\n" ++
+         "        let s' := step_impl s t\n" ++
+         "        decide (TotalSupply s r = TotalSupply s' r)\n" ++
+         "      else true")
+    | "freezeResource" => some
+        ("let r : ResourceId := 0\n      let t := Laws.freezeResource r\n" ++
+         "      let s' := step_impl s t\n" ++
+         "      decide (TotalSupply s r = TotalSupply s' r)")
+    | _ => none
+  match lawTerm? with
+  | none => none
+  | some lawTerm =>
+    let display := s!"{lawId}.conservative property holds (100 samples)"
+    some (renderTestCaseTemplate (safe ++ "ConservativeProperty") display lawTerm)
+
+/-- Render a `monotonic` property test. -/
+private def renderMonotonicTest (lawId : String) : Option String :=
+  let safe := sanitiseLawIdForTestName lawId
+  let lawNameSuffix := lawId.splitOn "." |>.getLast?.getD lawId
+  let lawTerm? : Option String := match lawNameSuffix with
+    | "transfer" => some
+        ("let r : ResourceId := 0\n      let sender : ActorId := 0\n" ++
+         "      let receiver : ActorId := 1\n      let bal := getBalance s r sender\n" ++
+         "      let amount := if bal > 0 then 1 else 0\n" ++
+         "      let t := Laws.transfer r sender receiver amount\n" ++
+         "      if _ : t.pre s then\n" ++
+         "        let s' := step_impl s t\n" ++
+         "        decide (TotalSupply s r ≤ TotalSupply s' r)\n" ++
+         "      else true")
+    | "mint" => some
+        ("let r : ResourceId := 0\n      let recipient : ActorId := 0\n" ++
+         "      let amount : Amount := 5\n" ++
+         "      let t := Laws.mint r recipient amount\n" ++
+         "      if _ : t.pre s then\n" ++
+         "        let s' := step_impl s t\n" ++
+         "        decide (TotalSupply s r ≤ TotalSupply s' r)\n" ++
+         "      else true")
+    | "freezeResource" => some
+        ("let r : ResourceId := 0\n      let t := Laws.freezeResource r\n" ++
+         "      let s' := step_impl s t\n" ++
+         "      decide (TotalSupply s r ≤ TotalSupply s' r)")
+    | _ => none
+  match lawTerm? with
+  | none => none
+  | some lawTerm =>
+    let display := s!"{lawId}.monotonic property holds (100 samples)"
+    some (renderTestCaseTemplate (safe ++ "MonotonicProperty") display lawTerm)
+
+/-- Render a `local` property test. -/
+private def renderLocalTest (lawId : String) : Option String :=
+  let safe := sanitiseLawIdForTestName lawId
+  let lawNameSuffix := lawId.splitOn "." |>.getLast?.getD lawId
+  let lawTerm? : Option String := match lawNameSuffix with
+    | "transfer" => some
+        ("let r : ResourceId := 0\n      let r' : ResourceId := 1\n" ++
+         "      let sender : ActorId := 0\n      let receiver : ActorId := 1\n" ++
+         "      let bal := getBalance s r sender\n" ++
+         "      let amount := if bal > 0 then 1 else 0\n" ++
+         "      let t := Laws.transfer r sender receiver amount\n" ++
+         "      if _ : t.pre s then\n" ++
+         "        let s' := step_impl s t\n" ++
+         "        decide (getBalance s r' 0 = getBalance s' r' 0 ∧\n" ++
+         "                getBalance s r' 1 = getBalance s' r' 1)\n" ++
+         "      else true")
+    | "mint" => some
+        ("let r : ResourceId := 0\n      let r' : ResourceId := 1\n" ++
+         "      let recipient : ActorId := 0\n      let amount : Amount := 5\n" ++
+         "      let t := Laws.mint r recipient amount\n" ++
+         "      if _ : t.pre s then\n" ++
+         "        let s' := step_impl s t\n" ++
+         "        decide (getBalance s r' 0 = getBalance s' r' 0)\n" ++
+         "      else true")
+    | _ => none
+  match lawTerm? with
+  | none => none
+  | some lawTerm =>
+    let display := s!"{lawId}.local property holds (100 samples)"
+    some (renderTestCaseTemplate (safe ++ "LocalProperty") display lawTerm)
+
+/-- Render a `freeze_preserving` property test. -/
+private def renderFreezePreservingTest (lawId : String) : Option String :=
+  let safe := sanitiseLawIdForTestName lawId
+  let lawNameSuffix := lawId.splitOn "." |>.getLast?.getD lawId
+  let lawTerm? : Option String := match lawNameSuffix with
+    | "freezeResource" => some
+        ("let r : ResourceId := 0\n      let t := Laws.freezeResource r\n" ++
+         "      let s' := step_impl s t\n" ++
+         "      decide (getBalance s r 0 = getBalance s' r 0 ∧\n" ++
+         "              getBalance s r 1 = getBalance s' r 1)")
+    | _ => none
+  match lawTerm? with
+  | none => none
+  | some lawTerm =>
+    let display := s!"{lawId}.freeze_preserving property holds (100 samples)"
+    some (renderTestCaseTemplate (safe ++ "FreezePreservingProperty") display lawTerm)
+
+/-- Render a per-(law, property) test based on the law's
+    `satisfies` claim.  Returns `none` if the law-property pair
+    is unsupported (e.g. `nonce_advances` requires authority-
+    layer setup that the v1 auto-generator doesn't model, or
+    the law's parameter signature isn't known to the renderer). -/
+private def renderPropertyTest (lawId : String) (propertyName : String) :
+    Option String :=
+  if !autoGenSupportedLaws.contains lawId then none
+  else
+    match propertyName with
+    | "conservative"      => renderConservativeTest lawId
+    | "monotonic"         => renderMonotonicTest lawId
+    | "local"             => renderLocalTest lawId
+    | "freeze_preserving" => renderFreezePreservingTest lawId
+    | _ => none
+
+/-- Emit the full `LegalKernel/Test/Properties/AutoGen.lean` test
+    file.  Walks the codegen-input list, emits per-(law, property)
+    tests for supported pairs, and records unsupported pairs in a
+    coverage comment.
+
+    Byte-stable on equal inputs (deterministic iteration over
+    sorted laws). -/
+def emitAutoGenLean (decls : List LawDecl) : String := Id.run do
+  let sortedDecls := decls.toArray.qsort
+    (fun a b =>
+      if a.actionIndex < b.actionIndex then true
+      else if a.actionIndex > b.actionIndex then false
+      else a.identifier < b.identifier)
+  let mut header : String :=
+    "/-\n" ++
+    "  Canon  - A Societal Kernel\n" ++
+    "  Copyright (C) 2026  Adam Hall\n" ++
+    "  This program comes with ABSOLUTELY NO WARRANTY.\n" ++
+    "  This is free software, and you are welcome to redistribute it\n" ++
+    "  under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE\n" ++
+    "-/\n\n" ++
+    "/-\n" ++
+    "LegalKernel.Test.Properties.AutoGen — Workstream-LX (M3) auto-\n" ++
+    "generated property-test suite.\n\n" ++
+    "LX.38 of `docs/lex_implementation_plan.md`.\n\n" ++
+    "**THIS FILE IS AUTO-GENERATED.**  Do not edit by hand.\n" ++
+    "Re-generate by running:\n\n" ++
+    "  lake exe lex_codegen --gen-property-tests\n\n" ++
+    "The generator reads `LegalKernel/_lex_inputs/*.json` and\n" ++
+    "emits one property-test harness invocation per supported\n" ++
+    "`(law, property)` pair declared in each law's `satisfies`\n" ++
+    "claims list.\n\n" ++
+    "Skip envelope: each test wraps in `CANON_AUTOGEN_SKIP=1`\n" ++
+    "(per §LX.38) so CI can opt out for fast cycles.\n" ++
+    "-/\n\n"
+  let imports : String :=
+    "import LegalKernel.Test.Framework\n" ++
+    "import LegalKernel.Test.Property\n" ++
+    "import LegalKernel.Conservation\n" ++
+    "import LegalKernel.Laws.Transfer\n" ++
+    "import LegalKernel.Laws.Mint\n" ++
+    "import LegalKernel.Laws.Burn\n" ++
+    "import LegalKernel.Laws.Reward\n" ++
+    "import LegalKernel.Laws.Freeze\n\n" ++
+    "namespace LegalKernel.Test.Properties.AutoGen\n\n" ++
+    "open LegalKernel\n" ++
+    "open LegalKernel.Laws\n" ++
+    "open LegalKernel.Test\n" ++
+    "open LegalKernel.Test.Property\n\n"
+  let helpers : String :=
+    "/-! ## Helpers: random state generation -/\n\n" ++
+    "/-- Generate a small `State` with sampled balances across\n" ++
+    "    multiple resources.  `nActors` controls the breadth\n" ++
+    "    (default 4); `nResources` is the number of distinct\n" ++
+    "    resource-id slots populated (default 3 — covers indices\n" ++
+    "    0, 1, 2).\n\n" ++
+    "    Audit-5 fix: pre-fix the generator only populated\n" ++
+    "    resource 0, which made `local`-property tests trivial\n" ++
+    "    (e.g. `transferLocalProperty` checks `getBalance s r' a =\n" ++
+    "    getBalance s' r' a` for `r' = 1`; with all r'=1 balances\n" ++
+    "    being 0, the test reduced to `0 = 0` — a tautology that\n" ++
+    "    would silently pass even if `transfer` corrupted other-\n" ++
+    "    resource state).  Now populates resources 0..nResources-1\n" ++
+    "    with independently-sampled balances. -/\n" ++
+    "def genTestState (nActors : Nat := 4) (balanceMax : Nat := 100)\n" ++
+    "    (nResources : Nat := 3) :\n" ++
+    "    Gen State := fun st =>\n" ++
+    "  let rec actorsLoop (r : Nat) (n : Nat) (s : State) (gs : GenState) :\n" ++
+    "      State × GenState :=\n" ++
+    "    if n = 0 then (s, gs)\n" ++
+    "    else\n" ++
+    "      let (bal, gs1) := genNat balanceMax gs\n" ++
+    "      let actorId : ActorId := UInt64.ofNat (n - 1)\n" ++
+    "      let resourceId : ResourceId := UInt64.ofNat r\n" ++
+    "      let s' := setBalance s resourceId actorId bal\n" ++
+    "      actorsLoop r (n - 1) s' gs1\n" ++
+    "  let rec resourcesLoop (r : Nat) (s : State) (gs : GenState) :\n" ++
+    "      State × GenState :=\n" ++
+    "    if r = 0 then (s, gs)\n" ++
+    "    else\n" ++
+    "      let (s', gs') := actorsLoop (r - 1) nActors s gs\n" ++
+    "      resourcesLoop (r - 1) s' gs'\n" ++
+    "  resourcesLoop nResources emptyState st\n\n"
+  let mut body : String := ""
+  let mut testNames : List String := []
+  let mut coverageComments : List String := []
+  for decl in sortedDecls do
+    if decl.satisfies.isEmpty then continue
+    if !autoGenSupportedLaws.contains decl.identifier then
+      coverageComments := coverageComments ++
+        [s!"-- {decl.identifier}: unsupported by auto-generator (deployment-private or unknown signature); coverage manifest only"]
+      continue
+    for claim in decl.satisfies do
+      match renderPropertyTest decl.identifier claim.name with
+      | some testSrc =>
+        body := body ++ testSrc
+        let safe := sanitiseLawIdForTestName decl.identifier
+        let propCap : String := match claim.name with
+          | "conservative" => "ConservativeProperty"
+          | "monotonic" => "MonotonicProperty"
+          | "local" => "LocalProperty"
+          | "freeze_preserving" => "FreezePreservingProperty"
+          | _ => "UnknownProperty"
+        testNames := testNames ++ [s!"{safe}{propCap}"]
+      | none =>
+        coverageComments := coverageComments ++
+          [s!"-- {decl.identifier}.{claim.name}: out-of-scope for v1 auto-generator"]
+  let coverageBlock : String :=
+    if coverageComments.isEmpty then ""
+    else
+      "/-! ## Coverage notes (for pairs not auto-tested) -/\n\n" ++
+      String.join (coverageComments.map (· ++ "\n")) ++ "\n"
+  let testsListBody : String :=
+    if testNames.isEmpty then "  []"
+    else "  [ " ++ String.intercalate ",\n    " testNames ++ " ]"
+  let footer : String :=
+    "/-! ## Combined test suite -/\n\n" ++
+    "/-- The complete LX.38 auto-generated test suite. -/\n" ++
+    "def tests : List TestCase :=\n" ++
+    testsListBody ++ "\n\n" ++
+    "end LegalKernel.Test.Properties.AutoGen\n"
+  pure (header ++ imports ++ helpers ++ coverageBlock ++ body ++ footer)
+
 /-- Main entry.  Parses arguments, runs the pipeline, prints
     diagnostics, returns exit code (0/1/2 per §13.3 conventions).
     Audit-3 added `--help` / `-h`.
@@ -845,12 +1182,53 @@ def emitCanonicalManifest (decls : List LawDecl) : String := Id.run do
     LX-M2 audit-3 amendment: `--canonical` mode now emits a
     structured canonical-manifest summary file via
     `emitCanonicalManifest` instead of returning exit code 2.
-    Full-body regeneration of the 4 target files is M3 work. -/
+    Full-body regeneration of the 4 target files is M3 work.
+
+    LX.38 amendment: `--gen-property-tests` mode emits a
+    coverage-manifest summary file
+    (`LegalKernel/_lex_inputs/property_test_coverage.txt`). -/
 def main (args : List String) : IO UInt32 := do
   if args.contains "--help" || args.contains "-h" then
     return (← printHelp)
   printBanner
   let opts := parseOptions args
+  -- LX.38: --gen-property-tests mode.  Emits a real Lean test
+  -- file at `LegalKernel/Test/Properties/AutoGen.lean` containing
+  -- one property-test invocation per supported (law, property)
+  -- pair declared in the codegen-input JSONs' `satisfies` claims.
+  if opts.genPropertyTests then
+    IO.println "lex_codegen --gen-property-tests: M3 LX.38 auto-gen"
+    match (← loadCodegenInputs opts.inputDir) with
+    | .error msg =>
+      IO.eprintln s!"lex_codegen --gen-property-tests: {msg}"
+      return 2
+    | .ok decls =>
+      let autoGenSrc := emitAutoGenLean decls
+      let autoGenPath : System.FilePath :=
+        FilePath.mk "LegalKernel/Test/Properties/AutoGen.lean"
+      if opts.checkOnly then
+        if (← autoGenPath.pathExists) then
+          let existing ← IO.FS.readFile autoGenPath
+          if existing == autoGenSrc then
+            IO.println s!"lex_codegen --gen-property-tests --check: {decls.length} law(s); AutoGen.lean is byte-stable; OK"
+            return 0
+          else
+            IO.eprintln s!"lex_codegen --gen-property-tests --check: AutoGen.lean divergence at {autoGenPath.toString}"
+            IO.eprintln "  re-run `lake exe lex_codegen --gen-property-tests` to regenerate"
+            return 1
+        else
+          IO.eprintln s!"lex_codegen --gen-property-tests --check: AutoGen.lean does not exist at {autoGenPath.toString}"
+          IO.eprintln "  run `lake exe lex_codegen --gen-property-tests` to generate"
+          return 1
+      else
+        match (← withFileLock autoGenPath
+                  (atomicWriteIfChanged autoGenPath autoGenSrc)) with
+        | none =>
+          IO.eprintln s!"lex_codegen --gen-property-tests: another invocation holds the advisory lock for {autoGenPath.toString}"
+          return 1
+        | some _ =>
+          IO.println s!"lex_codegen --gen-property-tests: emitted AutoGen.lean for {decls.length} law(s) to {autoGenPath.toString}"
+          return 0
   if opts.canonical then
     -- LX-M2 audit-3: --canonical mode now emits a structured
     -- canonical-manifest summary file instead of exiting with
@@ -946,6 +1324,20 @@ def main (args : List String) : IO UInt32 := do
         allViolations := allViolations ++ evV
         let saV ← checkTargetFile opts.outputs.signedActionFile signedBodies
         allViolations := allViolations ++ saV
+        -- LX.38 amendment: also check `AutoGen.lean` if it exists.
+        -- Per spec: "`lex_codegen --check` includes the auto-
+        -- generated file in its consistency check."  We check it
+        -- only when present so the gate is opt-in (via existing
+        -- AutoGen.lean) — running on a project that doesn't use
+        -- the autogen feature shouldn't fail.
+        let autoGenPath : System.FilePath :=
+          FilePath.mk "LegalKernel/Test/Properties/AutoGen.lean"
+        if (← autoGenPath.pathExists) then
+          let autoGenSrc := emitAutoGenLean decls
+          let existing ← IO.FS.readFile autoGenPath
+          if existing != autoGenSrc then
+            allViolations := allViolations ++
+              [s!"L026: AutoGen.lean diverges from rendered output at {autoGenPath.toString}"]
         if allViolations.isEmpty then
           IO.println s!"lex_codegen --check: {decls.length} input(s); no divergence; OK"
           return 0

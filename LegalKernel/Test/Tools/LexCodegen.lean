@@ -576,6 +576,85 @@ def tests : List TestCase :=
             "expected ≥ 1 violation for unknown identifier"
         | .error errs => throw (IO.userError s!"registry parse failed: {errs}")
     }
+  -- LX.38 +4 cases (auto-generation logic).
+  , { name := "LX.38: emitAutoGenLean produces non-empty output"
+    , body := do
+        let decls : List LawDecl := [
+          { schemaVersion := 1, identifier := "legalkernel.transfer",
+            version := "1.0.0", actionIndex := 0, intent := "",
+            params := [], signedBy := { name := "sender" },
+            authorizedBy := { expr := "" }, preExpr := "True",
+            implBlock := "fun s => s",
+            satisfies := [{ name := "conservative", args := [] }],
+            eventsBlock := "[]", registryEffect := .none_,
+            proofOverrides := [],
+            sourceLocation := { fileName := "T.lean", startPos := { line := 1, column := 0 } } }
+        ]
+        let src := emitAutoGenLean decls
+        assert (!src.isEmpty) "auto-gen output is non-empty"
+        let containsTransfer :=
+          (src.splitOn "legalkernel_transferConservativeProperty").length > 1
+        assert containsTransfer
+          "auto-gen output contains the expected test name"
+    }
+  , { name := "LX.38: emitAutoGenLean is deterministic on equal input"
+    , body := do
+        let decls : List LawDecl := [
+          { schemaVersion := 1, identifier := "legalkernel.transfer",
+            version := "1.0.0", actionIndex := 0, intent := "",
+            params := [], signedBy := { name := "sender" },
+            authorizedBy := { expr := "" }, preExpr := "True",
+            implBlock := "fun s => s",
+            satisfies := [{ name := "monotonic", args := [] }],
+            eventsBlock := "[]", registryEffect := .none_,
+            proofOverrides := [],
+            sourceLocation := { fileName := "T.lean", startPos := { line := 1, column := 0 } } }
+        ]
+        let src1 := emitAutoGenLean decls
+        let src2 := emitAutoGenLean decls
+        assertEq (expected := src1) (actual := src2)
+          "two emitAutoGenLean invocations on equal input must be byte-identical"
+    }
+  , { name := "LX.38: emitAutoGenLean records unsupported (law,property) pairs in coverage comments"
+    , body := do
+        let decls : List LawDecl := [
+          { schemaVersion := 1, identifier := "legalkernel.transfer",
+            version := "1.0.0", actionIndex := 0, intent := "",
+            params := [], signedBy := { name := "sender" },
+            authorizedBy := { expr := "" }, preExpr := "True",
+            implBlock := "fun s => s",
+            satisfies := [{ name := "nonce_advances", args := [] }],
+            eventsBlock := "[]", registryEffect := .none_,
+            proofOverrides := [],
+            sourceLocation := { fileName := "T.lean", startPos := { line := 1, column := 0 } } }
+        ]
+        let src := emitAutoGenLean decls
+        let containsCoverageNote :=
+          (src.splitOn "out-of-scope for v1 auto-generator").length > 1
+        assert containsCoverageNote
+          "unsupported pair recorded in coverage notes"
+    }
+  , { name := "LX.38: emitAutoGenLean handles laws with no satisfies claims"
+    , body := do
+        let decls : List LawDecl := [
+          { schemaVersion := 1, identifier := "legalkernel.transfer",
+            version := "1.0.0", actionIndex := 0, intent := "",
+            params := [], signedBy := { name := "sender" },
+            authorizedBy := { expr := "" }, preExpr := "True",
+            implBlock := "fun s => s",
+            satisfies := [],  -- no claims
+            eventsBlock := "[]", registryEffect := .none_,
+            proofOverrides := [],
+            sourceLocation := { fileName := "T.lean", startPos := { line := 1, column := 0 } } }
+        ]
+        let src := emitAutoGenLean decls
+        assert (!src.isEmpty) "output non-empty even with no claims"
+        -- Should NOT contain a per-property test for this law.
+        let containsTransferTest :=
+          (src.splitOn "legalkernel_transferConservativeProperty").length > 1
+        assert (!containsTransferTest)
+          "no test emitted for a law with no satisfies"
+    }
   ]
 
 end LegalKernel.Test.Tools.LexCodegen
