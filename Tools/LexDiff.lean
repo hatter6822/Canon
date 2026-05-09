@@ -176,8 +176,19 @@ def computeLawDiff (before after : LawDecl) : LawDiff :=
     refinementProofPresent := false  -- filled in below
   }
 
-/-- True iff the diff has no clause changes. -/
+/-- True iff the diff has no semantic changes (no clause diff
+    AND no version change).
+
+    **Audit-3 bugfix**: pre-fix `isEmpty` ignored the
+    `versionBefore` / `versionAfter` fields, so a pure version-
+    bump (e.g. `1.0.0 → 1.0.1` with no clause changes) was
+    falsely reported as "empty diff" and the law was filtered
+    out of `lawsModified` by `computeLawSetDiff`.  This silently
+    masked declared-vs-computed bump-mismatches (L007) for
+    version-only changes AND made `lex_diff --git` claim
+    "no changes" for pure version bumps. -/
 def LawDiff.isEmpty (d : LawDiff) : Bool :=
+  d.versionBefore == d.versionAfter ∧
   d.preDiff.isNone ∧ d.implDiff.isNone ∧ d.satisfiesDiff.isNone ∧
   d.eventsDiff.isNone ∧ d.intentDiff.isNone ∧ d.signedByDiff.isNone ∧
   d.authDiff.isNone ∧ d.actionIndexDiff.isNone ∧ d.paramsDiff.isNone ∧
@@ -427,18 +438,27 @@ def parseLawDeclFromGitRef (ref : String) (filePath : System.FilePath) :
         s!"failed to parse {pathStr} at {ref}: {msg}"
 
 /-- List all `*.json` files in a directory at a specific git ref.
-    Uses `git ls-tree <ref> -- <dir>` to get the listing. -/
+    Uses `git ls-tree -r <ref> -- <dir>` to get the recursive
+    listing.
+
+    **Audit-3 bugfix**: pre-fix the call used `git ls-tree
+    --name-only <ref> -- <dir>` WITHOUT `-r`, which returns just
+    the directory entry itself (not its contents) when `<dir>` is
+    a directory.  This caused `loadCodegenDirFromGitRef` to find
+    zero JSON files and report "no changes" for any diff —
+    silently masking real semantic changes.  The `-r` flag
+    recurses into the directory. -/
 def gitLsTree (ref : String) (dir : String) :
     IO (Except String (List String)) := do
   if !isSafeGitRef ref then
     return .error
       s!"git ref `{ref}` is unsafe (starts with `-`, contains control chars, or is empty); refusing to pass to git for security"
   let proc := { cmd := "git",
-                args := #["ls-tree", "--name-only", ref, "--", dir]
+                args := #["ls-tree", "-r", "--name-only", ref, "--", dir]
                 : IO.Process.SpawnArgs }
   let output ← IO.Process.output proc
   if output.exitCode != 0 then
-    return .error s!"git ls-tree {ref} -- {dir} failed: {output.stderr}"
+    return .error s!"git ls-tree -r {ref} -- {dir} failed: {output.stderr}"
   -- Split output by newlines; filter `*.json` files.
   let lines := output.stdout.splitOn "\n"
   let jsonFiles := lines.filter (fun l =>
@@ -533,7 +553,15 @@ needs to compare two manifests at git refs should:
      `computeLawSetDiff` (per-law content). -/
 
 /-- Render an `InvariantClaim` as a comma-joined "<kind>:<lawnames>"
-    string for diff comparison. -/
+    string for diff comparison.
+
+    **Audit-3 fix**: the law-name list is sorted lexicographically
+    before joining, so claims with the same set of laws but
+    different declared order compare equal.  Per spec §10.2 ("the
+    set of laws"), claim law lists are unordered — `[A, B]` and
+    `[B, A]` are the same claim.  Without this normalisation,
+    reordering would be triple-counted (added + removed +
+    modified). -/
 private def invariantClaimToString
     (c : LegalKernel.DSL.InvariantClaim) : String :=
   let kindStr : String := match c.kind with
@@ -541,7 +569,9 @@ private def invariantClaimToString
     | .conservativeLawSet     => "conservative_law_set"
     | .freezePreservingLawSet => "freeze_preserving_law_set"
   let scopeStr : String := match c.scope with
-    | .explicit names => "[" ++ String.intercalate "," names ++ "]"
+    | .explicit names =>
+      let sortedNames := names.toArray.qsort (· < ·) |>.toList
+      "[" ++ String.intercalate "," sortedNames ++ "]"
     | .wildcard       => "[all_laws]"
   s!"{kindStr} {scopeStr}"
 
@@ -589,12 +619,16 @@ def computeManifestDiff
         (fun bb => bb.kind == b.kind)).length
     if kindMatches.length == 1 ∧ beforeMatchCount == 1 then
       let a := kindMatches.head!
-      let bScope := match b.scope with
-        | .explicit names => String.intercalate "," names
+      -- Audit-3: order-normalise scope before comparison so
+      -- `[A, B]` and `[B, A]` aren't reported as modified.
+      let renderScope (s : LegalKernel.DSL.InvariantClaimScope) : String :=
+        match s with
+        | .explicit names =>
+          let sortedNames := names.toArray.qsort (· < ·) |>.toList
+          String.intercalate "," sortedNames
         | .wildcard       => "<all_laws>"
-      let aScope := match a.scope with
-        | .explicit names => String.intercalate "," names
-        | .wildcard       => "<all_laws>"
+      let bScope := renderScope b.scope
+      let aScope := renderScope a.scope
       if bScope != aScope then
         let kindStr : String := match b.kind with
           | .monotonicLawSet        => "monotonic_law_set"

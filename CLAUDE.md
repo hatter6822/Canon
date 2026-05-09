@@ -3162,6 +3162,75 @@ After audit-2 fixes:
     every §16 / §14 / §15 / §LX.31-38 deliverable is functionally
     complete.
 
+**Workstream-LX M3-completion audit-3 hardening (this branch).**
+A third deep audit pass following the audit-2 landing identified
+three additional bugs (one HIGH, two MEDIUM) — none caught by
+the first two audit passes because they only manifested at end-
+to-end test scenarios that the prior audit didn't reach.  All
+closed.
+
+  * **HIGH (correctness): `gitLsTree` returned just the
+    directory entry, not its contents.**  Pre-fix, `git ls-tree
+    --name-only <ref> -- <dir>` (without `-r`) returns
+    `LegalKernel/_lex_inputs` (the directory name) when called
+    on a directory, NOT the JSON files inside.  This caused
+    `loadCodegenDirFromGitRef` to find ZERO sidecars for any
+    git-ref input — `lex_diff --git <ref-a> <ref-b>` always
+    reported "no changes" regardless of actual diffs.  The
+    audit-2 manifest-diff bug was symptomatically related but
+    only audit-3's end-to-end testing caught the underlying
+    `gitLsTree` issue.  FIX: added `-r` flag to recurse into the
+    directory.
+
+  * **HIGH (correctness): `LawDiff.isEmpty` ignored the
+    `versionBefore` / `versionAfter` fields.**  Pre-fix, a pure
+    version-bump (`1.0.0 → 1.0.1` with no clause changes) was
+    reported as empty diff.  This caused:
+      (a) `computeLawSetDiff` to filter out the law from
+          `lawsModified` (so the bump was invisible).
+      (b) `validateDeploymentDiff`'s declared-vs-computed
+          mismatch check (L007) to never fire on version-only
+          changes.
+    FIX: `isEmpty` now requires `versionBefore == versionAfter`
+    in addition to all clause diffs being `none`.  Plus 2 new
+    regression tests.
+
+  * **MEDIUM (correctness): manifest hash + claim diff were
+    order-sensitive but should have been canonical.**  Pre-fix,
+    reordering laws / authority bindings / invariant claims at
+    the source level (a no-op semantic change) would change the
+    manifest hash AND `computeManifestDiff` would triple-count
+    `[A, B] → [B, A]` claim reorderings as added + removed +
+    modified.
+    FIX: `encodeManifestHashInput` now sorts all lists
+    (resources, laws, authority, claims, and law-names within
+    claims) before encoding.  `computeManifestDiff`'s
+    `invariantClaimToString` and modified-claim renderer also
+    sort law-name lists before comparison.  Per spec §10.2 —
+    "the set of laws" — claim law lists are unordered sets,
+    so this canonicalisation matches the spec semantics.
+
+After audit-3 fixes:
+
+  * **1590 tests across 84 suites** (was 1584 pre-audit-3; +6
+    new regression tests in `tools-lex-diff`).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * All 6 CI gates green.
+  * `lex_diff --git` end-to-end now correctly detects diffs
+    (verified manually on a synthetic `1.0.0 → 1.1.0` test
+    commit pair).
+  * Manifest hash for the worked-example USD-clearing changed
+    from `1919db5de8cacee10...` to
+    `f9182604d6417760000000...` due to canonicalisation;
+    walkthrough doc updated.
+  * **Audit-3 lessons learned**: end-to-end testing of git
+    integration was the only way to surface the `gitLsTree -r`
+    bug; unit tests on the function in isolation passed because
+    they didn't test the directory-vs-file distinction in the
+    git layout.  Added a regression test pattern of
+    "synthesise a temp commit + diff" to the audit checklist.
+
 **Workstream-LX M2 audit-5 hardening (this branch).**  A fifth
 deep audit, parallelised across three independent agents (law-
 file mathematical correctness, test-coverage gaps, and

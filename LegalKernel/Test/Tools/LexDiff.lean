@@ -565,6 +565,110 @@ def gitRefValidationInParseLawDeclFromGitRef : TestCase := {
 
 /-! ## Combined test suite -/
 
+/-! ## Audit-3 amendment: regression tests for newly-found bugs -/
+
+/-- Regression: `LawDiff.isEmpty` checks the version field
+    (audit-3 bugfix).  Pre-fix, a pure version-bump
+    (`1.0.0 → 1.0.1` with no clause changes) would be reported
+    as empty diff, silently masking declared-vs-computed bump
+    mismatches. -/
+def lawDiffIsEmptyChecksVersion : TestCase := {
+  name := "audit-3: LawDiff.isEmpty checks version (regression)"
+  body := do
+    let after := { fixtureLawDecl with version := "1.0.1" }
+    let diff := computeLawDiff fixtureLawDecl after
+    assert (!diff.isEmpty)
+      "version-only change should NOT be reported as empty diff"
+}
+
+/-- Regression: `computeLawSetDiff` reports version-only bumps
+    in `lawsModified` (audit-3 bugfix). -/
+def lawSetDiffReportsVersionOnlyBump : TestCase := {
+  name := "audit-3: computeLawSetDiff reports version-only bumps"
+  body := do
+    let before := fixtureLawDecl
+    let after := { fixtureLawDecl with version := "1.0.1" }
+    let diff := computeLawSetDiff [before] [after]
+    assertEq (expected := 1) (actual := diff.lawsModified.length)
+      "version-only bump appears in lawsModified"
+    let modified := diff.lawsModified.head!
+    assertEq (expected := VersionBump.patch) (actual := modified.versionBump)
+      "version-only bump classified as patch"
+}
+
+/-- Regression: invariant claim diff is order-insensitive
+    (audit-3 bugfix).  Pre-fix, `[A, B] → [B, A]` was reported
+    as 1 added + 1 removed + 1 modified (triple-counted!). -/
+def manifestDiffOrderInsensitive : TestCase := {
+  name := "audit-3: invariant claim diff is order-insensitive"
+  body := do
+    let withAB : LegalKernel.DSL.Deployment := { fixtureDeployment with
+      invariantClaims := [{ kind := .monotonicLawSet,
+                            scope := .explicit ["A", "B"] }] }
+    let withBA : LegalKernel.DSL.Deployment := { fixtureDeployment with
+      invariantClaims := [{ kind := .monotonicLawSet,
+                            scope := .explicit ["B", "A"] }] }
+    let diff := computeManifestDiff withAB withBA
+    assertEq (expected := 0) (actual := diff.invariantClaimsAdded.length)
+      "no spurious additions on reorder"
+    assertEq (expected := 0) (actual := diff.invariantClaimsRemoved.length)
+      "no spurious removals on reorder"
+    assertEq (expected := 0) (actual := diff.invariantClaimsModified.length)
+      "no spurious modifications on reorder"
+}
+
+/-- Regression: manifest hash is order-insensitive (audit-3
+    bugfix).  Pre-fix, reordering laws / authority bindings /
+    claims would change the manifest hash even though
+    `computeManifestDiff` correctly reported "no semantic
+    change". -/
+def manifestHashOrderInsensitive : TestCase := {
+  name := "audit-3: manifest hash is order-insensitive (laws / authority / claims)"
+  body := do
+    let h1 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" [("USD", 1), ("EUR", 2)]
+      [("A", "A", "1.0"), ("B", "B", "1.0")]
+      [("p1", "P1"), ("p2", "P2")]
+      [(0, 0, ["A", "B"])]
+    let h2 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" [("EUR", 2), ("USD", 1)]
+      [("B", "B", "1.0"), ("A", "A", "1.0")]
+      [("p2", "P2"), ("p1", "P1")]
+      [(0, 0, ["B", "A"])]
+    assertEq (expected := h1.toList) (actual := h2.toList)
+      "manifest hash equal on reorder of laws/authority/claims"
+}
+
+/-- Regression: adding a law DOES change the hash (sanity-check
+    that canonicalisation didn't make hashes too coarse). -/
+def manifestHashAdditionDistinguishable : TestCase := {
+  name := "audit-3: manifest hash distinguishes additions from reorderings"
+  body := do
+    let h1 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" []
+      [("A", "A", "1.0")] [] []
+    let h2 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" []
+      [("A", "A", "1.0"), ("B", "B", "1.0")] [] []
+    assert (h1.toList != h2.toList)
+      "adding a law changes the hash"
+}
+
+/-- Regression: changing `lawIdent` while keeping localName +
+    version the same DOES change the hash. -/
+def manifestHashLawIdentDistinguishable : TestCase := {
+  name := "audit-3: manifest hash distinguishes by lawIdent"
+  body := do
+    let h1 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" []
+      [("Transfer", "LegalKernel.Laws.transfer", "1.0")] [] []
+    let h2 := LegalKernel.DSL.computeManifestHash
+      "ex" ByteArray.empty "1.0" []
+      [("Transfer", "LegalKernel.Laws.somethingElse", "1.0")] [] []
+    assert (h1.toList != h2.toList)
+      "different lawIdent for same localName produces different hash"
+}
+
 /-- Complete LX.34/LX.35 test suite. -/
 def tests : List TestCase :=
   [ emptyDiffOnEqual,
@@ -606,7 +710,14 @@ def tests : List TestCase :=
     gitRefRejectsFlagInjection,
     gitRefRejectsControlChars,
     gitRefAcceptsCanonical,
-    gitRefValidationInParseLawDeclFromGitRef ]
+    gitRefValidationInParseLawDeclFromGitRef,
+    -- Audit-3 amendment: regression tests for newly-found bugs
+    lawDiffIsEmptyChecksVersion,
+    lawSetDiffReportsVersionOnlyBump,
+    manifestDiffOrderInsensitive,
+    manifestHashOrderInsensitive,
+    manifestHashAdditionDistinguishable,
+    manifestHashLawIdentDistinguishable ]
 
 end LexDiffTests
 end LegalKernel.Test.Tools

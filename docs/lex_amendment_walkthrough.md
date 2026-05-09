@@ -214,7 +214,13 @@ at v1.0.0 is recorded here:
   * **Manifest version**: `1.0.0`
   * **Manifest hash** (FNV-1a-64; first 8 bytes are the hash, rest zero-padded
     until production BLAKE3 lands; see `Runtime/Hash.lean`):
-    `1919db5de8cacee1000000000000000000000000000000000000000000000000`
+    `f9182604d6417760000000000000000000000000000000000000000000000000`
+
+    *(Hash recomputed after audit-3 canonicalisation: list ordering
+    no longer affects the hash, so the previously-recorded value
+    `1919db5de8cacee10...` is superseded.  Reordering laws or
+    authority bindings in the manifest source no longer changes the
+    hash; only semantic content does.)*
 
 To verify the hash hasn't drifted:
 

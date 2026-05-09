@@ -331,25 +331,50 @@ def encodeManifestHashInput
     (authority : List (String × String))        -- (localName, policyExpr)
     (claims : List (Nat × Nat × List String))   -- (kind-tag, scope-tag, law-names)
     : LegalKernel.Encoding.Stream := Id.run do
+  -- Audit-3 canonicalisation: sort lists to make hash
+  -- order-insensitive (matches `computeManifestDiff`'s set-
+  -- semantic interpretation per spec §10.2: "the set of laws").
+  -- Without this, reordering laws/authority/claims at the source
+  -- level would change the manifest hash even though
+  -- `computeManifestDiff` correctly says "no semantic change" —
+  -- a discrepancy that would break attestor signatures on
+  -- no-op reorderings.
+  let sortedResources :=
+    resources.toArray.qsort (fun a b => a.1 < b.1) |>.toList
+  let sortedLaws :=
+    laws.toArray.qsort (fun a b => a.1 < b.1) |>.toList
+  let sortedAuthority :=
+    authority.toArray.qsort (fun a b => a.1 < b.1) |>.toList
+  let claimsCanonicalised : List (Nat × Nat × List String) :=
+    claims.map (fun (kt, st, lns) =>
+      (kt, st, lns.toArray.qsort (· < ·) |>.toList))
+  let sortedClaims := claimsCanonicalised.toArray.qsort
+    (fun a b =>
+      if a.1 < b.1 then true
+      else if a.1 > b.1 then false
+      else if a.2.1 < b.2.1 then true
+      else if a.2.1 > b.2.1 then false
+      else (String.intercalate "," a.2.2) < (String.intercalate "," b.2.2))
+    |>.toList
   let mut bytes : LegalKernel.Encoding.Stream := []
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (identifier.toUTF8)
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode deploymentId
   bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (version.toUTF8)
-  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (resources.length : Nat)
-  for (name, idx) in resources do
+  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (sortedResources.length : Nat)
+  for (name, idx) in sortedResources do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (name.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (idx : Nat)
-  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (laws.length : Nat)
-  for (lnm, lid, lv) in laws do
+  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (sortedLaws.length : Nat)
+  for (lnm, lid, lv) in sortedLaws do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lnm.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lid.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lv.toUTF8)
-  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (authority.length : Nat)
-  for (slot, expr) in authority do
+  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (sortedAuthority.length : Nat)
+  for (slot, expr) in sortedAuthority do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (slot.toUTF8)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (expr.toUTF8)
-  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (claims.length : Nat)
-  for (kindTag, scopeTag, lawNames) in claims do
+  bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (sortedClaims.length : Nat)
+  for (kindTag, scopeTag, lawNames) in sortedClaims do
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (kindTag : Nat)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (scopeTag : Nat)
     bytes := bytes ++ LegalKernel.Encoding.Encodable.encode (lawNames.length : Nat)
