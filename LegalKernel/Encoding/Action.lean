@@ -112,6 +112,10 @@ def Action.fieldsBounded : Action → Prop
       amount < 256 ^ 8
   | .declareLocalPolicy p           => LocalPolicy.fieldsBounded p
   | .revokeLocalPolicy              => True
+  | .faultProofChallenge bh s e cc  =>
+      bh.size < 256 ^ 8 ∧ s < 256 ^ 8 ∧ e < 256 ^ 8 ∧ cc.size < 256 ^ 8
+  | .faultProofResolution bh gid w rfi =>
+      bh.size < 256 ^ 8 ∧ gid < 256 ^ 8 ∧ w.toNat < 256 ^ 8 ∧ rfi < 256 ^ 8
   -- Workstream-LX (LX.18): codegen-managed Lex `fieldsBounded`
   -- arms land between the fence markers below.  Empty in M1
   -- (the example law has no new constructor).  M2 populates the
@@ -208,6 +212,18 @@ def Action.encode : Action → Stream
       Encodable.encode (T := LocalPolicy) p
   | .revokeLocalPolicy              =>
       Encodable.encode (T := Nat) 16
+  | .faultProofChallenge bh s e cc  =>
+      Encodable.encode (T := Nat) 17 ++
+      Encodable.encode (T := ByteArray) bh ++
+      Encodable.encode (T := Nat) s ++
+      Encodable.encode (T := Nat) e ++
+      Encodable.encode (T := ByteArray) cc
+  | .faultProofResolution bh gid w rfi =>
+      Encodable.encode (T := Nat) 18 ++
+      Encodable.encode (T := ByteArray) bh ++
+      Encodable.encode (T := Nat) gid ++
+      Encodable.encode (T := Nat) w.toNat ++
+      Encodable.encode (T := Nat) rfi
   -- Workstream-LX (LX.18): codegen-managed Lex `encode` arms land
   -- between the fence markers below.  Empty in M1.
   -- BEGIN LEX-GENERATED (do not edit by hand)
@@ -393,9 +409,38 @@ def Action.decode (s : Stream) : Except DecodeError (Action × Stream) :=
   | .ok (16, s₁) =>
     -- revokeLocalPolicy (no fields)
     .ok (.revokeLocalPolicy, s₁)
+  | .ok (17, s₁) =>
+    -- faultProofChallenge (bindingHash, disputedStartIdx, disputedEndIdx,
+    -- challengerCommit)
+    match Encodable.decode (T := ByteArray) s₁ with
+    | .ok (bh, s₂) =>
+      match Action.readNatField s₂ with
+      | .ok (sIdx, s₃) =>
+        match Action.readNatField s₃ with
+        | .ok (eIdx, s₄) =>
+          match Encodable.decode (T := ByteArray) s₄ with
+          | .ok (cc, s₅) => .ok (.faultProofChallenge bh sIdx eIdx cc, s₅)
+          | .error e => .error e
+        | .error e => .error e
+      | .error e => .error e
+    | .error e => .error e
+  | .ok (18, s₁) =>
+    -- faultProofResolution (bindingHash, gameId, winner, revertFromIdx)
+    match Encodable.decode (T := ByteArray) s₁ with
+    | .ok (bh, s₂) =>
+      match Action.readNatField s₂ with
+      | .ok (gid, s₃) =>
+        match Action.readUInt64Field s₃ with
+        | .ok (w, s₄) =>
+          match Action.readNatField s₄ with
+          | .ok (rfi, s₅) => .ok (.faultProofResolution bh gid w rfi, s₅)
+          | .error e => .error e
+        | .error e => .error e
+      | .error e => .error e
+    | .error e => .error e
   -- Workstream-LX (LX.18): codegen-managed Lex `decode` arms land
   -- between the fence markers below, dispatching on constructor
-  -- tags ≥ 17.  Empty in M1.
+  -- tags ≥ 19.  Empty in M1.
   -- BEGIN LEX-GENERATED (do not edit by hand)
   -- END LEX-GENERATED
   | .ok (other, _) => .error (.invalidConstructorIndex other)
@@ -713,6 +758,54 @@ theorem action_roundtrip (a : Action) (rest : Stream) (h : Action.fieldsBounded 
     show Action.decode (Action.encode .revokeLocalPolicy ++ rest) = .ok (_, rest)
     unfold Action.encode Action.decode
     rw [nat_roundtrip 16 _ (by decide)]
+  | faultProofChallenge bh sIdx eIdx cc =>
+    obtain ⟨h1, h2, h3, h4⟩ := h
+    show Action.decode (Action.encode (.faultProofChallenge bh sIdx eIdx cc) ++ rest)
+        = .ok (_, rest)
+    unfold Action.encode Action.decode
+    rw [show
+      Encodable.encode (T := Nat) 17 ++ Encodable.encode (T := ByteArray) bh ++
+        Encodable.encode (T := Nat) sIdx ++
+        Encodable.encode (T := Nat) eIdx ++
+        Encodable.encode (T := ByteArray) cc ++ rest =
+      Encodable.encode (T := Nat) 17 ++ (Encodable.encode (T := ByteArray) bh ++
+        (Encodable.encode (T := Nat) sIdx ++
+        (Encodable.encode (T := Nat) eIdx ++
+        (Encodable.encode (T := ByteArray) cc ++ rest))))
+        from by simp [List.append_assoc]]
+    rw [nat_roundtrip 17 _ (by decide)]
+    dsimp only
+    rw [byteArray_roundtrip bh _ h1]
+    dsimp only
+    rw [readNatField_roundtrip sIdx _ h2]
+    dsimp only
+    rw [readNatField_roundtrip eIdx _ h3]
+    dsimp only
+    rw [byteArray_roundtrip cc rest h4]
+  | faultProofResolution bh gid w rfi =>
+    obtain ⟨h1, h2, h3, h4⟩ := h
+    show Action.decode (Action.encode (.faultProofResolution bh gid w rfi) ++ rest)
+        = .ok (_, rest)
+    unfold Action.encode Action.decode
+    rw [show
+      Encodable.encode (T := Nat) 18 ++ Encodable.encode (T := ByteArray) bh ++
+        Encodable.encode (T := Nat) gid ++
+        Encodable.encode (T := Nat) w.toNat ++
+        Encodable.encode (T := Nat) rfi ++ rest =
+      Encodable.encode (T := Nat) 18 ++ (Encodable.encode (T := ByteArray) bh ++
+        (Encodable.encode (T := Nat) gid ++
+        (Encodable.encode (T := Nat) w.toNat ++
+        (Encodable.encode (T := Nat) rfi ++ rest))))
+        from by simp [List.append_assoc]]
+    rw [nat_roundtrip 18 _ (by decide)]
+    dsimp only
+    rw [byteArray_roundtrip bh _ h1]
+    dsimp only
+    rw [readNatField_roundtrip gid _ h2]
+    dsimp only
+    rw [readUInt64Field_roundtrip w _]
+    dsimp only
+    rw [readNatField_roundtrip rfi rest h4]
 
 /-- Empty-suffix round-trip for `Action`. -/
 theorem action_roundtrip_empty (a : Action) (h : Action.fieldsBounded a) :
@@ -780,6 +873,8 @@ theorem Action.tag_matches_encode_tag (a : Action) :
          Encodable.encode (T := Nat) (Action.tag .revokeLocalPolicy) ++ []
     rw [List.append_nil]
     rfl
+  | faultProofChallenge _ _ _ _   => exact ⟨_, rfl⟩
+  | faultProofResolution _ _ _ _  => exact ⟨_, rfl⟩
 
 /-! ## Spot-check `example`s (compile-time-only test vectors) -/
 

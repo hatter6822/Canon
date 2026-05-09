@@ -259,12 +259,63 @@ inductive Action
       actor can always revoke their own policy regardless of the
       policy's contents (the structural lockout-prevention proof). -/
   | revokeLocalPolicy
+  /-- Workstream H §12.1 — fault-proof challenge intent (frozen
+      index 17).  A user submits this action to record an intent
+      to challenge the sequencer's published state root for the
+      log range `[disputedStartIdx .. disputedEndIdx]`.
+
+      `bindingHash` is a 32-byte content hash binding
+      `(challenger, disputedStateRoot, challengerCommit,
+      deploymentId)`.  The L1 contract `CanonFaultProofGame`
+      assigns the actual `gameId` on `initiateChallenge`; the L2
+      runtime's L1-event watcher matches L2 challenge intents to
+      L1 games via this hash.
+
+      Kernel-level effect: identity (compiles to
+      `Laws.freezeResource 0`).  The L2 action is *advisory* — the
+      L1 contract is the authoritative game state.  The
+      `Disputes/Rewards.lean`-style policy hooks can still consume
+      this action's emission to compose challenger rewards on
+      successful resolution.
+
+      Why a binding hash rather than a `gameId : Nat` field:
+      the L1 contract assigns gameIds at `initiateChallenge` time,
+      so the L2 challenger cannot know the gameId before the L1
+      game exists.  The hash binds the L2 intent to an L1 game
+      that is later opened with matching parameters. -/
+  | faultProofChallenge (bindingHash : ByteArray)
+                        (disputedStartIdx : Disputes.LogIndex)
+                        (disputedEndIdx : Disputes.LogIndex)
+                        (challengerCommit : ByteArray)
+  /-- Workstream H §12.1 — fault-proof game settlement mirror
+      (frozen index 18).  The L2 runtime's L1-event watcher
+      receives a `FaultProofGameSettled` event from L1 and emits
+      this action to record the settlement in the canonical L2
+      log.  Carries the same `bindingHash` as the corresponding
+      `faultProofChallenge`, plus the L1-assigned `gameId`,
+      `winner`, and `revertFromIdx`.
+
+      The actual rollback is **not** triggered by this L2 action;
+      it is triggered by the L1 contract's
+      `revertToPriorRoot` on the bridge.  This L2 action is
+      advisory-only: replicas that don't watch L1 directly can
+      still observe disputes through the canonical log.
+
+      Kernel-level effect: identity (compiles to
+      `Laws.freezeResource 0`).  Authority-level effect: none
+      (no registry / nonce-table / bridge-state / local-policy
+      mutation beyond the standard signer-nonce advance). -/
+  | faultProofResolution (bindingHash : ByteArray) (gameId : Nat)
+                          (winner : ActorId)
+                          (revertFromIdx : Disputes.LogIndex)
   -- Workstream-LX (LX.17): codegen-managed Lex constructors land
   -- between the fence markers below.  M1's example law (frozen
   -- index 17) deliberately does not extend `Action` — it lives
   -- in the JSON sidecar registry only — so the fence is empty in
   -- M1.  M2 (LX.22 – LX.30) populates this fence as the kernel-
   -- built-in laws are re-expressed in Lex.
+  -- Workstream H reserves indices 17 and 18; future Lex-generated
+  -- ctors (M2+) will append at index 19+.
   -- BEGIN LEX-GENERATED (do not edit by hand)
   -- END LEX-GENERATED
   deriving Repr, DecidableEq
@@ -326,6 +377,11 @@ def Action.compileTransition : Action → Transition
   -- `applyActionToLocalPolicies` inside `apply_admissible` (LP.5).
   | .declareLocalPolicy _           => Laws.freezeResource 0
   | .revokeLocalPolicy              => Laws.freezeResource 0
+  -- Workstream H: fault-proof actions.  Both compile to the
+  -- kernel-level no-op.  The L1 game contract is authoritative
+  -- for fault-proof game outcomes; the L2 actions are advisory.
+  | .faultProofChallenge _ _ _ _    => Laws.freezeResource 0
+  | .faultProofResolution _ _ _ _   => Laws.freezeResource 0
   -- Workstream-LX (LX.17): codegen-managed Lex `compileTransition`
   -- arms land between the fence markers below.  Empty in M1;
   -- populated in M2 once the kernel-built-in laws are re-expressed
@@ -501,6 +557,14 @@ example (p : LocalPolicy) :
 
 example :
     (Action.compile .revokeLocalPolicy).source = .revokeLocalPolicy := rfl
+
+example (bh : ByteArray) (s e : Disputes.LogIndex) (cc : ByteArray) :
+    (Action.compile (.faultProofChallenge bh s e cc)).source =
+      .faultProofChallenge bh s e cc := rfl
+
+example (bh : ByteArray) (gid : Nat) (w : ActorId) (rfi : Disputes.LogIndex) :
+    (Action.compile (.faultProofResolution bh gid w rfi)).source =
+      .faultProofResolution bh gid w rfi := rfl
 
 end Authority
 end LegalKernel

@@ -128,6 +128,16 @@ import LegalKernel.Test.Bridge.CrossCheck.WithdrawalProof
 import LegalKernel.Test.Bridge.CrossCheck.DisputeEvidence
 import LegalKernel.Test.Bridge.CrossCheck.MigrationAttestation
 import LegalKernel.Test.Bridge.CrossCheck.Goldens
+-- Workstream H — fault-proof migration test suites.
+import LegalKernel.Test.FaultProof.Cell
+import LegalKernel.Test.FaultProof.Commit
+import LegalKernel.Test.FaultProof.Step
+import LegalKernel.Test.FaultProof.Game
+import LegalKernel.Test.FaultProof.LawClassification
+import LegalKernel.Test.FaultProof.Encoding
+import LegalKernel.Test.FaultProof.EventEmission
+import LegalKernel.Test.FaultProof.Witness
+import LegalKernel.Test.Properties.FaultProof
 
 open LegalKernel.Test
 
@@ -279,6 +289,25 @@ def main : IO UInt32 := do
                                     Bridge.CrossCheck.MigrationAttestation.tests)
   failed := failed + (← runAll "crosscheck-goldens"
                                     Bridge.CrossCheck.Goldens.tests)
+  -- Workstream H — fault-proof migration suites.
+  failed := failed + (← runAll "faultproof-cell"
+                                    LegalKernel.Test.FaultProof.Cell.tests)
+  failed := failed + (← runAll "faultproof-commit"
+                                    LegalKernel.Test.FaultProof.Commit.tests)
+  failed := failed + (← runAll "faultproof-step"
+                                    LegalKernel.Test.FaultProof.Step.tests)
+  failed := failed + (← runAll "faultproof-game"
+                                    LegalKernel.Test.FaultProof.Game.tests)
+  failed := failed + (← runAll "faultproof-lawclass"
+                                    LegalKernel.Test.FaultProof.LawClassification.tests)
+  failed := failed + (← runAll "faultproof-encoding"
+                                    LegalKernel.Test.FaultProof.Encoding.tests)
+  failed := failed + (← runAll "faultproof-events"
+                                    LegalKernel.Test.FaultProof.EventEmission.tests)
+  failed := failed + (← runAll "faultproof-witness"
+                                    LegalKernel.Test.FaultProof.Witness.tests)
+  failed := failed + (← runAll "property-faultproof"
+                                    LegalKernel.Test.Properties.FaultProof.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0

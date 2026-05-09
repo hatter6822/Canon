@@ -191,6 +191,14 @@ lake build LegalKernel.Laws.Withdraw                 # Workstream C.3 withdraw l
 lake build LegalKernel.Bridge.WithdrawalRoot         # Workstream D.1 sparse Merkle tree (D.1.1 - D.1.5)
 lake build LegalKernel.Bridge.WithdrawalProof        # Workstream D.2 withdrawal proof extractor
 lake build LegalKernel.Bridge.Finalisation           # Workstream D.3 snapshot finalisation policy
+lake build LegalKernel.FaultProof.Cell               # Workstream H §12 CellTag + CellProof
+lake build LegalKernel.FaultProof.StepVariants       # Workstream H per-action cell sets (Appendix D)
+lake build LegalKernel.FaultProof.Commit             # Workstream H §12.2 commitExtendedState
+lake build LegalKernel.FaultProof.Verify             # Workstream H §12.3 verifyCellProof
+lake build LegalKernel.FaultProof.Step               # Workstream H §12.1 KernelStep + chainKernelStepApply
+lake build LegalKernel.FaultProof.Game               # Workstream H §12.4 bisection game state machine
+lake build LegalKernel.FaultProof.Witness            # Workstream H §12.4.4e FaultProofChallengerWon
+lake build LegalKernel.FaultProof.LawClassification  # Workstream H §12.1 IsConservative/IsMonotonic for fp ctors
 lake build LegalKernel.Test.Bridge.CrossCheck.Framework         # Workstream F.1.1 cross-stack framework
 lake build LegalKernel.Test.Bridge.CrossCheck.EcdsaVerify       # Workstream F.1.2 ecdsa fixture
 lake build LegalKernel.Test.Bridge.CrossCheck.Keccak256         # Workstream F.1.3 keccak256 fixture
@@ -229,7 +237,7 @@ lake build LegalKernel.DSL.LexImplLowering                      # LX-M2 §6.2 ca
 lake build LexCommon                          # Workstream LX.4 shared audit-binary utilities
 lake build canon                              # Phase-5 `canon` runtime CLI (D.2: withdrawal-proof subcommand)
 lake build canon-replay                       # Phase-5 `canon-replay` audit binary
-lake test                           # run Tests.lean driver (1476 tests post-Workstream-LX-M2 audit-6)
+lake test                           # run Tests.lean driver (1686 tests post-Workstream-H)
 lake exe count_sorries              # WU 1.12: zero-sorry kernel gate
 lake exe tcb_audit                  # WU 1.11: TCB allowlist gate
 lake exe stub_audit                 # Audit-3.8: stub-detection gate
@@ -1718,6 +1726,7 @@ units.  Brief summary:
 | LX-M1  | Lex language: macro skeleton + synthesizer + additive codegen | LX.1–LX.21 (`docs/lex_implementation_plan.md` §19.3) | Complete (M1 milestone) |
 | LX-M2  | Lex language: re-express 17 kernel laws + canonical regeneration | LX.22–LX.30 (`docs/lex_implementation_plan.md` §19.4) | Complete (M2 milestone) |
 | LX-M3  | Lex language: deployment manifests + governance tooling | LX.31–LX.38 (`docs/lex_implementation_plan.md` §19.5) | Complete (M3 milestone) |
+| H      | Fault-proof migration              | H.1–H.13 (`docs/fault_proof_migration_plan.md`) | Complete (Lean side; 9 new non-TCB modules under `LegalKernel/FaultProof/`; 81 new tests across 9 new suites; Solidity-side contracts + cross-stack F.1.8/F.1.9/F.1.10 corpora + Rust observer crate documented as future work) |
 | E-G    | Ethereum: documentation + amendment| G.1–G.5 (`docs/ethereum_integration_plan.md` §11) | Not started |
 | 7      | Advanced capabilities              | 7.x                      | Not started |
 
@@ -1805,24 +1814,193 @@ adaptors), B (identity and authority), C (bridge laws),
 D (withdrawal proofs), E (Solidity contracts), and F
 (cross-stack verification) complete.  Workstream LP
 (actor-scoped policies) complete.  Workstream LX (Lex
-language) M1 milestone complete: macro skeleton, synthesizer
-library skeleton, additive codegen skeleton, registry
-discipline, classification typeclasses (`LocalTo`,
-`FreezePreserving`, `RegistryPreserving`).  Workstream LX
-M2 milestone complete: all 17 kernel-built-in laws have a Lex
-re-expression, with byte-equivalence regression tests at the
-elaboration-time `rfl` level + the run-time
-`laws-lex-m2` suite.  **Workstream LX M3 milestone complete:
-the `deployment` manifest macro (LX.31 / LX.32 / LX.33), the
-`lex_diff` semantic-diff binary with version-bump classifier
-+ refinement-proof check (LX.34 / LX.35), the `lex_format`
-pretty-printer (LX.36), the worked USD-clearing example
-deployment + amendment workflow walkthrough (LX.37), and the
-property-test auto-generation skeleton with a hand-curated
-`Test/Properties/AutoGen.lean` suite (LX.38).**  Workstream G
+language) M1 / M2 / M3 milestones complete.  **Workstream H
+(fault-proof migration) Lean-side complete: KernelStep /
+CellTag / CellProof / CellProofBundle data types, the
+`commitExtendedState` state-commitment scheme, the
+`verifyCellProof` interface, the bisection game state
+machine with strict-narrowing convergence theorems, the
+two new `Action` constructors at frozen indices 17 / 18,
+the three new `Event` constructors at frozen indices 13 / 14
+/ 15, the `FaultProofChallengerWon` propositional witness,
+and the `IsConservative` / `IsMonotonic` law classification
+for the new constructors.**  Workstream G
 (documentation + amendment) and Phase 7 (Advanced
 Capabilities of the original Genesis Plan) are the next
 scoped work.
+
+**Workstream H (fault-proof migration) summary.**  Workstream
+H (`docs/fault_proof_migration_plan.md`) replaces the Phase-6
+adjudicator-quorum mechanism for the four deterministic claim
+variants (`preconditionFalse`, `signatureInvalid`,
+`nonceMismatch`, `doubleApply`) with an interactive fault-
+proof game on Ethereum L1.  Trust assumption: *strictly
+weaker* — "1 honest challenger globally" replaces
+"M-of-N adjudicators honest".  Bumped `kernelBuildTag` to
+`"canon-fault-proof-migration"`.  Test count grew from 1605
+to 1686 (+81 across 9 new suites: `faultproof-cell` (12),
+`faultproof-commit` (11), `faultproof-step` (8),
+`faultproof-game` (17), `faultproof-lawclass` (7),
+`faultproof-encoding` (9), `faultproof-events` (10),
+`faultproof-witness` (4), `property-faultproof` (3 × 100
+samples each)).  TCB unchanged; no new axioms beyond the
+standard three (`propext`, `Classical.choice`, `Quot.sound`);
+the new `l1FaultProofVerifier` is `opaque` (deployment-
+supplied trust assumption on the L1 watcher), not `axiom`,
+mirroring Workstream-A's `Verify` discipline.
+
+  * **Action constructors at frozen indices 17 / 18**
+    (`LegalKernel/Authority/Action.lean`,
+    `LegalKernel/Encoding/Action.lean`):
+    - `Action.faultProofChallenge (bindingHash : ByteArray)
+      (disputedStartIdx disputedEndIdx : LogIndex)
+      (challengerCommit : ByteArray)` (index 17): a user
+      submits this action to record an intent to challenge a
+      sequencer's published state root.  The `bindingHash`
+      binds the L2 intent to the L1 game (the L1 contract
+      assigns the actual `gameId` on `initiateChallenge`;
+      v1 plan deviation: the action carries a binding hash
+      rather than a `gameId` field, since the L2 challenger
+      cannot know the gameId before the L1 game exists).
+    - `Action.faultProofResolution (bindingHash : ByteArray)
+      (gameId : Nat) (winner : ActorId)
+      (revertFromIdx : LogIndex)` (index 18): the L2 runtime's
+      L1-event watcher emits this action to mirror the L1
+      game settlement on the L2 audit trail.  The L1 contract
+      is authoritative; the L2 action is advisory.
+    - Both compile to `Laws.freezeResource 0` at the kernel
+      level (no balance / nonce / registry / bridge changes).
+    - Full CBE codec extension with bounded round-trip +
+      injectivity.  `Action.compile_injective` extends
+      mechanically (one-line `congrArg`).
+    - `bridgePolicy` rejects both (the bridge actor's role
+      is L1-event attestation, not adjudication).
+    - Per-action accounting deltas zero (no bridge state
+      change).  Per-action event extraction emits the
+      matching `faultProofGameOpened` /
+      `faultProofGameSettled`.
+
+  * **Event constructors at frozen indices 13 / 14 / 15**
+    (`LegalKernel/Events/Types.lean`,
+    `LegalKernel/Events/Extract.lean`):
+    - `Event.faultProofGameOpened (gameId : Nat)
+      (challenger : ActorId)
+      (disputedStartIdx disputedEndIdx : Nat)
+      (bindingHash : ByteArray)` (index 13).
+    - `Event.faultProofBisectionStep (gameId round : Nat)
+      (party : ActorId) (idx : Nat) (commit : ByteArray)`
+      (index 14).
+    - `Event.faultProofGameSettled (gameId : Nat)
+      (winner loser : ActorId) (payout : Amount)` (index 15).
+    - `Event.isFaultProofEvent` projection added.
+    - Emission rules: `faultProofChallenge` action emits
+      `faultProofGameOpened`; `faultProofResolution` emits
+      `faultProofGameSettled`.  `faultProofBisectionStep`
+      is emitted by the runtime's L1-event watcher when it
+      observes bisection moves on L1 (deployment-layer
+      concern, not part of the kernel emission rules).
+
+  * **`LegalKernel/FaultProof/` non-TCB module set**:
+    - `Cell.lean`: `CellTag` (7 variants — balance, nonce,
+      registry, localPolicy, bridgeConsumed, bridgePending,
+      bridgeNextWdId), `CellTag.kindIndex` discriminator,
+      `CellProof` structure, `CellProofBundle` with `empty`
+      / `push` / `size` helpers.  All ship `Repr` +
+      `DecidableEq`.
+    - `StepVariants.lean`: per-action `Action.readOnlyCells`,
+      `Action.writeCells`, `Action.requiredCells` declarations
+      covering all 19 constructors (per Appendix D of the
+      plan).  Lives in `LegalKernel.Authority` namespace so
+      the standard dot-notation `a.requiredCells signer`
+      projects cleanly.
+    - `Commit.lean`: `StateCommit` abbrev (32-byte ByteArray);
+      `commitState`, `commitNonceState`, `commitKeyRegistry`,
+      `commitLocalPolicies`, `commitBridgeState` per-sub-state
+      commit functions; `commitExtendedState` top-level
+      commit (single 32-byte hash binding all five
+      sub-states).  Determinism + 32-byte-output theorems
+      for every commit function.  Reuses Workstream-D's
+      `hashBytes` adaptor (production keccak256 / FNV-1a-64
+      fallback).
+    - `Verify.lean`: `verifyCellProof`, `verifyCellProofs`
+      with named `Decidable` instances; `leafHash`,
+      `hashUpLevel`, `verifyCellProofRec` Merkle-path
+      machinery; canonical-absent acceptance theorems for
+      every cell-tag variant; determinism + 32-byte-output
+      lemmas.
+    - `Step.lean`: `KernelStep` structure; `kernelStepApply`
+      function; `chainKernelStepApply` multi-step composition
+      with `chainKernelStepApply_split` lemma (the
+      load-bearing arithmetic for the bisection-game's
+      range-narrowing argument); determinism theorems.
+    - `Game.lean`: `Claim`, `DisputedRange`, `TurnSide`,
+      `GameStatus`, `GameState`, `GameTransition`,
+      `GameError` data types; `applyTransition` total
+      function (returns `Except GameError GameState`);
+      `gameWellFormed` decidable predicate;
+      `range_narrows_on_response_agree` and
+      `range_narrows_on_response_disagree` strict-narrowing
+      theorems (proved via `Nat.sub_lt_sub_left` / right
+      under well-formed midpoint).  v1 design correction:
+      `BisectionRound` carries exactly *one* midpoint per
+      round (not two simultaneously), matching standard
+      interactive-proof game shape.  Plus
+      `MAX_BISECTION_DEPTH = 64` constant.
+    - `Witness.lean`: `FaultProofChallengerWon` propositional
+      witness structure (carries log-index + entry +
+      action-shape proof + L1 attestation); the
+      `l1FaultProofVerifier` opaque (deployment-supplied);
+      `FaultProofChallengerWon.of_log_entry` constructor.
+    - `LawClassification.lean`: 4 typeclass instances
+      (`IsConservative` × 2, `IsMonotonic` × 2) for the new
+      constructors; composite
+      `fault_proof_pipeline_actions_classification` summary
+      theorem.  Lets deployments include the fault-proof
+      pipeline alongside `MonotonicLawSet` /
+      `ConservativeLawSet` typeclass firewalls.
+
+  * **Property-based tests** (`Test/Properties/FaultProof.lean`):
+    Three properties × 100 samples each:
+    `bisectionAgreeNarrowsProp` (every legal `respondAgree`
+    strictly narrows the range),
+    `bisectionDisagreeNarrowsProp` (same for
+    `respondDisagree`), `gameDeterminismProp`
+    (`applyTransition` is deterministic).  Reproducible via
+    `CANON_PROPERTY_SEED` env var.
+
+After Workstream H lands:
+  * Lean tests: 1686 (was 1605 pre-H; +81 across 9 new suites).
+  * 0 build warnings on a clean rebuild.
+  * 0 sorries in TCB.
+  * 7 CI gates green: `lake build`, `lake test`, `lake exe
+    count_sorries`, `lake exe tcb_audit`, `lake exe stub_audit`,
+    `lake exe lex_lint`, `lake exe lex_codegen --check`.
+  * `lex_codegen --check` byte-stable.
+  * `kernelBuildTag` bumped to `"canon-fault-proof-migration"`.
+
+**Workstream H deferred to follow-up:**
+  * **Solidity-side contracts (H.5 – H.7, H.9):**
+    `CanonStepVM.sol`, `CanonFaultProofGame.sol`,
+    `CanonStateRootSubmission.sol`,
+    `CanonDisputeVerifierV2.sol`,
+    `CanonFaultProofMigration.sol`, plus
+    `script/DeployFaultProof.s.sol`.  The Lean side
+    fully specifies the contracts; the port is a
+    line-for-line translation under the WU H.10
+    cross-stack equivalence corpus.
+  * **Cross-stack F.1.8 / F.1.9 / F.1.10 fixture
+    corpora (H.10):** ~344 step-VM + 38 bisection-game
+    fixtures; built once Solidity contracts ship.
+  * **Off-chain prover/observer Rust crate (H.10.5):**
+    `runtime/canon-faultproof-observer`.  The Lean-side
+    `Observer.lean` reference specification covers
+    `detectFault`, `buildCellProofs`, `computeNextMove`;
+    the Rust crate ships these as a runtime adaptor.
+  * **Full coherence theorem with `kernelOnlyApply`
+    (H.1.3):** the per-variant + composite + multi-step
+    coherence proofs.  Stub interfaces are in place; the
+    full proof goes through the per-variant cell-update
+    case-split which is multi-day work.
 
 **Workstream LX (Lex language) M1 summary.**  M1 lands the
 non-TCB scaffolding for the Lex law-declaration language

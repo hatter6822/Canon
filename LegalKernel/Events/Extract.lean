@@ -219,6 +219,19 @@ def actionEvents
     -- semantic event (`localPolicyRevoked`) is emitted by
     -- `extractEvents` (LP.10).
     []
+  | .faultProofChallenge _ _ _ _ =>
+    -- Workstream H §12.3: a fault-proof challenge intent.  The
+    -- kernel-level effect is identity (compiles to
+    -- `Laws.freezeResource 0`); the semantic
+    -- `faultProofGameOpened` event is emitted by `extractEvents`
+    -- which has the signer / log-derived data in scope.
+    []
+  | .faultProofResolution _ _ _ _ =>
+    -- Workstream H §12.3: a fault-proof game settlement mirror.
+    -- The kernel-level effect is identity; the semantic
+    -- `faultProofGameSettled` event is emitted by
+    -- `extractEvents`.
+    []
   -- Workstream-LX (LX.19): codegen-managed Lex `actionEvents`
   -- arms land between the fence markers below.  Empty in M1
   -- (the example law has no `Action` constructor, so it has no
@@ -270,10 +283,29 @@ def extractEvents
     | .declareLocalPolicy p => [Event.localPolicyDeclared st.signer p]
     | .revokeLocalPolicy    => [Event.localPolicyRevoked st.signer]
     | _                     => []
+  let faultProofEvts : List Event :=
+    -- Workstream H §12.3 semantic fault-proof events.  Emitted
+    -- UNCONDITIONALLY (mirroring bridge / LP / reward events): the
+    -- L2 action is advisory but its emission is the canonical
+    -- record of an L1 game intent or settlement that replicas
+    -- consume.  The L1 contract is authoritative for game state;
+    -- these events let off-chain observers / indexers maintain
+    -- a read-side view without watching L1 directly.
+    --
+    -- The `gameId = 0` placeholder for the `challenge` event
+    -- reflects the design that L1 assigns the actual gameId; the
+    -- L2 event serves only as a binding-hash record.  Indexers
+    -- match L2 events to L1 games via the bindingHash.
+    match st.action with
+    | .faultProofChallenge bh sIdx eIdx _cc =>
+      [Event.faultProofGameOpened 0 st.signer sIdx eIdx bh]
+    | .faultProofResolution _bh gid winner _rfi =>
+      [Event.faultProofGameSettled gid winner st.signer 0]
+    | _                                     => []
   let oldN     := expectsNonce preState  st.signer
   let newN     := expectsNonce postState st.signer
   let nonceEvt := [Event.nonceAdvanced st.signer oldN newN]
-  actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt
+  actEvts ++ bridgeEvts ++ lpEvts ++ faultProofEvts ++ nonceEvt
 
 /-! ## Determinism (the §8.9.1 headline property)
 
@@ -356,8 +388,9 @@ theorem extractEvents_deposit_emits_credited
   unfold extractEvents
   -- The bridgeEvts list is `[Event.depositCredited r recipient amount d]`;
   -- with LP.10 the lpEvts = [] for non-LP actions; nonceEvt has 1 elt.
-  -- Full output: actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt.
-  show _ ∈ _ ++ [Event.depositCredited r recipient amount d] ++ _ ++ _
+  -- Full output: actEvts ++ bridgeEvts ++ lpEvts ++ faultProofEvts ++ nonceEvt.
+  show _ ∈ _ ++ [Event.depositCredited r recipient amount d] ++ _ ++ _ ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inr ?_)
@@ -375,9 +408,10 @@ theorem extractEvents_withdraw_emits_requested
       ⟨.withdraw r sender amount rcp, signer, nonce, sig⟩ := by
   unfold extractEvents
   show _ ∈ _ ++ [Event.withdrawalRequested r sender amount rcp pre.bridge.nextWdId]
-                ++ _ ++ _
+                ++ _ ++ _ ++ _
   -- The withdrawalRequested is in the `bridgeEvts` segment; flat-walk the
   -- nested `++` structure to find it.
+  refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inr ?_)
@@ -403,8 +437,9 @@ theorem extractEvents_declareLocalPolicy_emits_localPolicyDeclared
       ⟨.declareLocalPolicy p, signer, nonce, sig⟩ := by
   unfold extractEvents
   -- The event is in the `lpEvts` segment of the output list.
-  -- Output shape: actEvts ++ bridgeEvts ++ lpEvts ++ nonceEvt.
-  show _ ∈ _ ++ _ ++ [Event.localPolicyDeclared signer p] ++ _
+  -- Output shape: actEvts ++ bridgeEvts ++ lpEvts ++ faultProofEvts ++ nonceEvt.
+  show _ ∈ _ ++ _ ++ [Event.localPolicyDeclared signer p] ++ _ ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inr ?_)
   exact List.mem_singleton.mpr rfl
@@ -418,7 +453,52 @@ theorem extractEvents_revokeLocalPolicy_emits_localPolicyRevoked
     extractEvents pre post
       ⟨.revokeLocalPolicy, signer, nonce, sig⟩ := by
   unfold extractEvents
-  show _ ∈ _ ++ _ ++ [Event.localPolicyRevoked signer] ++ _
+  show _ ∈ _ ++ _ ++ [Event.localPolicyRevoked signer] ++ _ ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
+
+/-! ## Workstream H — fault-proof event extraction
+
+The `faultProofChallenge` and `faultProofResolution` actions emit
+a corresponding `faultProofGameOpened` or `faultProofGameSettled`
+event in the `faultProofEvts` segment of the output list. -/
+
+/-- Workstream H §12.3: `faultProofChallenge` always emits a
+    `faultProofGameOpened` event in its output list.  The event
+    carries `gameId = 0` as a placeholder (the L1 contract
+    assigns the actual gameId on `initiateChallenge`); the
+    canonical match is via `bindingHash`.  Indexers consume this
+    event to maintain a "open challenges" view per actor. -/
+theorem extractEvents_faultProofChallenge_emits_gameOpened
+    (pre post : ExtendedState) (bh : ByteArray)
+    (sIdx eIdx : LegalKernel.Disputes.LogIndex) (cc : ByteArray)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature) :
+    Event.faultProofGameOpened 0 signer sIdx eIdx bh ∈
+    extractEvents pre post
+      ⟨.faultProofChallenge bh sIdx eIdx cc, signer, nonce, sig⟩ := by
+  unfold extractEvents
+  -- Output shape: actEvts ++ bridgeEvts ++ lpEvts ++ faultProofEvts ++ nonceEvt.
+  show _ ∈ _ ++ _ ++ _ ++ [Event.faultProofGameOpened 0 signer sIdx eIdx bh] ++ _
+  refine List.mem_append.mpr (Or.inl ?_)
+  refine List.mem_append.mpr (Or.inr ?_)
+  exact List.mem_singleton.mpr rfl
+
+/-- Workstream H §12.3: `faultProofResolution` always emits a
+    `faultProofGameSettled` event in its output list.  The event
+    carries the L1-assigned `gameId`, the `winner` (from the action
+    field), and the `loser` (set to the signer — the actor that
+    appended the resolution log entry). -/
+theorem extractEvents_faultProofResolution_emits_gameSettled
+    (pre post : ExtendedState) (bh : ByteArray) (gid : Nat)
+    (winner : ActorId) (rfi : LegalKernel.Disputes.LogIndex)
+    (signer : ActorId) (nonce : Nonce) (sig : Signature) :
+    Event.faultProofGameSettled gid winner signer 0 ∈
+    extractEvents pre post
+      ⟨.faultProofResolution bh gid winner rfi, signer, nonce, sig⟩ := by
+  unfold extractEvents
+  show _ ∈ _ ++ _ ++ _ ++ [Event.faultProofGameSettled gid winner signer 0] ++ _
   refine List.mem_append.mpr (Or.inl ?_)
   refine List.mem_append.mpr (Or.inr ?_)
   exact List.mem_singleton.mpr rfl

@@ -159,11 +159,12 @@ Encoded as the concatenation of:
 
 ## 5. The `Action` CBE Encoding
 
-The `Action` type has 17 constructors, encoded by their inductive
+The `Action` type has 19 constructors, encoded by their inductive
 index (frozen — no phase will renumber existing constructors).
 Phase 5 ships indices 0..7; Phase 6 appends 8..11; Workstream B
 appends 12; Workstream C appends 13..14; Workstream LP (actor-
-scoped policies) appends 15..16.
+scoped policies) appends 15..16; Workstream H (fault-proof
+migration) appends 17..18.
 
 ```
 Action.transfer            := 0
@@ -183,6 +184,8 @@ Action.deposit             := 13  -- Workstream C (bridge L1 → L2)
 Action.withdraw            := 14  -- Workstream C (bridge L2 → L1)
 Action.declareLocalPolicy  := 15  -- Workstream LP (actor-scoped policies)
 Action.revokeLocalPolicy   := 16  -- Workstream LP (actor-scoped policies)
+Action.faultProofChallenge  := 17 -- Workstream H (fault-proof migration)
+Action.faultProofResolution := 18 -- Workstream H (fault-proof migration)
 ```
 
 Each Action is encoded as `<constructor uint> :: <fields>`.  For
@@ -233,6 +236,14 @@ Action.declareLocalPolicy policy  →
 
 Action.revokeLocalPolicy  →
   CBE-uint(16)
+
+Action.faultProofChallenge bindingHash sIdx eIdx challengerCommit  →
+  CBE-uint(17) ++ CBE-bstr(bindingHash) ++ CBE-uint(sIdx) ++
+  CBE-uint(eIdx) ++ CBE-bstr(challengerCommit)
+
+Action.faultProofResolution bindingHash gameId winner revertFromIdx  →
+  CBE-uint(18) ++ CBE-bstr(bindingHash) ++ CBE-uint(gameId) ++
+  CBE-uint(winner) ++ CBE-uint(revertFromIdx)
 ```
 
 The `Action.withdraw` `recipientL1` field is encoded as a
@@ -305,10 +316,10 @@ EvidenceVerdict.inconclusive := tag 2
 The full per-constructor table for the dispute types is in
 `LegalKernel/Encoding/Disputes.lean`.
 
-### 5.3 Phase-6 + Workstream-C + Workstream-LP `Event` Inductive Extension
+### 5.3 Phase-6 + Workstream-C + Workstream-LP + Workstream-H `Event` Inductive Extension
 
-The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 13
-constructors at frozen indices 0..12:
+The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 16
+constructors at frozen indices 0..15:
 
 ```
 Event.balanceChanged       := 0
@@ -324,6 +335,9 @@ Event.withdrawalRequested  := 9  -- Workstream C (bridge)
 Event.depositCredited      := 10 -- Workstream C (bridge)
 Event.localPolicyDeclared  := 11 -- Workstream LP (actor-scoped policies)
 Event.localPolicyRevoked   := 12 -- Workstream LP (actor-scoped policies)
+Event.faultProofGameOpened    := 13 -- Workstream H (fault-proof migration)
+Event.faultProofBisectionStep := 14 -- Workstream H (fault-proof migration)
+Event.faultProofGameSettled   := 15 -- Workstream H (fault-proof migration)
 ```
 
 `Event.rewardIssued (resource, recipient, amount)` is emitted

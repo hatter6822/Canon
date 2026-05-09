@@ -255,11 +255,11 @@ private def aggregateTests : List TestCase :=
 /-! ## LX.30 — M2 milestone gate -/
 
 private def milestoneGateTests : List TestCase :=
-  [ { name := "LX.30 / LX.38: kernelBuildTag is `canon-lex-m3-manifests`"
+  [ { name := "LX.30 / LX.38: kernelBuildTag is `canon-fault-proof-migration`"
     , body := do
-        assertEq (expected := "canon-lex-m3-manifests")
+        assertEq (expected := "canon-fault-proof-migration")
                  (actual   := LegalKernel.kernelBuildTag)
-                 "M3 milestone gate (supersedes M2)"
+                 "Workstream H milestone gate (supersedes M2 + M3)"
     }
   , { name := "LX.30: 17 kernel-built-in laws have Lex re-expressions"
     , body := do

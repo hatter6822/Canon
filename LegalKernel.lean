@@ -232,6 +232,22 @@ import LegalKernel.Bridge.Accounting
 import LegalKernel.Bridge.WithdrawalRoot
 import LegalKernel.Bridge.WithdrawalProof
 import LegalKernel.Bridge.Finalisation
+-- Workstream H — fault-proof migration.  Six new non-TCB
+-- modules under `LegalKernel/FaultProof/` formalising the
+-- step VM data shapes (KernelStep, CellTag, CellProof,
+-- StateCommit), the per-action cell sets, the bisection-game
+-- state machine, the law classification for the two new
+-- Action constructors, and the witness-bearing
+-- FaultProofChallengerWon predicate.  See
+-- `docs/fault_proof_migration_plan.md` for the full plan.
+import LegalKernel.FaultProof.Cell
+import LegalKernel.FaultProof.Commit
+import LegalKernel.FaultProof.LawClassification
+import LegalKernel.FaultProof.StepVariants
+import LegalKernel.FaultProof.Verify
+import LegalKernel.FaultProof.Step
+import LegalKernel.FaultProof.Game
+import LegalKernel.FaultProof.Witness
 
 namespace LegalKernel
 
@@ -246,6 +262,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-lex-m3-manifests"
+def kernelBuildTag : String := "canon-fault-proof-migration"
 
 end LegalKernel
