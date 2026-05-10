@@ -248,6 +248,10 @@ import LegalKernel.FaultProof.Verify
 import LegalKernel.FaultProof.Step
 import LegalKernel.FaultProof.Game
 import LegalKernel.FaultProof.Witness
+import LegalKernel.FaultProof.Coherence
+import LegalKernel.FaultProof.Strategy
+import LegalKernel.FaultProof.Convergence
+import LegalKernel.Encoding.KernelStep
 
 namespace LegalKernel
 
