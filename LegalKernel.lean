@@ -251,7 +251,15 @@ import LegalKernel.FaultProof.Witness
 import LegalKernel.FaultProof.Coherence
 import LegalKernel.FaultProof.Strategy
 import LegalKernel.FaultProof.Convergence
+import LegalKernel.FaultProof.Honesty
+import LegalKernel.FaultProof.TypedCellProof
+import LegalKernel.FaultProof.DisputeConfig
+import LegalKernel.FaultProof.MigrationFreeze
+import LegalKernel.FaultProof.Observer
+import LegalKernel.FaultProof.SubStep
+import LegalKernel.FaultProof.KeyDerivation
 import LegalKernel.Encoding.KernelStep
+import LegalKernel.Encoding.GameState
 
 namespace LegalKernel
 
