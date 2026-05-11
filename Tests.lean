@@ -128,6 +128,32 @@ import LegalKernel.Test.Bridge.CrossCheck.WithdrawalProof
 import LegalKernel.Test.Bridge.CrossCheck.DisputeEvidence
 import LegalKernel.Test.Bridge.CrossCheck.MigrationAttestation
 import LegalKernel.Test.Bridge.CrossCheck.Goldens
+-- Workstream H — fault-proof migration test suites.
+import LegalKernel.Test.FaultProof.Cell
+import LegalKernel.Test.FaultProof.Commit
+import LegalKernel.Test.FaultProof.Step
+import LegalKernel.Test.FaultProof.Game
+import LegalKernel.Test.FaultProof.LawClassification
+import LegalKernel.Test.FaultProof.Encoding
+import LegalKernel.Test.FaultProof.EventEmission
+import LegalKernel.Test.FaultProof.Witness
+import LegalKernel.Test.FaultProof.Verify
+import LegalKernel.Test.FaultProof.Trust
+import LegalKernel.Test.FaultProof.PerVariantCoherence
+import LegalKernel.Test.FaultProof.EncodeInjectivity
+import LegalKernel.Test.FaultProof.AbsentCellCreation
+import LegalKernel.Test.FaultProof.GameTransitionEdgeCases
+import LegalKernel.Test.FaultProof.SolidityStepVMCommit
+import LegalKernel.Test.FaultProof.Transcript
+import LegalKernel.Test.FaultProof.Coherence
+import LegalKernel.Test.FaultProof.Settlement
+import LegalKernel.Test.FaultProof.MigrationFreeze
+import LegalKernel.Test.Bridge.CrossCheck.StepVM
+import LegalKernel.Test.Bridge.CrossCheck.BisectionGame
+import LegalKernel.Test.Bridge.CrossCheck.FaultProofScenarios
+import LegalKernel.Test.Properties.FaultProof
+import LegalKernel.Test.Properties.FaultProofExtended
+import LegalKernel.Test.Properties.FaultProofDeep
 
 open LegalKernel.Test
 
@@ -279,6 +305,57 @@ def main : IO UInt32 := do
                                     Bridge.CrossCheck.MigrationAttestation.tests)
   failed := failed + (← runAll "crosscheck-goldens"
                                     Bridge.CrossCheck.Goldens.tests)
+  -- Workstream H — fault-proof migration suites.
+  failed := failed + (← runAll "faultproof-cell"
+                                    LegalKernel.Test.FaultProof.Cell.tests)
+  failed := failed + (← runAll "faultproof-commit"
+                                    LegalKernel.Test.FaultProof.Commit.tests)
+  failed := failed + (← runAll "faultproof-step"
+                                    LegalKernel.Test.FaultProof.Step.tests)
+  failed := failed + (← runAll "faultproof-game"
+                                    LegalKernel.Test.FaultProof.Game.tests)
+  failed := failed + (← runAll "faultproof-lawclass"
+                                    LegalKernel.Test.FaultProof.LawClassification.tests)
+  failed := failed + (← runAll "faultproof-encoding"
+                                    LegalKernel.Test.FaultProof.Encoding.tests)
+  failed := failed + (← runAll "faultproof-events"
+                                    LegalKernel.Test.FaultProof.EventEmission.tests)
+  failed := failed + (← runAll "faultproof-witness"
+                                    LegalKernel.Test.FaultProof.Witness.tests)
+  failed := failed + (← runAll "faultproof-verify"
+                                    LegalKernel.Test.FaultProof.Verify.tests)
+  failed := failed + (← runAll "faultproof-trust"
+                                    LegalKernel.Test.FaultProof.Trust.tests)
+  failed := failed + (← runAll "faultproof-pervariant-coherence"
+                                    LegalKernel.Test.FaultProof.PerVariantCoherence.tests)
+  failed := failed + (← runAll "faultproof-encode-injectivity"
+                                    LegalKernel.Test.FaultProof.EncodeInjectivity.tests)
+  failed := failed + (← runAll "faultproof-absent-cell-creation"
+                                    LegalKernel.Test.FaultProof.AbsentCellCreation.tests)
+  failed := failed + (← runAll "faultproof-game-transition-edge-cases"
+                                    LegalKernel.Test.FaultProof.GameTransitionEdgeCases.tests)
+  failed := failed + (← runAll "faultproof-solidity-stepvm-commit"
+                                    LegalKernel.Test.FaultProof.SolidityStepVMCommit.tests)
+  failed := failed + (← runAll "faultproof-transcript"
+                                    LegalKernel.Test.FaultProof.Transcript.tests)
+  failed := failed + (← runAll "faultproof-coherence"
+                                    LegalKernel.Test.FaultProof.Coherence.tests)
+  failed := failed + (← runAll "faultproof-settlement"
+                                    LegalKernel.Test.FaultProof.Settlement.tests)
+  failed := failed + (← runAll "faultproof-migration-freeze"
+                                    LegalKernel.Test.FaultProof.MigrationFreeze.tests)
+  failed := failed + (← runAll "crosscheck-step-vm"
+                                    Bridge.CrossCheck.StepVM.tests)
+  failed := failed + (← runAll "crosscheck-bisection-game"
+                                    Bridge.CrossCheck.BisectionGame.tests)
+  failed := failed + (← runAll "crosscheck-fault-proof-scenarios"
+                                    Bridge.CrossCheck.FaultProofScenarios.tests)
+  failed := failed + (← runAll "property-faultproof"
+                                    LegalKernel.Test.Properties.FaultProof.tests)
+  failed := failed + (← runAll "property-faultproof-extended"
+                                    LegalKernel.Test.Properties.FaultProofExtended.tests)
+  failed := failed + (← runAll "property-faultproof-deep"
+                                    LegalKernel.Test.Properties.FaultProofDeep.tests)
   if failed = 0 then
     IO.println "ALL TESTS PASSED"
     pure 0

@@ -79,6 +79,8 @@ def Action.tag : Action → Nat
   | .withdraw            _ _ _ _ => 14
   | .declareLocalPolicy  _       => 15
   | .revokeLocalPolicy           => 16
+  | .faultProofChallenge _ _ _ _ => 17
+  | .faultProofResolution _ _ _ _ => 18
 
 /-! ## §3.4 Per-clause semantic predicate
 

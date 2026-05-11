@@ -35,11 +35,14 @@ inductive theorems rather than by trust in operators.
 **Current status.** Phases 0 – 6 complete; Ethereum integration
 Workstreams A – F complete (Lean side); Workstream LP (actor-scoped
 policies) complete; Workstream LX (Lex law-declaration language)
-milestones M1 / M2 / M3 complete.  Workstream G (Ethereum
-documentation + amendment) and Phase 7 (Advanced Capabilities) are
-the next scoped work.  See `docs/GENESIS_PLAN.md` §12 and
-`docs/ethereum_integration_plan.md` for the per-phase deliverables;
-see "Implementation roadmap" below for the status table.
+milestones M1 / M2 / M3 complete; Workstream H (fault-proof
+migration) complete (Lean side; Rust off-chain observer deferred).
+Workstream G (Ethereum documentation + amendment) and Phase 7
+(Advanced Capabilities) are the next scoped work.  See
+`docs/GENESIS_PLAN.md` §12 / §15B and
+`docs/ethereum_integration_plan.md` / `docs/fault_proof_migration_plan.md`
+for the per-phase deliverables; see "Implementation roadmap" below
+for the status table.
 
 ## Build and run
 
@@ -59,10 +62,12 @@ elan toolchain install "$(cat lean-toolchain)"
 source ~/.elan/env
 lake build                          # full project build
 lake build LegalKernel.<Module>     # one module (fastest feedback)
-lake test                           # ~1605 tests across ~89 suites
+lake test                           # ~1835 tests across ~100 suites
 lake exe count_sorries              # zero-sorry kernel gate
 lake exe tcb_audit                  # TCB allowlist gate
 lake exe stub_audit                 # stub-detection gate
+lake exe naming_audit               # content-name discipline gate
+lake exe deferral_audit             # no-deferrals policy gate
 lake exe lex_lint                   # Lex registry + sidecar gate
 lake exe lex_codegen --check        # Lex codegen-consistency gate
                                     #   (also: --canonical for full-body
@@ -171,16 +176,23 @@ canon/
 │   ├── LocalPolicy/           -- Workstream LP classification typeclasses
 │   ├── Bridge/                -- Workstreams A–D: crypto adaptors, identity,
 │   │                             bridge laws, withdrawal proofs
+│   ├── FaultProof/            -- Workstream H: state-commitment scheme,
+│   │                             kernel-step type, bisection-game state
+│   │                             machine, convergence / honesty / settlement
+│   │                             theorems, witness construction, observer
+│   │                             reference
 │   ├── _lex_inputs/           -- Lex codegen-input JSON sidecars (one per Lex law)
 │   └── Test/                  -- IO-based test harness; one suite per module
 ├── Deployments/Examples/      -- LX-M3 worked example deployments (UsdClearing)
 ├── Tools/                     -- audit binaries (TcbAudit, CountSorries,
-│                                  StubAudit, LexLint, LexCodegen, LexDiff,
-│                                  LexFormat) + shared libraries (Common — used
-│                                  by all three TCB / stub audits; LexCommon —
-│                                  used by the four Lex audit binaries)
-├── solidity/                  -- Workstream E: L1 mirror (5 contracts, 4 libraries,
-│                                  16 forge test suites).  See solidity/README.md.
+│                                  StubAudit, NamingAudit, DeferralAudit,
+│                                  LexLint, LexCodegen, LexDiff, LexFormat) +
+│                                  shared libraries (Common — used by all
+│                                  three TCB / stub audits; LexCommon — used
+│                                  by the four Lex audit binaries)
+├── solidity/                  -- Workstreams E + H: L1 mirror (10 contracts,
+│                                  5 libraries, 20+ forge test suites).
+│                                  See solidity/README.md.
 ├── scripts/setup.sh           -- SHA-256-verified toolchain + Foundry installer
 ├── .github/workflows/ci.yml   -- build + test + audits on PR / push
 ├── README.md                  -- project entry point
@@ -197,7 +209,9 @@ canon/
     ├── economic_invariants.md           -- Phase-2 + monotonicity-tier design
     ├── parameterized_laws_plan.md       -- (planning)
     ├── extraction_notes.md              -- Lean → runtime erasure / persistence
-    ├── fault_proof_migration_plan.md    -- Workstream E migration notes
+    ├── fault_proof_migration_plan.md    -- Workstream H engineering plan
+    ├── fault_proof_design.md            -- Workstream H design rationale
+    ├── fault_proof_runbook.md           -- Workstream H operator runbook
     └── abi.md                           -- on-disk frame format + CLI ABI
 ```
 
@@ -465,7 +479,7 @@ foreground progress.  Prevent this proactively:
 ## Type-level design properties
 
 The Genesis Plan promises a small set of type-level guarantees
-(§1, §5).  As of Phases 0 – 6 + Workstreams A – D + LP + LX,
+(§1, §5).  As of Phases 0 – 6 + Workstreams A – D + LP + LX + H,
 every guarantee is mechanised by a real Lean theorem (no `sorry`,
 no custom axioms — only `propext`, `Classical.choice`, `Quot.sound`).
 Selected headline theorems by tier:
@@ -510,6 +524,18 @@ Selected headline theorems by tier:
 | E-D   | Finalisation is monotonic in L1 block | `isFinalised_monotonic_in_currentBlock` | `Bridge/Finalisation.lean`        |
 | LX    | Locality / freeze-preservation typeclass firewalls | `LocalTo`, `FreezePreserving`, `FreezePreservingLawSet` | `Conservation.lean` |
 | LX    | Registry-preservation classification  | `RegistryPreserving`              | `Authority/SignedAction.lean`           |
+| H     | State-commit sub-state byte equality under CR | `commitExtendedState_subcommits_bytes_eq_under_collision_free` | `FaultProof/Commit.lean` (§15B.1)¹ |
+| H     | Kernel step coherent with kernelOnlyApply | `recomputeCommitment_coherent_with_kernelOnlyApply` | `FaultProof/Coherence.lean` (§15B.2) |
+| H     | Multi-step coherence with kernelOnlyReplay | `recomputeCommitment_chain_coherent_with_kernelOnlyReplay` | `FaultProof/Coherence.lean` (§15B.2) |
+| H     | Bisection narrows under any response  | `range_narrows_on_response_{agree,disagree}` | `FaultProof/Game.lean` (§15B.3) |
+| H     | Bisection converges after enough rounds | `bisection_converges_after_enough_rounds` | `FaultProof/Convergence.lean` (§15B.3) |
+| H     | Disagreement persists along honest trace | `disagreement_persists_along_trace` | `FaultProof/Honesty.lean` (§15B.4)     |
+| H     | Honest challenger wins at settlement  | `honest_challenger_wins_against_invalid_state_root` | `FaultProof/Settlement.lean` (§15B.4) |
+| H     | Witness implies state-root wrong       | `faultProof_challenger_won_implies_state_root_wrong` | `FaultProof/Witness.lean` (§15B.6)² |
+
+¹ The shipped theorem proves byte-equality of CBE-encoded sub-states under `CollisionFree hashBytes`.  Lifting bytes-equality to extensional state equality (`toList` equality) requires CBE encoder canonicality for `State` / `NonceState` / `KeyRegistry` / `LocalPolicies` / `BridgeState`, which is shipped at the structural level (`*_encode_deterministic` and round-trip lemmas) but not as a stand-alone `*_encode_injective` lemma for the map-backed sub-states; that's a Workstream-H follow-up.
+
+² The shipped theorem decomposes a `FaultProofChallengerWon` witness's L1 attestation against an explicit `L1AttestationSemantics` deployment assumption (the operational implication "L1 watcher confirms ⇒ sequencer's claim ≠ canonical commit").  The L1 contract enforces this operationally; cross-stack verification (WU H.10.1 corpus) ratifies it.
 
 The full per-theorem catalogue lives in source — each module's
 `/-! ... -/` docstring names the Genesis-Plan section it
@@ -575,6 +601,7 @@ work units.  Status:
 | LX-M1     | Lex: macro skeleton + synthesizer  | Complete |
 | LX-M2     | Lex: re-express 17 kernel laws     | Complete |
 | LX-M3     | Lex: deployment manifests + governance | Complete |
+| H         | Fault-proof migration              | Complete (Lean side; Rust off-chain observer deferred) |
 | E-G       | Ethereum: documentation + amendment | Not started |
 | 7         | Advanced capabilities              | Not started |
 
@@ -660,22 +687,26 @@ every match before submission.
 ## Current development status
 
 **Build tag** (`kernelBuildTag` in `LegalKernel.lean`):
-`"canon-lex-m3-manifests"`.  `Test/Umbrella.lean` pins this value
-in a regression test, so any phase / milestone bump must update
-both the constant and the test in the same PR.
+`"canon-fault-proof-migration"`.  `Test/Umbrella.lean` pins this
+value in a regression test, so any phase / milestone bump must
+update both the constant and the test in the same PR.
 
-**Test count.**  ~1605 tests across ~89 suites at the time of the
-last milestone (LX-M3).  The exact number drifts with every PR;
-`lake test` is the canonical query.  Unlike the build tag, the
+**Test count.**  ~1835 tests across ~100 suites at the time of the
+last milestone (Workstream H).  The exact number drifts with every
+PR; `lake test` is the canonical query.  Unlike the build tag, the
 test count is not pinned — only its monotonic growth is enforced
 by individual regression tests landing alongside new theorems.
 
 **TCB audit (latest run).**  `#print axioms` on every kernel,
-Phase-2, Phase-3, Phase-4, Phase-5, and Phase-6 theorem returns a
-subset of `[propext, Classical.choice, Quot.sound]`.  No custom
-axioms have been introduced in any phase.  `Verify` and
-`hashBytes` are `opaque`, not `axiom`, so they do not appear in the
-audit output of theorems that mention them.
+Phase-2, Phase-3, Phase-4, Phase-5, Phase-6, and Workstream-H
+theorem returns a subset of `[propext, Classical.choice,
+Quot.sound]`.  No custom axioms have been introduced in any phase.
+`Verify` and `hashBytes` are `opaque`, not `axiom`, so they do
+not appear in the audit output of theorems that mention them.
+Workstream H adds one new opaque (`l1FaultProofVerifier` in
+`Bridge/L1EventVerifier.lean`) for the deployment-side L1 event
+watcher; per the same opaque pattern as `Verify` / `hashBytes`,
+it does not appear in `#print axioms` output.
 
 **TCB import discipline.**  `Tools.Common.tcbInternalImports`
 enumerates the project-internal modules each TCB-core file

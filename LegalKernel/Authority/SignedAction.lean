@@ -778,6 +778,8 @@ theorem non_registry_mutating_preserves_registry
   | withdraw _ _ _ _              => rfl
   | declareLocalPolicy _          => rfl
   | revokeLocalPolicy             => rfl
+  | faultProofChallenge _ _ _ _   => rfl
+  | faultProofResolution _ _ _ _  => rfl
   -- Workstream-LX (LX.19): codegen-managed Lex
   -- `non_registry_mutating_preserves_registry` proof arms land
   -- between the fence markers below.  Each Lex law that compiles
@@ -991,6 +993,8 @@ theorem non_meta_preserves_localPolicies
   | withdraw _ _ _ _              => rfl
   | declareLocalPolicy p          => exact absurd hact (hneDeclare p)
   | revokeLocalPolicy             => exact absurd hact hneRevoke
+  | faultProofChallenge _ _ _ _   => rfl
+  | faultProofResolution _ _ _ _  => rfl
 
 /-- LP.5: a different actor's `localPolicies` entry is unchanged by
     `apply_admissible` regardless of the action.  The local-policy
@@ -1030,6 +1034,8 @@ theorem localPolicies_other_actor_untouched
     -- After `revoke st.signer`, lookup at `a ≠ signer` is unchanged.
     show (es.localPolicies.revoke st.signer).lookup a = es.localPolicies.lookup a
     exact LocalPolicies.lookup_revoke_other _ st.signer a h_ne
+  | faultProofChallenge _ _ _ _   => rfl
+  | faultProofResolution _ _ _ _  => rfl
 
 /-- LP.5: field-projection: the post-application `localPolicies`
     equals the result of `applyActionToLocalPolicies` applied to
@@ -1179,6 +1185,20 @@ instance declareLocalPolicy_registryPreserving (policy : LocalPolicy) :
 /-- `revokeLocalPolicy` preserves the registry. -/
 instance revokeLocalPolicy_registryPreserving :
     RegistryPreserving .revokeLocalPolicy where
+  preserves := fun _ => rfl
+
+/-- Workstream H: `faultProofChallenge` preserves the registry.
+    The action compiles to `Laws.freezeResource 0` and has no
+    authority-layer effect on the registry. -/
+instance faultProofChallenge_registryPreserving
+    (bh : ByteArray) (sIdx eIdx : Disputes.LogIndex) (cc : ByteArray) :
+    RegistryPreserving (.faultProofChallenge bh sIdx eIdx cc) where
+  preserves := fun _ => rfl
+
+/-- Workstream H: `faultProofResolution` preserves the registry. -/
+instance faultProofResolution_registryPreserving
+    (bh : ByteArray) (gid : Nat) (winner : ActorId) (rfi : Disputes.LogIndex) :
+    RegistryPreserving (.faultProofResolution bh gid winner rfi) where
   preserves := fun _ => rfl
 
 end Authority

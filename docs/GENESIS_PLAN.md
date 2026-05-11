@@ -4981,6 +4981,446 @@ deployments that stay within the subset?
 
 ---
 
+## 15B. Workstream H Amendment: Fault-Proof Migration
+
+**Amendment summary.**  This section amends the Genesis Plan to
+specify the Workstream-H fault-proof migration architecture.  Per
+`docs/fault_proof_migration_plan.md`, Workstream H replaces the
+Phase-6 adjudicator-quorum mechanism for the four deterministic
+claim variants (`preconditionFalse`, `signatureInvalid`,
+`nonceMismatch`, `doubleApply`) with an interactive on-chain
+fault-proof game.  Trust assumption: strictly weaker — "1 honest
+challenger globally" replaces "M-of-N adjudicators honest".
+
+### 15B.1 State commitment scheme
+
+The sequencer publishes a 32-byte `StateCommit` to L1 representing
+the canonical hash of the deployment's `ExtendedState`.  The Lean-
+side `LegalKernel.FaultProof.Commit.commitExtendedState` is the
+reference function:
+
+```
+commitExtendedState es =
+  hashBytes (commitState es.base ++ commitNonceState es.nonces ++
+             commitKeyRegistry es.registry ++
+             commitLocalPolicies es.localPolicies ++
+             commitBridgeState es.bridge)
+```
+
+Each per-sub-state commit is `hashBytes` of the canonical CBE
+encoding.  Under `CollisionFree hashBytes`, top-level commit
+equality implies extensional state equality (theorem #220:
+`commitExtendedState_subcommits_bytes_eq_under_collision_free`).
+
+Workstream H deliberately uses a single-hash form rather than a
+two-level Sparse Merkle Tree (SMT).  The SMT optimisation is a
+deployment-layer concern (saves L1 gas via O(log N) cell proofs);
+the soundness arguments hold under either representation.
+
+### 15B.2 Step semantics
+
+A `KernelStep` (`LegalKernel.FaultProof.Step.KernelStep`) carries
+the inputs and outputs of one kernel step:
+
+```
+structure KernelStep where
+  preStateCommit  : StateCommit
+  signedAction    : SignedAction
+  postStateCommit : StateCommit
+  cellProofs      : CellProofBundle
+```
+
+The L1 step VM (`CanonStepVM.executeStep`) consumes a
+`KernelStep` plus per-cell Merkle proofs and computes the
+post-state commit.  Cross-stack equivalence with Lean's
+`recomputeCommitment` is established by theorem #225:
+`recomputeCommitment_coherent_with_kernelOnlyApply`, plus the
+WU H.10.1 fixture corpus.
+
+### 15B.3 Bisection game
+
+Per the workstream plan §12.4, the bisection game's state
+machine is formalised in
+`LegalKernel.FaultProof.Game.GameState` with five terminal
+status values (`inProgress`, `sequencerWon`, `challengerWon`,
+`timedOutSequencer`, `timedOutChallenger`).  Convergence is
+established by:
+
+  * Per-round strict narrowing (theorem #264:
+    `range_narrows_on_response_{agree,disagree}`).
+  * Multi-round descent (theorem #265:
+    `range_size_after_k_rounds`).
+  * Termination after enough rounds (theorem #231:
+    `bisection_converges_after_enough_rounds`).
+  * Depth-cap bound (theorem #267:
+    `bisection_terminates_in_at_most_max_depth_rounds` with
+    `MAX_BISECTION_DEPTH = 64`).
+
+### 15B.4 Single-honest-challenger property
+
+The headline trust-model theorem (theorem #232 family) is
+established by a chain of compositional theorems plus a
+single composite statement at the settlement boundary:
+
+  * `honest_strategy_unique` (#268) — the honest strategy is
+    uniquely determined by the truthful-commit function.
+  * `honest_challenger_wins_per_round` — disagreement persists
+    under one honest response.
+  * `honest_challenger_wins_via_sequencer_timeout` (#269) — if
+    the sequencer times out, the challenger wins.
+  * `disagreement_persists_along_trace` — disagreement persists
+    along any honest-strategy trace.
+  * `honest_challenger_responds_truthfully_wins` (settlement) —
+    when the challenger is the responding party at single-step
+    termination, a truthful step gives a `challengerWon` verdict.
+  * `sequencer_responding_with_disputed_high_loses` (settlement)
+    — when the sequencer is the responding party at single-step
+    termination, the kernel's deterministic output refutes their
+    disputed claim.
+  * `honest_challenger_wins_against_invalid_state_root` (#232,
+    composite) — the load-bearing composite trust-model upgrade
+    theorem; unifies the per-branch settlement results into a
+    single proposition over both response sides.
+
+Combined with the per-step coherence (#225) and the convergence
+chain (#231), an honest challenger always wins against a
+sequencer who has published an invalid state root.
+
+### 15B.5 L1 contract surface
+
+Five Solidity contracts (per Workstream-H plan §3.1):
+
+  * `CanonStateRootSubmission` — sequencer state-root submission
+    + bond + dispute-window + hash-chain integrity.
+  * `CanonStepVM` — per-step VM that executes one kernel step.
+  * `CanonFaultProofGame` — bisection game state machine + bond
+    redistribution.
+  * `CanonDisputeVerifierV2` — dual-path verifier (fault-proof
+    + adjudicator quorum for oracle disputes).
+  * `CanonFaultProofMigration` — V1 → V2 handoff.
+
+All contracts immutable per Workstream-E §20 discipline.
+
+### 15B.6 Dispute-pipeline integration
+
+Two new `Action` constructors at frozen indices 17 and 18:
+
+  * `Action.faultProofChallenge (bindingHash, disputedStartIdx,
+    disputedEndIdx, challengerCommit)` — L2 advisory action
+    recording a challenge intent.
+  * `Action.faultProofResolution (bindingHash, gameId, winner,
+    revertFromIdx)` — L2 mirror of L1 game settlement.
+
+Both compile to `Laws.freezeResource 0` (kernel-level no-op).
+Three new `Event` constructors at frozen indices 13, 14, 15:
+
+  * `Event.faultProofGameOpened`
+  * `Event.faultProofBisectionStep`
+  * `Event.faultProofGameSettled`
+
+The `DisputeConfig` structure (`LegalKernel.FaultProof.DisputeConfig`)
+controls per-deployment routing of deterministic claims between
+the legacy quorum path and the new fault-proof game path.
+
+### 15B.7 Migration path
+
+`CanonFaultProofMigration` follows the bidirectional-consent
+pattern from `CanonMigration`: the predecessor (V1) must pre-
+commit by setting its `migration` immutable to point at the V2
+migration contract before activation can proceed.  Activation:
+
+  * Predecessor (V1 dispute verifier) freezes; new disputes
+    rejected.
+  * Successor (V2) starts fresh, accepting submissions at
+    `v1LastFinalisedLogIndex + 1` with `prevLogEntryHash =
+    v1LastFinalisedLogEntryHash`.
+  * In-flight V1 disputes settle on V1 within the
+    `MIN_GRACE_WINDOW_BLOCKS` window.
+
+### 15B.8 Trust-model update
+
+Pre-Workstream-H trust assumption: M-of-N adjudicators honest.
+Post-Workstream-H: 1 honest challenger globally.  Strictly
+weaker because:
+
+  * Any subset of the prior quorum that includes at least one
+    honest member satisfies the new assumption.
+  * Any non-adjudicator with a Canon node + bond also
+    satisfies it.
+
+The headline theorem #232 family establishes the trust-model
+upgrade at the type level.
+
+### 15B.9 Deviation block
+
+Workstream H deviates from the plan's spec in a few places:
+
+  * **Single-hash commit** instead of full SMT.  The plan §12.2
+    calls for two-level SMTs; the implementation uses a single-
+    hash-of-CBE-encoding form.  The shipped soundness theorem
+    is `commitExtendedState_subcommits_bytes_eq_under_collision_free`
+    (under `CollisionFree hashBytes`, equal top-level commits
+    imply byte-equality of the five sub-state canonical
+    encodings).  Lifting bytes-equality to full extensional
+    equality on TreeMap-backed sub-states requires CBE encoder
+    injectivity for `State` / `NonceState` / `KeyRegistry` /
+    `LocalPolicies` / `BridgeState`, which ships at the
+    `*_encode_deterministic` level but not as standalone
+    `*_encode_injective` lemmas; that's a Workstream-H
+    follow-up.  SMT optimisation is documented as a future
+    cell-level-gas-optimisation follow-up.
+  * **Witness-state cell proofs** instead of Merkle-path cell
+    proofs.  The Lean-side verifier consumes a witness state
+    and re-hashes it (mathematically sound: `verifyCellProof`
+    checks both `commitExtendedState witnessState = commit` AND
+    `getCellValue witnessState cellTag = cellValue`).  The
+    Solidity-side `CanonStepVM` only checks `witnessCommit ==
+    preStateCommit` and trusts the proof's `cellValue` field —
+    it cannot re-hash the full state on L1.  Closing this
+    cross-stack soundness gap requires SMT-form cell proofs
+    (deferred follow-up).  The L1 game's correctness in the
+    current shipping form depends on the responding party
+    submitting honest cell values, which the cross-stack
+    fixture corpus (WU H.10.1) validates for the honest case
+    but cannot enforce against adversarial cellValue forgery.
+    Production deployments MUST audit cellProof submissions
+    off-chain until the SMT path is shipped.
+  * **Per-variant per-cell coherence theorems** are *omitted* in
+    favour of the global #225 theorem.  The per-variant case
+    analysis is structurally subsumed by the witness-state
+    design (the semantic core IS `kernelOnlyApply`).
+  * **Solidity-side Merkle-path SMT** (`StepVMMerkle.sol`) is
+    a skeleton; the Lean reference uses witness-state form.
+  * **Witness implication (#233) requires deployment assumption.**
+    `faultProof_challenger_won_implies_state_root_wrong` takes an
+    explicit `L1AttestationSemantics` predicate as a hypothesis,
+    capturing the deployment-level semantics of the
+    `l1FaultProofVerifier` opaque (i.e., "a positive L1
+    attestation implies the sequencer's claim ≠ the canonical
+    L2 commit").  The L1 contract enforces this operationally;
+    cross-stack verification (WU H.10.1 fixture corpus) ratifies
+    it for the honest case.
+    Cross-stack equivalence is verified at the fixture-corpus
+    level (F.1.8).
+
+### 15B.10 Post-audit-2 security hardening
+
+Workstream-H's deep-audit pass surfaced several
+deployment-blocking security defects in the Solidity port that
+have now been fixed:
+
+  * **Sequencer-spoofing in `initiateChallenge`** — the original
+    `initiateChallenge` signature accepted `address sequencer` /
+    `bytes32 disputedStateRoot` / `bytes32 deploymentId` as
+    caller-provided parameters.  An attacker could specify any
+    address as "sequencer", letting them initiate fake challenges
+    that timed out against an EOA (which never responds), then
+    siphon the *real* sequencer's slashed bond.  Fixed: the game
+    now looks up the disputed root, the actual submitter, and
+    the deployment ID from `CanonStateRootSubmission` based on
+    `disputedLogIndex`.  Caller-provided values for these fields
+    are no longer accepted.
+  * **Missing signature verification in V2 quorum** — V2's
+    original `finaliseFromQuorum(uint256 disputeId, address[]
+    signers)` accepted a list of "signers" without any
+    cryptographic verification.  Anyone could finalise an
+    oracle dispute just by listing the adjudicator addresses.
+    Fixed: the signature now takes
+    `(disputeId, outcome, signers, sigs)` and verifies each
+    signature via `ECDSA.recover` against a canonical
+    `verdictDigest` that binds `(deploymentId, disputeId,
+    disputeHash, outcome)` (matching V1's discipline and
+    preventing cross-dispute / cross-outcome replay).
+  * **Wrong contract call target in V2** — V2's
+    `finaliseFromFaultProof` called `revertStateRootsFrom` on
+    the `bridge` field, but `revertStateRootsFrom` lives on
+    `CanonStateRootSubmission`, not on `CanonBridge`.  In
+    production this would have silently failed (or worse,
+    silently succeeded on a `CanonBridge` with no matching
+    function).  Fixed: V2 now takes a separate
+    `stateRootSubmission` constructor argument and routes the
+    rollback call there.
+  * **Missing bond-locking + bond-slashing flow** — the original
+    `CanonStateRootSubmission` declared a `disputed` flag but
+    NEVER SET IT, allowing a sequencer's bond to be released
+    via `finaliseStateRoot` even with a dispute game in
+    progress.  And `revertStateRootsFrom` only marked the
+    state-root range reverted; it did not slash the bond.
+    Fixed: three new entry points (`markDisputed`,
+    `clearDisputed`, `slashSequencerBond`), gated to
+    `msg.sender == faultProofGame`, fully implement the bond-
+    locking flow.  The game calls `markDisputed` on challenge
+    initiation, `slashSequencerBond` on challenger-wins, and
+    `clearDisputed` on sequencer-wins.
+  * **EOA-target defence on game's constructor** — the
+    constructor now requires `_stateRootSubmission.code.length
+    > 0` and `_stepVM.code.length > 0` to prevent silent
+    no-op behaviour from a misconfigured (EOA) target address.
+  * **Malformed-cell-value defence in step VM** — `_decodeNat`
+    formerly returned 0 silently on malformed input (1-8 bytes).
+    An adversarial responder could submit a truncated cellValue
+    to spoof a zero balance and bypass the
+    `senderBalance < amount` check.  Fixed: `_decodeNat`
+    reverts with `MalformedCellValue` on non-empty inputs
+    with length < 9.
+
+All fixes ship with adversarial test coverage; the cross-stack
+fixture corpus (WU H.10) validates the honest case; the new
+Solidity tests cover the adversarial cases for each fix.
+
+### 15B.11 Post-audit-3 hardening
+
+A third audit pass surfaced several additional integration and
+edge-case defects in the Solidity + Lean port that have now been
+fixed:
+
+  * **Missing `revertStateRootsFrom` call on challenger-wins**.
+    `CanonFaultProofGame._settle` slashed the sequencer's bond
+    on challenger-wins but did NOT call
+    `revertStateRootsFrom(g.disputedLogIndex)` on the state-root
+    submission contract.  The L1 contracts (bridge, downstream
+    withdrawal verifiers) would have continued treating the
+    invalid root as valid.  Fixed: `_settle` now calls
+    `revertStateRootsFrom` in a `try`/`catch` block on
+    challenger-wins.
+  * **`initiateChallenge` accepted inverted ranges**.  Without a
+    `lowLogIndex < disputedLogIndex` check, an attacker could
+    create a degenerate game where the bisection midpoint formula
+    produces values outside any meaningful range, leaving the
+    game stuck.  Fixed: `initiateChallenge` now reverts with
+    `MidpointOutOfRange` for `lowLogIndex >= disputedLogIndex`.
+  * **Lean `timeoutLoss` had loser as a free parameter**.  The
+    Lean-side `GameTransition.timeoutLoss (loser : TurnSide)`
+    let the caller specify ANY party as the loser, but the
+    Solidity-side `claimTimeout` derives the loser from
+    `g.turn` (the current turn-holder is the unresponsive
+    party).  This was a Lean-side semantic mismatch with the
+    Solidity implementation.  Fixed: `timeoutLoss` no longer
+    takes a parameter; the loser is derived from `gs.turn` at
+    apply-time, matching the Solidity semantics exactly.
+    Affected theorems (`applyTransition_sequencer_timeout_settles`,
+    `honest_challenger_wins_via_sequencer_timeout`) now require
+    a `gs.turn = .sequencer` hypothesis.
+  * **Slash-vs-finalise race**.  `slashSequencerBond` did not
+    check `r.finalised`, allowing the slashing path to attempt
+    a double-spend if a root was finalised before slashing (the
+    contract would no longer hold the ETH).  Fixed: added
+    `r.finalised → AlreadyFinalised` check; `finaliseStateRoot`
+    now zeros `r.bond` after release so a racing slash hits
+    `BondAlreadyZero` rather than attempting a double-transfer.
+  * **Missing constructor validations on `CanonStateRootSubmission`**.
+    The constructor accepted zero values for `_bond`,
+    `_disputeWindow`, `_minSubmissionInterval`, and
+    `_maxOutstandingRoots`, each of which would disable a
+    security-critical mechanism.  Fixed: each is now validated
+    `> 0` at construction; reverts with the corresponding
+    error variant.
+  * **Lean cell-write declarations corrected**.  `Action.subSteps`
+    bulk-action sub-step proofs carry the canonical CBE-encoded
+    pre-balance bytes (was `ByteArray.empty` placeholder which
+    would have failed `verifyCellProof`).  `Action.writeCells`
+    for `withdraw` no longer claims the unbounded
+    `bridgePending 0` placeholder index (which could have
+    collided with a legitimate withdrawal id 0); the action-
+    level declaration now lists only statically-known cells.
+
+All fixes ship with adversarial test coverage where applicable;
+the new Solidity tests (`test_initiateChallenge_rejects_inverted_range`,
+`test_initiateChallenge_rejects_equal_range`,
+`test_claimTimeout_calls_revertStateRootsFrom_on_challenger_wins`,
+`test_constructor_rejects_zero_bond/zero_dispute_window/zero_submission_interval/zero_max_outstanding`)
+exercise each defence.  Lean tests update to match the new
+`timeoutLoss` no-parameter API.
+
+### 15B.12 Post-audit-4 hardening
+
+A fourth audit pass surfaced cross-stack precondition divergences
+plus a depth-cap off-by-one in the Lean state machine:
+
+  * **Three missing per-variant preconditions in `CanonStepVM`**.
+    Solidity's `_stepReward`, `_stepDistributeOthers`, and
+    `_stepProportionalDilute` were missing the `amount > 0` /
+    `totalReward > 0` / `sumOthers > 0` checks that Lean's
+    corresponding `Laws.*` modules require.  An attacker could
+    submit a zero-amount action that Solidity accepts but Lean
+    rejects, producing a cross-stack divergence at termination.
+    Fixed: each function now reverts with `AmountMustBePositive`
+    on zero-valued inputs.  New tests
+    (`test_reward_rejects_zero_amount`,
+    `test_distributeOthers_rejects_zero_amount`,
+    `test_proportionalDilute_rejects_zero_totalReward`,
+    `test_proportionalDilute_rejects_zero_sumOthers`) exercise
+    each precondition.
+  * **Lean `applyTransition` depth-cap off-by-one**.
+    `respondAgree` / `respondDisagree` incremented `gs.depth`
+    without checking the resulting value against
+    `MAX_BISECTION_DEPTH`.  Solidity's `respondToMidpoint`
+    checks `g.depth > MAX_BISECTION_DEPTH` after the increment.
+    Lean's lack of a corresponding check meant a transition at
+    `depth = MAX_BISECTION_DEPTH` would succeed at the Lean
+    level while reverting at the Solidity level.  Fixed: both
+    `respondAgree` and `respondDisagree` now reject with
+    `bisectionDepthExceeded` when `gs.depth ≥
+    MAX_BISECTION_DEPTH`.  Existing shape lemmas
+    (`applyTransition_respondAgree_shape`, etc.) updated to
+    case-split on the new gate.  Two new Lean tests cover the
+    rejection + accept-just-below-cap boundary.
+  * **`CanonFaultProofMigration` defensive constructor checks**.
+    `_predecessor == _successor` (degenerate migration) and
+    `_successor.code.length == 0` (EOA successor) were
+    silently accepted.  Fixed: revert with
+    `PredecessorEqualsSuccessor` and `SuccessorNotContract`
+    respectively.  Two new tests cover each defence.
+
+All fixes preserve the audit-1/2/3 invariants; all Lean and
+forge tests pass without exception.
+
+### 15B.13 Post-audit-5 cross-stack + deploy hardening
+
+A fifth audit pass surfaced cross-stack encoding divergences in
+the bulk-action fold functions plus a deploy-script circular-
+dependency bug:
+
+  * **Bulk-action fold `keyB` encoding mismatch**.  Solidity's
+    `_stepDistributeOthers` and `_stepProportionalDilute` fold
+    each recipient's balance update via
+    `keccak256(abi.encodePacked(acc, p.keyB, newBalance))`.  In
+    Solidity, `CellProof.keyB` is `uint256` — so `keyB`
+    contributes 32 bytes to the hash preimage.  The Lean
+    mirror's `stepCommitDistributeOthersFold` used `uint64BE
+    keyB` (8 bytes), producing a cross-stack byte-disagreement
+    under the production keccak256 binding.  Fixed: Lean now
+    uses `uint256BE keyB`, matching Solidity's 32-byte
+    encoding exactly.  New value-level tests
+    (`stepCommitDistributeOthersFold uses uint256 keyB`,
+    `DistributeOthers fold differs on different keyB`, etc.)
+    exercise the corrected encoding.
+  * **Missing `stepCommitProportionalDiluteFold` in Lean**.
+    The Lean side had `stepCommitProportionalDiluteHead` but
+    not the per-recipient fold function the bulk Solidity
+    `_stepProportionalDilute` uses.  Fixed: added
+    `stepCommitProportionalDiluteFold` with the same shape as
+    `stepCommitDistributeOthersFold` (both folds use the same
+    `(acc, keyB-uint256, newBalance-uint256)` schema).
+  * **Deploy script circular-dependency bug**.  The original
+    `DeployFaultProof.s.sol` passed `address(0)` as the
+    `_faultProofGame` placeholder to `CanonStateRootSubmission`
+    and `CanonDisputeVerifierV2`, but both constructors reject
+    zero addresses.  The script would have reverted at
+    construction.  Fixed: use `vm.computeCreateAddress` to
+    predict the game contract's address before deploying the
+    state-root submission and verifier; deploy order becomes
+    [stepVM → state-root-sub (with predicted game) → verifier
+    (with predicted game) → game (with real state-root-sub)].
+    The game's `code.length > 0` defence on
+    `_stateRootSubmission` is satisfied because state-root-sub
+    is deployed before game.
+
+All fixes maintain audit-1/2/3/4 invariants; all Lean (1869)
+and forge (333) tests pass.
+
+---
+
 ## 16. Final Principles
 
 These are the principles to which all design decisions return when

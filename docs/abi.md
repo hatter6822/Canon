@@ -159,11 +159,12 @@ Encoded as the concatenation of:
 
 ## 5. The `Action` CBE Encoding
 
-The `Action` type has 17 constructors, encoded by their inductive
+The `Action` type has 19 constructors, encoded by their inductive
 index (frozen — no phase will renumber existing constructors).
 Phase 5 ships indices 0..7; Phase 6 appends 8..11; Workstream B
 appends 12; Workstream C appends 13..14; Workstream LP (actor-
-scoped policies) appends 15..16.
+scoped policies) appends 15..16; Workstream H (fault-proof
+migration) appends 17..18.
 
 ```
 Action.transfer            := 0
@@ -183,6 +184,8 @@ Action.deposit             := 13  -- Workstream C (bridge L1 → L2)
 Action.withdraw            := 14  -- Workstream C (bridge L2 → L1)
 Action.declareLocalPolicy  := 15  -- Workstream LP (actor-scoped policies)
 Action.revokeLocalPolicy   := 16  -- Workstream LP (actor-scoped policies)
+Action.faultProofChallenge  := 17 -- Workstream H (fault-proof migration)
+Action.faultProofResolution := 18 -- Workstream H (fault-proof migration)
 ```
 
 Each Action is encoded as `<constructor uint> :: <fields>`.  For
@@ -233,6 +236,14 @@ Action.declareLocalPolicy policy  →
 
 Action.revokeLocalPolicy  →
   CBE-uint(16)
+
+Action.faultProofChallenge bindingHash sIdx eIdx challengerCommit  →
+  CBE-uint(17) ++ CBE-bstr(bindingHash) ++ CBE-uint(sIdx) ++
+  CBE-uint(eIdx) ++ CBE-bstr(challengerCommit)
+
+Action.faultProofResolution bindingHash gameId winner revertFromIdx  →
+  CBE-uint(18) ++ CBE-bstr(bindingHash) ++ CBE-uint(gameId) ++
+  CBE-uint(winner) ++ CBE-uint(revertFromIdx)
 ```
 
 The `Action.withdraw` `recipientL1` field is encoded as a
@@ -305,10 +316,10 @@ EvidenceVerdict.inconclusive := tag 2
 The full per-constructor table for the dispute types is in
 `LegalKernel/Encoding/Disputes.lean`.
 
-### 5.3 Phase-6 + Workstream-C + Workstream-LP `Event` Inductive Extension
+### 5.3 Phase-6 + Workstream-C + Workstream-LP + Workstream-H `Event` Inductive Extension
 
-The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 13
-constructors at frozen indices 0..12:
+The §8.9.2 `Event` inductive grows from 5 (Phase 5) to 16
+constructors at frozen indices 0..15:
 
 ```
 Event.balanceChanged       := 0
@@ -324,6 +335,9 @@ Event.withdrawalRequested  := 9  -- Workstream C (bridge)
 Event.depositCredited      := 10 -- Workstream C (bridge)
 Event.localPolicyDeclared  := 11 -- Workstream LP (actor-scoped policies)
 Event.localPolicyRevoked   := 12 -- Workstream LP (actor-scoped policies)
+Event.faultProofGameOpened    := 13 -- Workstream H (fault-proof migration)
+Event.faultProofBisectionStep := 14 -- Workstream H (fault-proof migration)
+Event.faultProofGameSettled   := 15 -- Workstream H (fault-proof migration)
 ```
 
 `Event.rewardIssued (resource, recipient, amount)` is emitted
@@ -1006,3 +1020,101 @@ should pick deployment-specific salts (e.g.
   * `docs/lex_implementation_plan.md` (Workstream LX — `lexlaw`
     macro, `deployment` macro, `lex_diff` / `lex_format` audit
     binaries).
+  * `docs/fault_proof_migration_plan.md` (Workstream H — the two
+    new `Action` ctors at frozen indices 17 / 18 and the three
+    new `Event` ctors at indices 13 / 14 / 15, plus the five
+    new Solidity contracts and the L1 fault-proof game).
+  * `docs/fault_proof_design.md` (Workstream H — design
+    rationale).
+
+## 14. Workstream H — Fault-Proof Migration ABI Surface
+
+### 14.1 New Solidity contracts
+
+The five immutable contracts shipped by Workstream H:
+
+  * `solidity/src/contracts/CanonStateRootSubmission.sol` —
+    Sequencer state-root submission registry.
+  * `solidity/src/contracts/CanonStepVM.sol` — L1 step VM.
+  * `solidity/src/contracts/CanonFaultProofGame.sol` —
+    Bisection game state machine.
+  * `solidity/src/contracts/CanonDisputeVerifierV2.sol` —
+    Dual-path dispute verifier (fault-proof + adjudicator
+    quorum).
+  * `solidity/src/contracts/CanonFaultProofMigration.sol` —
+    V1 → V2 migration handoff.
+
+Plus the cross-cutting library:
+
+  * `solidity/src/lib/StepVMMerkle.sol` — Per-cell Merkle
+    proof verification for the L1 step VM.
+
+All contracts immutable per Workstream-E §20 discipline.
+
+### 14.2 New constants
+
+| Constant | Type | Value | Source |
+|----------|------|-------|--------|
+| `MAX_BISECTION_DEPTH` | `uint64` | 64 | `CanonFaultProofGame.sol` |
+| `STATE_ROOT_SUBMISSION_BOND` | `uint128` | 1.0 ETH (default) | `CanonStateRootSubmission` constructor |
+| `MIN_CHALLENGE_BOND` | `uint128` | 0.05 ETH (default) | `CanonFaultProofGame` constructor |
+| `FAULT_PROOF_DISPUTE_WINDOW` | `uint64` | 216_000 blocks (~30 days) | `CanonStateRootSubmission` constructor |
+| `BISECTION_RESPONSE_TIMEOUT` | `uint64` | 21_600 blocks (~3 days) | `CanonFaultProofGame` constructor |
+| `MIN_SUBMISSION_INTERVAL_BLOCKS` | `uint64` | 100 (recommended) | `CanonStateRootSubmission` constructor |
+| `MAX_OUTSTANDING_ROOTS_PER_SEQUENCER` | `uint64` | 100 (recommended) | `CanonStateRootSubmission` constructor |
+| `MIN_BISECTION_STEP_INTERVAL_BLOCKS` | `uint64` | 5 (recommended) | `CanonFaultProofGame` constructor |
+| `MIN_GRACE_WINDOW_BLOCKS` | `uint64` | 216_000 (~30 days) | `CanonFaultProofMigration.sol` |
+| `MAX_RECIPIENTS_PER_BULK_ACTION` | (Lean) | 256 | `LegalKernel.FaultProof.SubStep` |
+
+### 14.3 New L1 entry points
+
+`CanonStateRootSubmission`:
+
+  * `submitStateRoot(uint64 logIndex, bytes32 stateCommit, bytes32 prevLogEntryHash)` payable
+  * `finaliseStateRoot(uint64 logIndex)`
+  * `revertStateRootsFrom(uint64 fromIdx)` (called by game)
+  * `isStateRootReverted(uint64 logIndex) view returns (bool)`
+
+`CanonFaultProofGame`:
+
+  * `initiateChallenge(...) payable returns (uint256 gameId)`
+  * `submitMidpoint(uint256 gameId, bytes32 midpointCommit)`
+  * `respondToMidpoint(uint256 gameId, bool agree)`
+  * `terminateOnSingleStep(uint256 gameId, bytes signedActionBytes, CellProof[] cellProofs, bytes32 claimedPostCommit)`
+  * `claimTimeout(uint256 gameId)`
+
+`CanonStepVM`:
+
+  * `executeStep(bytes32 preStateCommit, bytes signedActionEncoded, CellProof[] cellProofs) view returns (bytes32 postStateCommit)`
+
+`CanonDisputeVerifierV2`:
+
+  * `fileDispute(bytes32 disputeHash) returns (uint256)`
+  * `finaliseFromFaultProof(uint256 disputeId, uint256 gameId, uint64 revertFromIdx)`
+  * `finaliseFromQuorum(uint256 disputeId, address[] signers)`
+
+`CanonFaultProofMigration`:
+
+  * `activate()`
+
+### 14.4 New events
+
+`CanonStateRootSubmission`:
+  * `StateRootSubmitted(uint64 indexed logIndex, bytes32 stateCommit, address indexed sequencer)`
+  * `StateRootFinalised(uint64 indexed logIndex, address indexed sequencer)`
+  * `StateRootRangeReverted(uint64 indexed floor, uint64 indexed ceiling)`
+
+`CanonFaultProofGame`:
+  * `FaultProofGameOpened(uint256 indexed gameId, address indexed challenger, bytes32 disputedStateRoot, bytes32 challengerStateRoot)`
+  * `BisectionMidpointSubmitted(uint256 indexed gameId, address indexed party, uint64 idx, bytes32 commit)`
+  * `BisectionResponseSubmitted(uint256 indexed gameId, address indexed party, bool agree)`
+  * `FaultProofGameSettled(uint256 indexed gameId, GameStatus status, address indexed winner, uint128 winnerPayout)`
+
+`CanonDisputeVerifierV2`:
+  * `DisputeFiledV2(uint256 indexed disputeId, address indexed filer, bytes32 disputeHash)`
+  * `DisputeUpheldByFaultProof(uint256 indexed disputeId, uint256 indexed gameId, uint64 revertFromIdx)`
+  * `DisputeUpheldByQuorum(uint256 indexed disputeId, address indexed adjudicator)`
+  * `DisputeRejected(uint256 indexed disputeId)`
+
+`CanonFaultProofMigration`:
+  * `MigrationActivated(uint64 indexed activationBlock, address indexed predecessor, address indexed successor)`

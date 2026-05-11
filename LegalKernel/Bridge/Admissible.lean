@@ -146,6 +146,8 @@ theorem applyActionToBridgeState_non_bridge
   | withdraw r sender amount rcp  => exact absurd hact (hne_wd r sender amount rcp)
   | declareLocalPolicy _          => rfl
   | revokeLocalPolicy             => rfl
+  | faultProofChallenge _ _ _ _   => rfl
+  | faultProofResolution _ _ _ _  => rfl
 
 /-! ## BridgeAdmissibleWith
 

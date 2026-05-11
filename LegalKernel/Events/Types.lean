@@ -166,6 +166,30 @@ inductive Event
   /-- An actor revoked their local policy (Workstream LP / LP.10).
       Carries the actor.  Frozen index 12. -/
   | localPolicyRevoked  (actor : ActorId)
+  /-- A fault-proof game was opened against a published state
+      root (Workstream H §12.3).  Carries the L1-assigned
+      `gameId`, the `challenger`, the disputed root range
+      `[disputedStartIdx .. disputedEndIdx]`, and the L2 binding
+      hash matching the corresponding `Action.faultProofChallenge`
+      to the L1 game.  Frozen index 13. -/
+  | faultProofGameOpened (gameId : Nat) (challenger : ActorId)
+                          (disputedStartIdx : Nat)
+                          (disputedEndIdx : Nat)
+                          (bindingHash : ByteArray)
+  /-- A bisection step was taken in an open fault-proof game
+      (Workstream H §12.3).  Carries the gameId, the round
+      number, the party who acted, and the midpoint claim
+      (idx + commit).  Emitted by the runtime's L1-event watcher
+      observing midpoint submissions on L1.  Frozen index 14. -/
+  | faultProofBisectionStep (gameId : Nat) (round : Nat)
+                              (party : ActorId)
+                              (idx : Nat) (commit : ByteArray)
+  /-- A fault-proof game was settled (Workstream H §12.3).
+      Carries the gameId, winner, loser, and bond payout.
+      Indexers consume this event to maintain a "settled games"
+      view.  Frozen index 15. -/
+  | faultProofGameSettled (gameId : Nat) (winner loser : ActorId)
+                            (payout : Amount)
   deriving Repr, DecidableEq
 
 /-! ## Convenience predicates -/
@@ -199,6 +223,9 @@ def Event.actor : Event → Option ActorId
   | .depositCredited _ a _ _      => some a
   | .localPolicyDeclared a _      => some a
   | .localPolicyRevoked a         => some a
+  | .faultProofGameOpened _ c _ _ _   => some c
+  | .faultProofBisectionStep _ _ p _ _ => some p
+  | .faultProofGameSettled _ w _ _    => some w
 
 /-- The resource that this event affects, if any. -/
 def Event.resource : Event → Option ResourceId
@@ -243,6 +270,15 @@ def Event.isLocalPolicyEvent : Event → Bool
   | .localPolicyDeclared _ _ => true
   | .localPolicyRevoked _    => true
   | _                        => false
+
+/-- True iff `e` is a fault-proof pipeline event
+    (`faultProofGameOpened`, `faultProofBisectionStep`, or
+    `faultProofGameSettled`).  Workstream H. -/
+def Event.isFaultProofEvent : Event → Bool
+  | .faultProofGameOpened _ _ _ _ _   => true
+  | .faultProofBisectionStep _ _ _ _ _ => true
+  | .faultProofGameSettled _ _ _ _    => true
+  | _                                 => false
 
 end Events
 end LegalKernel

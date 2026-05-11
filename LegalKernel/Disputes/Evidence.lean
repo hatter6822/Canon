@@ -471,6 +471,8 @@ theorem apply_admissible_with_eq_kernelOnlyApply
   | withdraw _ _ _ _              => rfl
   | declareLocalPolicy _          => rfl
   | revokeLocalPolicy             => rfl
+  | faultProofChallenge _ _ _ _   => rfl
+  | faultProofResolution _ _ _ _  => rfl
 
 /-! ### Inductive runtime-admissibility predicate
 
