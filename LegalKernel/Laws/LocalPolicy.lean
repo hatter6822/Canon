@@ -23,18 +23,21 @@ The plan §19.4 LX.28 acceptance note says:
 > `applyActionToRegistry`.
 
 The `RegistryEffectKind.localPolicy` variant already exists in
-`Tools/LexCommon.lean` (it was introduced in M1); the M2
+`Lex/Tools/Common.lean` (it was introduced in M1); the M2
 declaration uses the same `none` registry-effect classification
 because the kernel-level Transition is identity (the local-
 policy mutation lives outside `applyActionToRegistry`).
 
-See `LegalKernel/Laws/Lex/Transfer.lean`'s docstring for the
-"Why a separate file?" explanation.
+See `LegalKernel/Laws/Transfer.lean`'s docstring for the "Why a
+separate file?" explanation.  (After the LX-M2 in-place
+migration, the Lex re-expressions of hand-written laws live
+alongside their hand-written form in the same `Laws/*.lean`
+file, rather than in a separate `Laws/Lex/` subdirectory.)
 -/
 
 import LegalKernel.Laws.Freeze
 import LegalKernel.Authority.LocalPolicy
-import LegalKernel.DSL.LexLaw
+import Lex.DSL.Law
 
 namespace LegalKernel
 namespace Laws

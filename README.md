@@ -146,7 +146,7 @@ the following on every commit:
 
 | Posture                                       | Mechanism                                       |
 |-----------------------------------------------|-------------------------------------------------|
-| 1 596 Lean tests across 89 suites pass        | `lake test` (`Tests.lean` driver)               |
+| All Lean test suites pass (`lake test` reports `ALL TESTS PASSED`) | `lake test` (`Tests.lean` driver)               |
 | 191 Solidity tests across 16 suites pass      | `forge test` (in `solidity/`)                   |
 | Zero `sorry` in any kernel-TCB module         | `lake exe count_sorries`                        |
 | TCB imports stay on the allowlist             | `lake exe tcb_audit`                            |
@@ -302,8 +302,9 @@ lake build LegalKernel.Encoding.State
 lake build LegalKernel.Runtime.Loop
 lake build LegalKernel.Disputes.Verdict
 lake build LegalKernel.Bridge.WithdrawalRoot
-lake build LegalKernel.DSL.LexLaw          # Lex `lexlaw` macro
-lake build LegalKernel.DSL.LexDeployment   # Lex `deployment` macro
+lake build Lex.DSL.Law                     # Lex `lexlaw` macro
+lake build Lex.DSL.Deployment              # Lex `deployment` macro
+lake build Lex                             # Lex umbrella (all DSL surface)
 lake build Deployments.Examples.UsdClearing  # LX-M3 worked example
 ```
 
@@ -325,7 +326,10 @@ canon/
 │   │                          DistributeOthers, ProportionalDilute,
 │   │                          Deposit, Withdraw; plus 8 Lex-only laws
 │   │                          (ReplaceKey, RegisterIdentity, Dispute
-│   │                          pipeline ×4, LocalPolicy ×2, ExampleLex).
+│   │                          pipeline ×4, LocalPolicy ×2).  The Lex
+│   │                          M1 demonstration law (ExampleLex) is
+│   │                          deliberately outside the deployable
+│   │                          tree and lives under `Lex/Examples/`.
 │   ├── Authority/          — Phase-3 signed-action layer:
 │   │                          Crypto (Verify), Action,
 │   │                          Identity (KeyRegistry + AuthorityPolicy),
@@ -337,13 +341,11 @@ canon/
 │   │                          primitives), Action, SignedAction, State,
 │   │                          SignInput (domain separation), Disputes,
 │   │                          LocalPolicy.
-│   ├── DSL/                — Macros and language tooling:
-│   │                          Law (Phase-4 `Law.mk`), LawSyntax (legacy
-│   │                          `law` macro), LexLaw (`lexlaw` macro),
-│   │                          LexProperty (synthesizer skeleton),
-│   │                          LexDeployment (`deployment` macro),
-│   │                          LexImplCalculus / LexImplLowering (§6.2
-│   │                          calculus parser).
+│   ├── DSL/                — base law DSL: Law (Phase-4 `Law.mk`),
+│   │                          LawSyntax (legacy `law` macro).  The Lex
+│   │                          DSL extension (`lexlaw`, `lex_*` clauses,
+│   │                          properties, deployments, impl calculus)
+│   │                          lives under the top-level `Lex/DSL/`.
 │   ├── Events/             — Phase-5 deployment-facing event log:
 │   │                          Types (13 ctors incl. Phase-6, Workstream-C,
 │   │                          Workstream-LP), Extract (deterministic emission).
@@ -363,31 +365,43 @@ canon/
 │                              State, Admissible, Accounting (C);
 │                              WithdrawalRoot, WithdrawalProof,
 │                              Finalisation (D).
-├── LegalKernel/Test/       — 89 test suites mirroring the source layout
-│                              (1 596 tests total; see CLAUDE.md for the
-│                              per-suite breakdown).
+├── LegalKernel/Test/       — kernel + bridge + fault-proof test suites
+│                              mirroring the `LegalKernel/` source layout.
+│                              Lex test suites live under `Lex/Test/`.
+│                              `lake test` is the canonical pass/fail
+│                              query.
 ├── Deployments/Examples/   — LX-M3 worked-example deployments:
 │                              UsdClearing (parameterless wrappers + the
 │                              `monotonic_law_set [all_laws]` claim).
-├── Tools/                  — audit binaries (lake exe …):
+├── Tools/                  — non-Lex audit binaries (lake exe …):
 │   ├── Common.lean         — shared TCB constants.
 │   ├── TcbAudit.lean       — enforces tcb_allowlist.txt (WU 1.11).
 │   ├── CountSorries.lean   — enforces zero `sorry` in TCB (WU 1.12).
 │   ├── StubAudit.lean      — enforces no placeholder stubs (Audit-3.8).
-│   ├── LexCommon.lean      — shared Lex utilities (LawDecl JSON codec,
-│   │                          registry parser, atomic-write helper).
-│   ├── LexLint.lean        — Lex registry + codegen-input gate (LX.5).
-│   ├── LexCodegen.lean     — Lex codegen binary (LX.17 – LX.20 + LX.38).
-│   ├── LexDiff.lean        — Lex semantic-diff + version-bump classifier.
-│   └── LexFormat.lean      — Lex pretty-printer.
+│   ├── NamingAudit.lean    — enforces content-name discipline.
+│   └── DeferralAudit.lean  — enforces no-deferrals policy.
+├── Lex/                    — Workstream LX: the Lex programming language.
+│   ├── IndexRegistry.txt   — frozen action-index registry (LX.1).
+│   ├── DSL/                — Lex DSL macros (`lex_law`, `lexlaw`, properties,
+│   │                          deployments): PreGrammar, ImplCalculus,
+│   │                          ImplLowering, Events, Shim, Law, Property,
+│   │                          Deployment.
+│   ├── Tools/              — Lex audit-binary libraries (Common, Lint,
+│   │                          Codegen, Diff, Format).
+│   ├── Bin/                — Lake `lean_exe` entry-point wrappers (Lint,
+│   │                          Codegen, Diff, Format).
+│   ├── Inputs/             — codegen-input JSON sidecars + canonical
+│   │                          manifest + property-test coverage file.
+│   ├── Examples/           — Lex-only demonstration laws (ExampleLex).
+│   └── Test/               — Lex test modules (DSL, Tools, Properties,
+│                              AutoGenProperties, ExampleLex, M2).
+├── Lex.lean                — umbrella module for the Lex language.
 ├── Main.lean               — Phase-5 `canon` runtime CLI.
 ├── Replay.lean             — Phase-5 `canon-replay` audit binary.
 ├── Tests.lean              — @[test_driver]; entry point for `lake test`.
 ├── lakefile.lean           — Lake config + strict lean options.
 ├── lean-toolchain          — pinned Lean version.
 ├── tcb_allowlist.txt       — TCB import allowlist (WU 1.11).
-├── lex_index_registry.txt  — Lex frozen action-index registry (LX.1).
-├── LegalKernel/_lex_inputs/ — Lex codegen-input JSON sidecars.
 ├── tools/
 │   └── stub_allowlist.txt  — Audit-3.8 stub allowlist.
 ├── scripts/
