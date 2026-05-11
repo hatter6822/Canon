@@ -5203,6 +5203,71 @@ Workstream H deviates from the plan's spec in a few places:
     Cross-stack equivalence is verified at the fixture-corpus
     level (F.1.8).
 
+### 15B.10 Post-audit-2 security hardening
+
+Workstream-H's deep-audit pass surfaced several
+deployment-blocking security defects in the Solidity port that
+have now been fixed:
+
+  * **Sequencer-spoofing in `initiateChallenge`** — the original
+    `initiateChallenge` signature accepted `address sequencer` /
+    `bytes32 disputedStateRoot` / `bytes32 deploymentId` as
+    caller-provided parameters.  An attacker could specify any
+    address as "sequencer", letting them initiate fake challenges
+    that timed out against an EOA (which never responds), then
+    siphon the *real* sequencer's slashed bond.  Fixed: the game
+    now looks up the disputed root, the actual submitter, and
+    the deployment ID from `CanonStateRootSubmission` based on
+    `disputedLogIndex`.  Caller-provided values for these fields
+    are no longer accepted.
+  * **Missing signature verification in V2 quorum** — V2's
+    original `finaliseFromQuorum(uint256 disputeId, address[]
+    signers)` accepted a list of "signers" without any
+    cryptographic verification.  Anyone could finalise an
+    oracle dispute just by listing the adjudicator addresses.
+    Fixed: the signature now takes
+    `(disputeId, outcome, signers, sigs)` and verifies each
+    signature via `ECDSA.recover` against a canonical
+    `verdictDigest` that binds `(deploymentId, disputeId,
+    disputeHash, outcome)` (matching V1's discipline and
+    preventing cross-dispute / cross-outcome replay).
+  * **Wrong contract call target in V2** — V2's
+    `finaliseFromFaultProof` called `revertStateRootsFrom` on
+    the `bridge` field, but `revertStateRootsFrom` lives on
+    `CanonStateRootSubmission`, not on `CanonBridge`.  In
+    production this would have silently failed (or worse,
+    silently succeeded on a `CanonBridge` with no matching
+    function).  Fixed: V2 now takes a separate
+    `stateRootSubmission` constructor argument and routes the
+    rollback call there.
+  * **Missing bond-locking + bond-slashing flow** — the original
+    `CanonStateRootSubmission` declared a `disputed` flag but
+    NEVER SET IT, allowing a sequencer's bond to be released
+    via `finaliseStateRoot` even with a dispute game in
+    progress.  And `revertStateRootsFrom` only marked the
+    state-root range reverted; it did not slash the bond.
+    Fixed: three new entry points (`markDisputed`,
+    `clearDisputed`, `slashSequencerBond`), gated to
+    `msg.sender == faultProofGame`, fully implement the bond-
+    locking flow.  The game calls `markDisputed` on challenge
+    initiation, `slashSequencerBond` on challenger-wins, and
+    `clearDisputed` on sequencer-wins.
+  * **EOA-target defence on game's constructor** — the
+    constructor now requires `_stateRootSubmission.code.length
+    > 0` and `_stepVM.code.length > 0` to prevent silent
+    no-op behaviour from a misconfigured (EOA) target address.
+  * **Malformed-cell-value defence in step VM** — `_decodeNat`
+    formerly returned 0 silently on malformed input (1-8 bytes).
+    An adversarial responder could submit a truncated cellValue
+    to spoof a zero balance and bypass the
+    `senderBalance < amount` check.  Fixed: `_decodeNat`
+    reverts with `MalformedCellValue` on non-empty inputs
+    with length < 9.
+
+All fixes ship with adversarial test coverage; the cross-stack
+fixture corpus (WU H.10) validates the honest case; the new
+Solidity tests cover the adversarial cases for each fix.
+
 ---
 
 ## 16. Final Principles

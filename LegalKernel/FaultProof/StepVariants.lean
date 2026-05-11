@@ -87,7 +87,25 @@ def Action.readOnlyCells : Action → ActorId → List CellTag
 
 /-- The cell tags an action writes.  Per the §4.13 contract,
     every action advances the signer's nonce; the per-action
-    additional writes are captured by `actionSpecificWrites`. -/
+    additional writes are captured by the per-variant arms below.
+
+    **Bulk actions** (`distributeOthers`, `proportionalDilute`):
+    the recipient-list-dependent balance writes are NOT enumerated
+    at this action level; instead they decompose per-recipient
+    via `Action.subSteps` (per WU H.1.4).  At the action level
+    we declare only the writes the action ALWAYS does (the
+    signer's nonce); the bulk sub-steps emit the per-recipient
+    balance cell proofs.
+
+    **Withdraw**: the new bridge pending entry's key is the
+    deployment's current `nextWdId` counter (not knowable
+    statically from the action's parameters).  We declare the
+    `bridgeNextWdId` counter cell and the signer's balance +
+    nonce; the per-game cell-proof bundle additionally carries
+    the witnessed `bridgePending nextWdId` cell, but at the
+    action-declaration level we mark this dependency abstractly
+    by including `bridgeNextWdId` (whose value the L1 step VM
+    reads to derive the pending-id). -/
 def Action.writeCells : Action → ActorId → List CellTag
   | .transfer r sender receiver _, signer =>
       [.balance r sender, .balance r receiver, .nonce signer]
@@ -101,11 +119,9 @@ def Action.writeCells : Action → ActorId → List CellTag
       [.registry actor, .nonce signer]
   | .reward r to _,                signer =>
       [.balance r to, .nonce signer]
-  -- Bulk actions: the recipient-list-dependent writes are NOT
-  -- enumerated at the action level; instead they decompose
-  -- per-recipient (per WU H.1.4 bulk-action sub-step
-  -- decomposition).  We declare only the nonce here; per-recipient
-  -- balances are emitted by the sub-step machinery.
+  -- Bulk actions: action-level writes are nonce + bridge-state-
+  -- independent cells.  Per-recipient writes are emitted by
+  -- the sub-step machinery (`Action.subSteps`) at game-play time.
   | .distributeOthers _ _ _,       signer =>
       [.nonce signer]
   | .proportionalDilute _ _ _,     signer =>
@@ -118,10 +134,15 @@ def Action.writeCells : Action → ActorId → List CellTag
       [.registry actor, .nonce signer]
   | .deposit r recipient _ d,      signer =>
       [.balance r recipient, .nonce signer, .bridgeConsumed d]
+  -- Withdraw: action-level writes are the signer's balance, the
+  -- signer's nonce, and the `bridgeNextWdId` counter.  The newly-
+  -- allocated `bridgePending <nextWdId>` cell is emitted by the
+  -- runtime cell-proof builder at game-play time (the index is
+  -- derived from the witnessed `bridgeNextWdId` cell's pre-state
+  -- value); it doesn't appear in this STATIC action-level
+  -- declaration.
   | .withdraw r sender _ _,        signer =>
-      [.balance r sender, .nonce signer,
-       .bridgePending 0,  -- placeholder; real key is `nextWdId`
-       .bridgeNextWdId]
+      [.balance r sender, .nonce signer, .bridgeNextWdId]
   | .declareLocalPolicy _,         signer =>
       [.localPolicy signer, .nonce signer]
   | .revokeLocalPolicy,            signer =>

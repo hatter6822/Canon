@@ -157,6 +157,7 @@ contract CanonStepVM {
     error AmountMustBePositive();
     error UnauthorizedSigner();
     error TooManyCellProofs();
+    error MalformedCellValue();
 
     /* ---------------------------------------------------------- */
     /* Per-variant commit tag hashes                              */
@@ -341,12 +342,26 @@ contract CanonStepVM {
         revert MissingCellProof(uint8(CellKind.Balance), resource);
     }
 
-    /// @notice Decode a uint256 from CBE-encoded Nat bytes (8 bytes
-    ///         LE after a 1-byte type tag, per CBE).  Returns 0
-    ///         for empty bytes.
+    /// @notice Decode a uint256 from CBE-encoded Nat bytes.  The
+    ///         CBE encoding is `1-byte type tag || 8 bytes LE
+    ///         value`, total 9 bytes.  Empty bytes decode to 0
+    ///         (canonical "absent cell" marker per
+    ///         `Verify.canonicalAbsentValue`).
+    ///
+    ///         **Malformed-input defence.**  A non-empty
+    ///         `data.length < 9` indicates a malformed cell value
+    ///         that the caller crafted (the canonical encoder
+    ///         always produces exactly 9 bytes or exactly 0).
+    ///         We REVERT on this case to prevent the malformed
+    ///         input from being silently interpreted as 0, which
+    ///         would allow an adversarial responder to spoof a
+    ///         zero-balance cell.  Without this revert, the
+    ///         cross-stack soundness gap (cellValue not bound to
+    ///         witnessState at the Solidity layer) would be even
+    ///         wider.
     function _decodeNat(bytes memory data) internal pure returns (uint256) {
         if (data.length == 0) return 0;
-        if (data.length < 9) return 0;  // malformed; treat as 0
+        if (data.length < 9) revert MalformedCellValue();
         // Read 8 bytes LE starting at offset 1.
         uint256 result = 0;
         for (uint256 i = 0; i < 8; i++) {

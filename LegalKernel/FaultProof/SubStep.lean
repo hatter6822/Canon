@@ -25,12 +25,14 @@ This module is **not** part of the trusted computing base.
 -/
 
 import LegalKernel.Authority.Action
+import LegalKernel.Encoding.Encodable
 import LegalKernel.FaultProof.Cell
 
 namespace LegalKernel
 namespace FaultProof
 
 open LegalKernel.Authority
+open LegalKernel.Encoding
 
 /-! ## DoS bound -/
 
@@ -76,7 +78,12 @@ excluded actors at the resource, capped at
 
 /-- Construct the sub-step list for a `distributeOthers` action.
     Iterates over the non-excluded actors at the resource,
-    producing one sub-step per actor. -/
+    producing one sub-step per actor.
+
+    Each sub-step's `cellProof` carries the recipient's
+    canonical pre-state balance encoding as `cellValue`; the
+    witness state IS the pre-state (so the proof verifies via
+    `verifyCellProof` against `commitExtendedState es`). -/
 def Action.distributeOthers_subSteps
     (es : ExtendedState) (r : ResourceId) (excluded : ActorId)
     (amount : Amount) : List SubStep :=
@@ -90,7 +97,9 @@ def Action.distributeOthers_subSteps
   -- Cap at MAX_RECIPIENTS_PER_BULK_ACTION (defensive; actual
   -- length is bounded by the number of actors).
   let capped := nonExcluded.take MAX_RECIPIENTS_PER_BULK_ACTION
-  -- Build sub-steps with index from 0.
+  -- Build sub-steps with index from 0.  Each sub-step's
+  -- cellProof carries the canonical balance encoding so the
+  -- proof verifies against the pre-state commit.
   capped.zipIdx.map (fun (p, i) =>
     { parentAction := .distributeOthers r excluded amount,
       subStepIdx := i,
@@ -99,13 +108,17 @@ def Action.distributeOthers_subSteps
       postBalance := p.2 + amount,
       cellProof :=
         { cellTag := CellTag.balance r p.1,
-          cellValue := ByteArray.empty,  -- placeholder
+          cellValue :=
+            ByteArray.mk (Encodable.encode (T := Nat) p.2).toArray,
           witnessState := es } })
 
 /-- Construct the sub-step list for a `proportionalDilute`
     action.  Iterates over non-excluded actors at the resource,
     producing one sub-step per actor with the proportional credit
-    `totalReward * v / sumOthers` (Nat floor; dust discarded). -/
+    `totalReward * v / sumOthers` (Nat floor; dust discarded).
+
+    Each sub-step's `cellProof` carries the recipient's
+    canonical pre-state balance encoding as `cellValue`. -/
 def Action.proportionalDilute_subSteps
     (es : ExtendedState) (r : ResourceId) (excluded : ActorId)
     (totalReward : Amount) : List SubStep :=
@@ -126,7 +139,8 @@ def Action.proportionalDilute_subSteps
       postBalance := p.2 + credit,
       cellProof :=
         { cellTag := CellTag.balance r p.1,
-          cellValue := ByteArray.empty,  -- placeholder
+          cellValue :=
+            ByteArray.mk (Encodable.encode (T := Nat) p.2).toArray,
           witnessState := es } })
 
 /-- Top-level entry: dispatch on action variant. -/

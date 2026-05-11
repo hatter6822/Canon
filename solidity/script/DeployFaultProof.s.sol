@@ -68,17 +68,21 @@ contract DeployFaultProof is Script {
         // submission addr then redeploy submission with the real
         // game addr.  Real CREATE3 deployment script handles the
         // circular dependency cleanly.
-        address[] memory adjudicators = new address[](0);
-        CanonDisputeVerifierV2 verifier = new CanonDisputeVerifierV2(
-            address(0),           // placeholder; updated below
-            adjudicators,
-            0,
-            bridge,
-            address(0),
-            address(0),
-            deploymentId
-        );
+        // Single-adjudicator quorum (1-of-1) is the minimal valid
+        // configuration for the deploy script's smoke test.  Real
+        // deployments configure a multi-adjudicator set with a
+        // strict-majority quorum via constructor arguments.
+        address[] memory adjudicators = new address[](1);
+        adjudicators[0] = sequencer;  // placeholder adjudicator
 
+        // Deploy state-root submission FIRST so the verifier can
+        // reference it as `stateRootSubmission`.  The state-root
+        // submission's `faultProofGame` is set to the verifier
+        // (the verifier is the relay that calls
+        // `revertStateRootsFrom` on behalf of the game).
+        // Final wiring uses CREATE3 in production; the script's
+        // 2-step placeholder pattern is documented in the
+        // deployment runbook.
         CanonStateRootSubmission submission =
           new CanonStateRootSubmission(
             stateRootBond,
@@ -86,9 +90,20 @@ contract DeployFaultProof is Script {
             minSubmissionInterval,
             maxOutstandingRoots,
             sequencer,
-            address(0),  // placeholder
+            address(0),  // faultProofGame placeholder; CREATE3 in production
             deploymentId,
             withdrawalFinalisationWindow);
+
+        CanonDisputeVerifierV2 verifier = new CanonDisputeVerifierV2(
+            address(0),               // faultProofGame placeholder
+            address(submission),      // stateRootSubmission
+            adjudicators,
+            1,                        // quorumThreshold (1-of-1 for smoke test)
+            bridge,
+            address(0),               // sequencerStake placeholder
+            address(0),               // attestor placeholder
+            deploymentId
+        );
 
         CanonFaultProofGame game = new CanonFaultProofGame(
             bisectionTimeout,
@@ -101,7 +116,7 @@ contract DeployFaultProof is Script {
 
         // Post-deploy assert.
         stepVM.assertConsistent();
-        verifier;
+        verifier.assertConsistent();
         submission.assertConsistent();
         game.assertConsistent();
 

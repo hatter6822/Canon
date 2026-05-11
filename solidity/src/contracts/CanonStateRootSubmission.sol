@@ -108,16 +108,40 @@ contract CanonStateRootSubmission is ReentrancyGuard {
         uint64  indexed ceiling
     );
 
+    /// @notice Emitted when a state root is marked disputed by the
+    ///         fault-proof game.  The bond is locked until the
+    ///         dispute resolves.
+    event StateRootDisputed(
+        uint64  indexed logIndex,
+        address indexed sequencer
+    );
+
+    /// @notice Emitted when a sequencer's bond is slashed on a
+    ///         successful challenge.  The slashed amount is
+    ///         forwarded to the recipient address.
+    event SequencerBondSlashed(
+        uint64  indexed logIndex,
+        address indexed sequencer,
+        address indexed recipient,
+        uint128 amount
+    );
+
     /* ---------------------------------------------------------- */
     /* Errors                                                     */
     /* ---------------------------------------------------------- */
 
     error NotSequencer();
+    error NotFaultProofGame();
     error SubmissionTooFrequent();
     error TooManyOutstandingRoots();
     error AlreadyClaimed();
     error InvalidBond();
     error HashChainBroken();
+    error RootMissing();
+    error AlreadyDisputed();
+    error AlreadySlashed();
+    error BondAlreadyZero();
+    error SlashTransferFailed();
     error PreviousRootMissing();
     error NotYetFinalisable();
     error AlreadyFinalised();
@@ -231,6 +255,97 @@ contract CanonStateRootSubmission is ReentrancyGuard {
     }
 
     /* ---------------------------------------------------------- */
+    /* External: markDisputed (called by faultProofGame)          */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Mark a state root as under active dispute.  Called
+    ///         by `CanonFaultProofGame.initiateChallenge` at
+    ///         dispute-game creation.  Once marked, the root
+    ///         cannot be finalised until the dispute resolves.
+    ///
+    ///         Without this gate, the sequencer's bond could be
+    ///         released via `finaliseStateRoot` after the dispute
+    ///         window expires even while a challenge game is
+    ///         still in progress — a critical bond-locking bug
+    ///         that this function fixes.
+    function markDisputed(uint64 logIndex) external nonReentrant {
+        if (msg.sender != faultProofGame) revert NotFaultProofGame();
+
+        SubmittedRoot storage r = roots[logIndex];
+        if (r.submittedAtBlock == 0) revert RootMissing();
+        if (r.finalised) revert AlreadyFinalised();
+        if (r.disputed) revert AlreadyDisputed();
+
+        r.disputed = true;
+        emit StateRootDisputed(logIndex, r.sequencer);
+    }
+
+    /* ---------------------------------------------------------- */
+    /* External: clearDisputed (called by faultProofGame)         */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Clear the `disputed` flag for a state root.  Called
+    ///         by the fault-proof game when a game settles in the
+    ///         sequencer's favour (no challenger-wins outcome),
+    ///         so the root can subsequently be finalised normally
+    ///         and the sequencer's bond released.
+    ///
+    ///         Without this, a sequencer who wins a dispute would
+    ///         have their bond locked forever (the disputed flag
+    ///         stays true, blocking `finaliseStateRoot`).
+    function clearDisputed(uint64 logIndex) external nonReentrant {
+        if (msg.sender != faultProofGame) revert NotFaultProofGame();
+
+        SubmittedRoot storage r = roots[logIndex];
+        if (r.submittedAtBlock == 0) revert RootMissing();
+        r.disputed = false;
+        // No event for the cleared case — it's the normal path
+        // after a sequencer-wins dispute; finalisation emits its
+        // own event.
+    }
+
+    /* ---------------------------------------------------------- */
+    /* External: slashSequencerBond (called by faultProofGame)    */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Slash the sequencer's bond on a successful
+    ///         challenge.  Called by the fault-proof game contract
+    ///         when a game settles `ChallengerWon` /
+    ///         `TimedOutSequencer`.  The bond is forwarded to the
+    ///         `recipient` address (typically the game contract,
+    ///         which then redistributes to challenger + treasury
+    ///         via its `_settle` flow).
+    ///
+    ///         CEI ordering: state mutation first, then external
+    ///         call.  Idempotent: a second call on the same
+    ///         logIndex reverts with `AlreadySlashed`.
+    function slashSequencerBond(uint64 logIndex, address recipient)
+        external nonReentrant
+    {
+        if (msg.sender != faultProofGame) revert NotFaultProofGame();
+        if (recipient == address(0)) revert NotSequencer();
+
+        SubmittedRoot storage r = roots[logIndex];
+        if (r.submittedAtBlock == 0) revert RootMissing();
+        if (r.bond == 0) revert BondAlreadyZero();
+
+        uint128 amount = r.bond;
+        address sequencerAddr = r.sequencer;
+
+        // Effects first.
+        r.bond = 0;
+        if (outstandingRootsCount[sequencerAddr] > 0) {
+            outstandingRootsCount[sequencerAddr]--;
+        }
+
+        // Interaction: forward the slashed bond.
+        (bool ok, ) = payable(recipient).call{value: amount}("");
+        if (!ok) revert SlashTransferFailed();
+
+        emit SequencerBondSlashed(logIndex, sequencerAddr, recipient, amount);
+    }
+
+    /* ---------------------------------------------------------- */
     /* External: revertToPriorRoot (called by faultProofGame)     */
     /* ---------------------------------------------------------- */
 
@@ -238,7 +353,7 @@ contract CanonStateRootSubmission is ReentrancyGuard {
     ///         onwards.  Only callable by the fault-proof game
     ///         contract.
     function revertStateRootsFrom(uint64 fromIdx) external nonReentrant {
-        if (msg.sender != faultProofGame) revert NotSequencer();
+        if (msg.sender != faultProofGame) revert NotFaultProofGame();
 
         // Update the floor (no-op if a lower floor is already in
         // place).

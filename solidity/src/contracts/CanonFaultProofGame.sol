@@ -8,6 +8,40 @@ import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/Reentrancy
 
 import {CanonStepVM} from "./CanonStepVM.sol";
 
+/// @notice Minimal interface for the state-root submission
+///         contract's dispute-locking, bond-slashing, flag-
+///         clearing, and per-root lookup entry points.  Used by
+///         the fault-proof game to lock the sequencer's bond when
+///         a challenge starts, to slash on challenger-wins, to
+///         clear the disputed flag on sequencer-wins so the bond
+///         can be released via `finaliseStateRoot`, and to
+///         authoritatively look up the actual submitter / state
+///         root for a disputed log index.
+interface IStateRootSubmission {
+    function markDisputed(uint64 logIndex) external;
+    function clearDisputed(uint64 logIndex) external;
+    function slashSequencerBond(uint64 logIndex, address recipient) external;
+    function revertStateRootsFrom(uint64 fromIdx) external;
+    /// @notice The canonical accessor for the per-root record.
+    ///         Returns (sequencer, stateCommit, prevLogEntryHash,
+    ///         expectedNextHash, bond, submittedAtBlock, finalised,
+    ///         disputed).
+    function roots(uint64 logIndex) external view returns (
+        address sequencer,
+        bytes32 stateCommit,
+        bytes32 prevLogEntryHash,
+        bytes32 expectedNextHash,
+        uint128 bond,
+        uint64  submittedAtBlock,
+        bool    finalised,
+        bool    disputed
+    );
+    /// @notice The deployment ID of the state-root submission
+    ///         contract; the game inherits this binding to
+    ///         prevent cross-deployment replay.
+    function deploymentId() external view returns (bytes32);
+}
+
 /// @title CanonFaultProofGame
 /// @notice The bisection game state machine on L1 (Workstream H
 ///         WUs H.6.1 – H.6.3).
@@ -79,6 +113,9 @@ contract CanonFaultProofGame is ReentrancyGuard {
         GameStatus  status;
         bytes32     deploymentId;
         uint64      lastStepBlock;
+        /// @notice The disputed log index — used to slash the
+        ///         sequencer's state-root bond on settlement.
+        uint64      disputedLogIndex;
     }
 
     /// @notice Per-game state.
@@ -156,6 +193,14 @@ contract CanonFaultProofGame is ReentrancyGuard {
         if (_treasury == address(0)) revert ZeroAddress();
         if (_stepVM == address(0)) revert ZeroAddress();
         if (_stateRootSubmission == address(0)) revert ZeroAddress();
+        // Defence-in-depth: require the state-root submission
+        // address to be a contract.  Without this, a misconfigured
+        // (EOA) address would silently accept the `markDisputed`
+        // and `slashSequencerBond` raw-calls below (EVM returns
+        // ok=true for calls to non-contract addresses), leaving
+        // the sequencer's bond unlocked.
+        if (_stateRootSubmission.code.length == 0) revert ZeroAddress();
+        if (_stepVM.code.length == 0) revert ZeroAddress();
 
         BISECTION_RESPONSE_TIMEOUT = _bisectionResponseTimeout;
         MIN_CHALLENGE_BOND = _minChallengeBond;
@@ -169,28 +214,64 @@ contract CanonFaultProofGame is ReentrancyGuard {
     /* External: initiateChallenge (WU H.6.1b)                    */
     /* ---------------------------------------------------------- */
 
+    /// @notice Initiate a challenge against the disputed state
+    ///         root at `disputedLogIndex`.  The challenger asserts
+    ///         the canonical commit should be `challengerCommit`.
+    ///
+    ///         **Authoritative lookup**: the disputed state root,
+    ///         the actual submitter (sequencer), and the
+    ///         deployment ID are looked up from
+    ///         `CanonStateRootSubmission` based on
+    ///         `disputedLogIndex`.  Caller-provided values for
+    ///         these fields would be a critical vulnerability:
+    ///         an attacker could specify a non-existent address
+    ///         as "sequencer" so the game's
+    ///         `responsible`-party gating points to an EOA that
+    ///         never responds, then time out the game and
+    ///         siphon the real sequencer's slashed bond.
     function initiateChallenge(
         uint64  disputedLogIndex,
         bytes32 challengerCommit,
         bytes32 lowCommit,
-        uint64  lowLogIndex,
-        bytes32 disputedStateRoot,
-        bytes32 deploymentId,
-        address sequencer
+        uint64  lowLogIndex
     ) external payable nonReentrant returns (uint256 gameId) {
         if (msg.value != MIN_CHALLENGE_BOND) revert InsufficientBond();
-        if (challengerCommit == disputedStateRoot)
-            revert MidpointOutOfRange();  // no actual dispute
         if (activeGameForLogIndex[disputedLogIndex] != 0)
             revert GameAlreadyExists();
 
+        // Authoritative lookup of the disputed state root + its
+        // submitter from the state-root submission contract.
+        IStateRootSubmission sub = IStateRootSubmission(stateRootSubmission);
+        (
+            address rootSequencer,
+            bytes32 rootStateCommit,
+            /* prevLogEntryHash */,
+            /* expectedNextHash */,
+            /* bond */,
+            uint64  submittedAtBlock,
+            bool    finalised,
+            /* disputed */
+        ) = sub.roots(disputedLogIndex);
+
+        // Validate the disputed root exists and is challengeable.
+        if (submittedAtBlock == 0) revert ZeroAddress();
+        if (finalised) revert GameAlreadyEnded();
+        if (challengerCommit == rootStateCommit)
+            revert MidpointOutOfRange();  // no actual dispute
+
+        // Cache the deployment ID from the state-root submission
+        // contract (the canonical source).  Caller cannot spoof
+        // a different deploymentId for cross-deployment-replay
+        // attacks.
+        bytes32 rootDeploymentId = sub.deploymentId();
+
         gameId = ++nextGameId;
         Game storage g = games[gameId];
-        g.sequencer       = sequencer;
+        g.sequencer       = rootSequencer;
         g.challenger      = msg.sender;
         g.low             = Claim({ idx: lowLogIndex, commit: lowCommit });
         g.high            = Claim({ idx: disputedLogIndex,
-                                    commit: disputedStateRoot });
+                                    commit: rootStateCommit });
         g.hasPendingMidpoint = false;
         g.depth           = 0;
         g.turn            = TurnSide.Sequencer;
@@ -198,13 +279,21 @@ contract CanonFaultProofGame is ReentrancyGuard {
         g.sequencerBond   = 0;  // funded by stateRootSubmission contract
         g.challengerBond  = uint128(msg.value);
         g.status          = GameStatus.InProgress;
-        g.deploymentId    = deploymentId;
+        g.deploymentId    = rootDeploymentId;
         g.lastStepBlock   = uint64(block.number);
+        g.disputedLogIndex = disputedLogIndex;
 
         activeGameForLogIndex[disputedLogIndex] = gameId;
 
+        // Lock the sequencer's state-root bond by marking the
+        // disputed root.  Without this, the sequencer's bond
+        // could be released via `finaliseStateRoot` after the
+        // dispute window expires while the game is still in
+        // progress — a critical bond-locking bug.
+        sub.markDisputed(disputedLogIndex);
+
         emit FaultProofGameOpened(
-            gameId, msg.sender, disputedStateRoot, challengerCommit
+            gameId, msg.sender, rootStateCommit, challengerCommit
         );
     }
 
@@ -345,19 +434,85 @@ contract CanonFaultProofGame is ReentrancyGuard {
 
     function _settle(uint256 gameId, GameStatus finalStatus) internal {
         Game storage g = games[gameId];
-        uint128 totalBonds = g.sequencerBond + g.challengerBond;
         address payable winner;
+        bool challengerWins;
 
         if (finalStatus == GameStatus.SequencerWon ||
             finalStatus == GameStatus.TimedOutChallenger) {
             winner = payable(g.sequencer);
+            challengerWins = false;
         } else {
             winner = payable(g.challenger);
+            challengerWins = true;
         }
 
         g.status = finalStatus;
-        // Clear the active-game lock.
+        // Clear the active-game lock so a re-challenge can open
+        // a new game (per OQ7's re-challenge-window resolution).
         activeGameForLogIndex[g.high.idx] = 0;
+
+        // If the challenger wins, slash the sequencer's state-root
+        // bond.  The slashed bond is forwarded to THIS contract,
+        // which then redistributes it alongside the game-level
+        // bonds.  This is the missing-on-original "sequencer's
+        // bond is slashed in full to challenger on
+        // challengerWon" path.
+        //
+        // CEI: this external call happens BEFORE we redistribute
+        // the (now-augmented) bond pool, but it doesn't allow
+        // reentrancy into `_settle` itself because the game's
+        // status is already updated and reentry would hit
+        // `g.status != InProgress` checks elsewhere.
+        // `nonReentrant` on the public entries provides
+        // belt-and-suspenders.
+        uint128 slashedSequencerBond = 0;
+        if (challengerWins) {
+            uint256 contractBalanceBefore = address(this).balance;
+            // Use a typed interface + try-catch so a failure
+            // (e.g. bond already zero / root missing) does NOT
+            // revert settlement; the game still pays out the
+            // challenger's bond.  The actual ETH delta is the
+            // canonical slashed-amount measure.
+            try IStateRootSubmission(stateRootSubmission)
+                  .slashSequencerBond(g.disputedLogIndex, address(this))
+            {
+                uint256 contractBalanceAfter = address(this).balance;
+                uint256 delta = contractBalanceAfter - contractBalanceBefore;
+                // The slashed bond is bounded by
+                // `STATE_ROOT_SUBMISSION_BOND` (≤ uint128) per the
+                // state-root submission contract's invariants;
+                // the cast is safe under that bound.
+                // forge-lint: disable-next-line(unsafe-typecast)
+                slashedSequencerBond = uint128(delta);
+                g.sequencerBond = g.sequencerBond + slashedSequencerBond;
+            } catch {
+                // Slashing failed (e.g. already-zero bond, root
+                // missing, transfer failed).  Settlement proceeds
+                // with the bonds recorded in the game; the
+                // sequencer's state-root bond stays where it was.
+            }
+        } else {
+            // Sequencer-wins path: clear the disputed flag on the
+            // state-root submission so the bond can be released
+            // via `finaliseStateRoot` after the dispute window.
+            // Try-catch so a failure here doesn't block bond
+            // redistribution to the challenger's losing bond
+            // (which now goes to the sequencer).
+            try IStateRootSubmission(stateRootSubmission)
+                  .clearDisputed(g.disputedLogIndex)
+            {
+                // Cleared; sequencer can finalise the root
+                // normally after the dispute window expires.
+            } catch {
+                // Clear failed (e.g. root missing); the disputed
+                // flag stays set.  Operator-side intervention may
+                // be needed to release the bond; settlement still
+                // proceeds.
+            }
+        }
+
+        // Recompute the total-bonds pool after possible slashing.
+        uint128 totalBonds = g.sequencerBond + g.challengerBond;
 
         // OQ8 resolution: 95% to winner, 5% to treasury.
         uint128 winnerPayout    = (totalBonds * 95) / 100;
@@ -375,6 +530,14 @@ contract CanonFaultProofGame is ReentrancyGuard {
 
         emit FaultProofGameSettled(gameId, finalStatus, winner, winnerPayout);
     }
+
+    /// @notice Receive function so `slashSequencerBond` can
+    ///         forward the slashed ETH to this contract.  The
+    ///         only legitimate source of inbound ETH is the
+    ///         state-root submission contract's slashing call;
+    ///         off-band ETH transfers are accepted but have no
+    ///         effect on game state.
+    receive() external payable {}
 
     /* ---------------------------------------------------------- */
     /* assertConsistent                                           */

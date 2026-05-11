@@ -196,6 +196,27 @@ contract CanonStepVMTest is Test {
             FIXTURE_PRE_COMMIT, uint8(0), actionFields, uint64(10), proofs);
     }
 
+    /// @notice SECURITY TEST: malformed cell values (data.length
+    ///         between 1 and 8 bytes) must REVERT rather than
+    ///         silently decode to 0.  Without this revert, an
+    ///         adversarial responder could submit a truncated
+    ///         cell value to spoof a zero balance and bypass the
+    ///         `senderBalance < amount` check.
+    function test_transfer_rejects_malformed_cell_value() public {
+        CanonStepVM.CellProof[] memory proofs = new CanonStepVM.CellProof[](2);
+        // Malformed: 5-byte cellValue (should be 9 or 0).
+        proofs[0] = _makeCellProof(
+            0, 1, 10, hex"01020304ff", FIXTURE_PRE_COMMIT);
+        proofs[1] = _makeCellProof(
+            0, 1, 20, _encodeCbeNat(50), FIXTURE_PRE_COMMIT);
+
+        bytes memory actionFields = abi.encodePacked(
+            uint64(1), uint64(10), uint64(20), uint64(10));
+        vm.expectRevert(CanonStepVM.MalformedCellValue.selector);
+        stepVM.executeStep(
+            FIXTURE_PRE_COMMIT, uint8(0), actionFields, uint64(10), proofs);
+    }
+
     function test_transfer_rejects_insufficient_balance() public {
         CanonStepVM.CellProof[] memory proofs = new CanonStepVM.CellProof[](2);
         // Sender has 5 but tries to send 100.

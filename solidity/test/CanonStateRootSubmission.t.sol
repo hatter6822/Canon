@@ -192,8 +192,56 @@ contract CanonStateRootSubmissionTest is Test {
 
     function test_revertStateRootsFrom_only_faultProofGame() public {
         vm.prank(stranger);
-        vm.expectRevert(CanonStateRootSubmission.NotSequencer.selector);
+        vm.expectRevert(CanonStateRootSubmission.NotFaultProofGame.selector);
         registry.revertStateRootsFrom(5);
+    }
+
+    /* -------- markDisputed (new audit-fix) -------- */
+
+    function test_markDisputed_only_faultProofGame() public {
+        vm.prank(stranger);
+        vm.expectRevert(CanonStateRootSubmission.NotFaultProofGame.selector);
+        registry.markDisputed(5);
+    }
+
+    function test_markDisputed_rejects_missing_root() public {
+        vm.prank(faultProofGame);
+        vm.expectRevert(CanonStateRootSubmission.RootMissing.selector);
+        registry.markDisputed(999);
+    }
+
+    /* -------- clearDisputed (new audit-fix) -------- */
+
+    function test_clearDisputed_only_faultProofGame() public {
+        vm.prank(stranger);
+        vm.expectRevert(CanonStateRootSubmission.NotFaultProofGame.selector);
+        registry.clearDisputed(5);
+    }
+
+    function test_clearDisputed_rejects_missing_root() public {
+        vm.prank(faultProofGame);
+        vm.expectRevert(CanonStateRootSubmission.RootMissing.selector);
+        registry.clearDisputed(999);
+    }
+
+    /* -------- slashSequencerBond (new audit-fix) -------- */
+
+    function test_slashSequencerBond_only_faultProofGame() public {
+        vm.prank(stranger);
+        vm.expectRevert(CanonStateRootSubmission.NotFaultProofGame.selector);
+        registry.slashSequencerBond(5, address(0xCAFE));
+    }
+
+    function test_slashSequencerBond_rejects_zero_recipient() public {
+        vm.prank(faultProofGame);
+        vm.expectRevert(CanonStateRootSubmission.NotSequencer.selector);
+        registry.slashSequencerBond(5, address(0));
+    }
+
+    function test_slashSequencerBond_rejects_missing_root() public {
+        vm.prank(faultProofGame);
+        vm.expectRevert(CanonStateRootSubmission.RootMissing.selector);
+        registry.slashSequencerBond(999, address(0xCAFE));
     }
 
     function test_revertStateRootsFrom_updates_range() public {
