@@ -102,6 +102,16 @@ lean_exe «canon-replay» where
 lean_lib ToolsCommon where
   roots := #[`Tools.Common]
 
+/-- Content-name-discipline audit library.  Exposes
+    `Tools.NamingAudit` for the `naming_audit` executable. -/
+lean_lib NamingAuditLib where
+  roots := #[`Tools.NamingAudit]
+
+/-- No-deferrals-policy audit library.  Exposes
+    `Tools.DeferralAudit` for the `deferral_audit` executable. -/
+lean_lib DeferralAuditLib where
+  roots := #[`Tools.DeferralAudit]
+
 /-- WU 1.11 (Phase 1) TCB-audit executable.  Enumerates the *direct
     imports* of the trusted-core source files (`Kernel.lean`,
     `RBMapLemmas.lean`) and compares each to the allowlist at
@@ -131,6 +141,42 @@ lean_exe count_sorries where
     `signingInput := ByteArray.empty`) blocks merge automatically. -/
 lean_exe stub_audit where
   root := `Tools.StubAudit
+  supportInterpreter := true
+
+/-- Content-name discipline enforcer.  Scans every `.lean` file
+    under `LegalKernel/` and `Tools/` for file names + declaration
+    identifiers containing provenance / process tokens (per
+    `CLAUDE.md`'s "Names describe content, never provenance"
+    rule).  Forbidden tokens include `missing`, `deferred`,
+    `supplemental`, `helpers`, `misc`, `wu1`/`wu2`/..., `phase0`/
+    `phase1`/..., `audit1`/`audit2`/..., `_old`, `_new`, `_v2`,
+    `_tmp`, `_todo`, `_fixme`, etc.  Exact list at
+    `Tools/NamingAudit.lean` (`forbiddenTokens`).
+
+    Exit semantics:
+      * 0 — every file + identifier is content-driven.
+      * 1 — at least one forbidden-token match found.
+
+    Allowlist (rare exceptions): `tools/naming_allowlist.txt`. -/
+lean_exe naming_audit where
+  root := `NamingAudit
+  supportInterpreter := true
+
+/-- No-deferrals-policy audit.  Scans every `.lean` file under
+    `LegalKernel/` and `Tools/` for deferral markers in
+    docstrings, comments, or status tables — `DEFERRED`,
+    `PARTIAL`, `deferred to follow-up`, `round-trip-conditional`,
+    `multi-day work`, `not yet provable`, `TODO:`, `FIXME:`,
+    etc.  Premise: deferrals weaken the project's no-shortcuts
+    discipline; either ship the proof or don't ship the theorem.
+
+    Exit semantics:
+      * 0 — no deferral markers.
+      * 1 — at least one marker found.
+
+    Allowlist: `tools/deferral_allowlist.txt`. -/
+lean_exe deferral_audit where
+  root := `DeferralAudit
   supportInterpreter := true
 
 /-- Workstream LX (LX.4) — shared utilities consumed by the Lex

@@ -312,6 +312,31 @@ theorem bridgePolicy_rejects_revokeLocalPolicy :
   intro ⟨_, h⟩
   exact absurd h (by simp [bridgeAuthorizedAction])
 
+/-- Workstream H §12.1 — the bridge policy rejects
+    `faultProofChallenge` actions by the bridge actor.  Fault-proof
+    challenges are user-initiated; the bridge actor's role is
+    attesting L1 events, not adjudication. -/
+theorem bridgePolicy_rejects_faultProofChallenge
+    (bh : ByteArray) (sIdx eIdx : Disputes.LogIndex) (cc : ByteArray) :
+    ¬ bridgePolicy.authorized bridgeActor
+        (.faultProofChallenge bh sIdx eIdx cc) := by
+  unfold bridgePolicy
+  intro ⟨_, h⟩
+  exact absurd h (by simp [bridgeAuthorizedAction])
+
+/-- Workstream H §12.1 — the bridge policy rejects
+    `faultProofResolution` actions by the bridge actor.  Resolution
+    mirrors are emitted by the runtime's L1-event watcher under its
+    own deployment-specific authority, NOT by the bridge actor. -/
+theorem bridgePolicy_rejects_faultProofResolution
+    (bh : ByteArray) (gid : Nat) (winner : ActorId)
+    (rfi : Disputes.LogIndex) :
+    ¬ bridgePolicy.authorized bridgeActor
+        (.faultProofResolution bh gid winner rfi) := by
+  unfold bridgePolicy
+  intro ⟨_, h⟩
+  exact absurd h (by simp [bridgeAuthorizedAction])
+
 /-! ## Cross-actor rejection
 
 The bridge policy authorises actions ONLY when the signer is the

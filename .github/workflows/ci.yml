@@ -147,3 +147,23 @@ jobs:
         # must run `lake exe lex_codegen` and commit the
         # regenerated files.
         run: lake exe lex_codegen --check
+
+      - name: lake exe naming_audit (content-name discipline gate)
+        # Enforces CLAUDE.md's "Names describe content, never
+        # provenance" rule for file names AND declaration
+        # identifiers.  Non-zero exit blocks the merge.
+        # Allowlist (rare exceptions): `tools/naming_allowlist.txt`.
+        run: lake exe naming_audit
+
+      - name: lake exe deferral_audit (no-deferrals policy gate)
+        # Enforces CLAUDE.md's no-deferrals policy: a workstream
+        # is not complete while any of its theorems, modules, or
+        # docstrings document a deferral.  Scans every `.lean`
+        # file under `LegalKernel/` and `Tools/` for forbidden
+        # phrases like `DEFERRED`, `PARTIAL`, `deferred to follow-
+        # up`, `round-trip-conditional`, `not yet provable`,
+        # `multi-day work`, `TODO:`, `FIXME:`, `XXX:`.  **No
+        # allowlist** — the fix is to ship the missing proof /
+        # implementation, OR rewrite the comment without
+        # deferral language.  Non-zero exit blocks the merge.
+        run: lake exe deferral_audit

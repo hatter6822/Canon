@@ -444,5 +444,70 @@ theorem applyActionToBridgeState_withdraw
   unfold applyActionToBridgeState
   rfl
 
+/-! ### Workstream H — fault-proof actions don't touch the bridge state -/
+
+/-- Workstream H: `applyActionToBridgeState` on `faultProofChallenge`
+    is the identity (the action is advisory; bridge state is not
+    mutated). -/
+theorem applyActionToBridgeState_faultProofChallenge
+    (bs : BridgeState) (bh : ByteArray) (sIdx eIdx : Disputes.LogIndex)
+    (cc : ByteArray) (idx : Nat) :
+    applyActionToBridgeState bs (.faultProofChallenge bh sIdx eIdx cc) idx = bs := by
+  unfold applyActionToBridgeState
+  rfl
+
+/-- Workstream H: `applyActionToBridgeState` on
+    `faultProofResolution` is the identity. -/
+theorem applyActionToBridgeState_faultProofResolution
+    (bs : BridgeState) (bh : ByteArray) (gid : Nat) (winner : ActorId)
+    (rfi : Disputes.LogIndex) (idx : Nat) :
+    applyActionToBridgeState bs (.faultProofResolution bh gid winner rfi) idx = bs := by
+  unfold applyActionToBridgeState
+  rfl
+
+/-- Workstream H: after a bridge-admissible `faultProofChallenge`,
+    `totalDeposited` and `totalWithdrawn` are unchanged.  Same shape
+    as `accounting_delta_declareLocalPolicy`; the action is
+    advisory and only mutates the signer's nonce. -/
+theorem accounting_delta_faultProofChallenge
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P d es st)
+    (hact : ∃ bh sIdx eIdx cc,
+              st.action = .faultProofChallenge bh sIdx eIdx cc)
+    (r : ResourceId) :
+    totalDeposited (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalDeposited es r ∧
+    totalWithdrawn (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalWithdrawn es r := by
+  obtain ⟨bh, sIdx, eIdx, cc, hst⟩ := hact
+  apply accounting_delta_non_bridge verify P d es st idx h
+  · intro r' rec am dep heq
+    rw [hst] at heq; cases heq
+  · intro r' s' am rcp heq
+    rw [hst] at heq; cases heq
+
+/-- Workstream H: after a bridge-admissible `faultProofResolution`,
+    `totalDeposited` and `totalWithdrawn` are unchanged. -/
+theorem accounting_delta_faultProofResolution
+    (verify : PublicKey → ByteArray → Signature → Bool)
+    (P : AuthorityPolicy) (d : ByteArray) (es : ExtendedState)
+    (st : SignedAction) (idx : Nat)
+    (h : BridgeAdmissibleWith verify P d es st)
+    (hact : ∃ bh gid winner rfi,
+              st.action = .faultProofResolution bh gid winner rfi)
+    (r : ResourceId) :
+    totalDeposited (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalDeposited es r ∧
+    totalWithdrawn (apply_bridge_admissible_with verify P d es st idx h) r =
+      totalWithdrawn es r := by
+  obtain ⟨bh, gid, winner, rfi, hst⟩ := hact
+  apply accounting_delta_non_bridge verify P d es st idx h
+  · intro r' rec am dep heq
+    rw [hst] at heq; cases heq
+  · intro r' s' am rcp heq
+    rw [hst] at heq; cases heq
+
 end Bridge
 end LegalKernel
