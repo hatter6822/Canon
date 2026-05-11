@@ -45,20 +45,23 @@ def tests : List TestCase :=
         let path_7 := smtPathFromNat 7 4
         assert (path_5 ≠ path_7) "distinct bounded nats have distinct paths"
     }
-  , { name := "#258 value-level: equal paths imply equal nats (under bound)"
+  , { name := "#258 value-level: equal paths imply equal nats (audit-3 strengthened)"
     , body := do
-        -- 42 has bits 101010 in low 6 positions.  At smtHeight = 8
-        -- it has a unique path.  Compute and verify reflexivity.
-        let _h_eq : smtPathFromNat 42 8 = smtPathFromNat 42 8 := rfl
-        -- Applying the injectivity theorem to this reflexive
-        -- equation yields 42 = 42, which holds trivially.  The
-        -- value of the test is that the theorem's signature
-        -- accepts the bound hypothesis.
-        let h_bound : 42 < 2 ^ 8 := by decide
-        let _proof :
-            smtPathFromNat_inj_under_bound 42 42 8 h_bound h_bound rfl = rfl :=
-          rfl
-        assert true "injectivity-theorem signature accepts bound hypothesis"
+        -- Audit-3 strengthening: the original degenerate test only
+        -- exercised the reflexive `42 = 42` case.  This expanded
+        -- test exercises the SUBSTANTIVE direction by verifying
+        -- distinct bounded nats produce distinct paths (the
+        -- contrapositive of the injectivity claim).
+        let p3 := smtPathFromNat 3 4
+        let p5 := smtPathFromNat 5 4
+        -- 3 = 0b0011, 5 = 0b0101 in low 4 bits — paths differ.
+        assert (p3 ≠ p5) "smtPathFromNat 3 4 ≠ smtPathFromNat 5 4"
+        -- And the path lengths match smtHeight.
+        assertEq (expected := 4) (actual := p3.length) "smtHeight=4"
+        assertEq (expected := 4) (actual := p5.length) "smtHeight=4"
+        -- Theorem signature check.
+        let _ := @smtPathFromNat_inj_under_bound
+        assert true "injectivity theorem signature"
     }
     -- ## #263 DISCHARGED — read-only / write decomposition
   , { name := "#263: requiredCells_eq_readOnly_append_writeCells API stable"
@@ -138,31 +141,46 @@ def tests : List TestCase :=
         let _ := @applyTransition_rejects_malformed_midpoint
         assert true "API exists"
     }
-    -- ## NEW: substantive theorems closed in audit-2
-  , { name := "#213 substantive: commitState_after_setBalance_value_injective API stable"
+    -- ## audit-3 honest forms: practical distinguish-inputs
+  , { name := "#213 byte-injectivity (unconditional) API stable"
+    , body := do
+        let _ := @commitState_setBalance_bytes_inj_under_collision_free
+        assert true "API exists"
+    }
+  , { name := "#213 value-form (round-trip-conditional packager) API stable"
     , body := do
         let _ := @commitState_after_setBalance_value_injective
+        assert true "API exists (round-trip hypothesis required)"
+    }
+  , { name := "#229 practical: kernelStep_encode_distinguishes_inputs API stable"
+    , body := do
+        let _ := @kernelStep_encode_distinguishes_inputs
         assert true "API exists"
     }
-  , { name := "#229: kernelStep_encode_injective_via_roundtrip API stable"
+  , { name := "#229 round-trip packager: kernelStep_encode_injective_via_roundtrip API stable"
     , body := do
         let _ := @kernelStep_encode_injective_via_roundtrip
-        assert true "API exists"
+        assert true "API exists (round-trip hypothesis required)"
     }
-  , { name := "#229: kernelStep_encode_distinguishes_via_roundtrip API stable"
+  , { name := "#229 round-trip packager: kernelStep_encode_distinguishes_via_roundtrip API stable"
     , body := do
         let _ := @kernelStep_encode_distinguishes_via_roundtrip
+        assert true "API exists (round-trip hypothesis required)"
+    }
+  , { name := "#272 practical: gameState_encode_distinguishes_inputs API stable"
+    , body := do
+        let _ := @gameState_encode_distinguishes_inputs
         assert true "API exists"
     }
-  , { name := "#272: gameState_encode_injective_via_roundtrip API stable"
+  , { name := "#272 round-trip packager: gameState_encode_injective_via_roundtrip API stable"
     , body := do
         let _ := @gameState_encode_injective_via_roundtrip
-        assert true "API exists"
+        assert true "API exists (round-trip hypothesis required)"
     }
-  , { name := "#272: gameState_encode_distinguishes_via_roundtrip API stable"
+  , { name := "#272 round-trip packager: gameState_encode_distinguishes_via_roundtrip API stable"
     , body := do
         let _ := @gameState_encode_distinguishes_via_roundtrip
-        assert true "API exists"
+        assert true "API exists (round-trip hypothesis required)"
     }
   , { name := "#261.mint: mint_creates_balance_cell API stable"
     , body := do

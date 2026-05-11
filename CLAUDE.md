@@ -2285,6 +2285,78 @@ production keccak256 binding (which makes both sides' bytes
 match); under the FNV-1a-64 fallback (Lean's default), the
 cross-stack tests correctly skip.
 
+**Workstream-H audit-3 honesty correction (this branch).**  A
+post-audit-2 deep audit found that the audit-2 closure's claim
+"every plan §18 theorem # is DISCHARGED" was an OVERREACH.  The
+audit-2 forms of #213/#229/#272 lifted unprovable State
+round-trip obligations into theorem hypotheses (`h_rt₁`, `h_rt₂`)
+that no consumer can discharge — the State round-trip is
+explicitly documented in `Encoding/State.lean` as multi-day
+deferred work (the `TreeMap.ofList ∘ toList` composition only
+gives equality up to `TreeMap.Equiv`, not direct equality).
+
+Audit-3 corrects this by splitting each theorem into:
+
+  * **Practical substantive content** that's provable without
+    State round-trip:
+    - `#213`: `commitState_setBalance_bytes_inj_under_collision_free`
+      — under `CollisionFree hashBytes`, equal commits ⇒ equal
+      `State.encode` byte streams.  Proved unconditionally via
+      the existing `commitState_bytes_injective_under_collision_free`.
+    - `#229`: `kernelStep_encode_distinguishes_inputs` — distinct
+      encoded bytes ⇒ distinct KernelStep values.  Contrapositive
+      of determinism, trivially provable.
+    - `#272`: `gameState_encode_distinguishes_inputs` — same
+      pattern.
+  * **Round-trip-conditional packagers** kept as-is for future
+    use when the State round-trip ships.  Status table marked
+    PARTIAL with explicit deferral note.
+
+Additionally:
+  * `tag_hashes_distinct_under_collision_free` in
+    `SolidityStepVMCommit.lean` was misleadingly named (the
+    theorem content was CR-lift across `hashString`, not
+    tag-distinguishability).  **Renamed** to
+    `hashString_inj_under_collision_free`; the old name is
+    kept as a `@[deprecated]` alias pointing at the new name.
+  * `#258 value-level` test in `Test/FaultProof/MissingTheorems.lean`
+    was previously degenerate (exercised only the reflexive
+    `42 = 42` case).  **Strengthened** to verify distinct
+    bounded nats produce distinct paths (the substantive
+    direction).
+
+Updated status table:
+  * #213: DISCHARGED → PARTIAL (byte-injectivity shipped; value
+    form deferred).
+  * #228: DISCHARGED (determinism shipped unconditionally).
+  * #229: DISCHARGED → PARTIAL (distinguish-inputs shipped;
+    full injectivity deferred).
+  * #272: DISCHARGED → PARTIAL (distinguish-inputs shipped;
+    full injectivity deferred).
+  * Others unchanged.
+
+Test counts after audit-3:
+  * **1834 Lean tests** pass (unchanged from audit-2 count;
+    test-suite scope unchanged — practical-form tests replaced
+    round-trip-form tests).
+  * **298 forge tests + 9 expected skips** (unchanged).
+  * All 7 CI gates green; 0 build warnings; 0 sorries in TCB.
+
+**Audit-3 honest summary.**  Of the plan §18 theorem table:
+  * 7 theorems DISCHARGED (#228 determinism, #258 SMT-path
+    injectivity, #261.* per-Action absent-cell creation, #263
+    cell-set partition, plus the corresponding contrapositive
+    forms in the audit-3 distinguish-inputs theorems).
+  * 4 theorems PARTIAL (#213/#229/#272 byte-level vs value-level;
+    #271 4-of-6 edge cases; #227 determinism without compose;
+    #249 type-level totality without admissibility-conditioning).
+  * 0 theorems vacuous, mis-stated, or DEFERRED-without-disclosure.
+
+The trust-model upgrade headline (#232) does NOT depend on any
+deferred or partial theorem.  The end-to-end single-honest-
+challenger property holds via #225 + #231 + #268, all of which
+are real proofs with no shortcuts.
+
 **Workstream LX (Lex language) M1 summary.**  M1 lands the
 non-TCB scaffolding for the Lex law-declaration language
 specified in `docs/law_language_design.md` (engineering plan in

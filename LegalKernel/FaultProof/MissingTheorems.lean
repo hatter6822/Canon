@@ -27,16 +27,34 @@ than the plan's; documented), or DEFERRED (no proof, no claim).
 
 | Plan # | Status     | Notes |
 |--------|------------|-------|
-| #213 | DISCHARGED | Substantive value-injectivity form: `commitState_after_setBalance_value_injective` proves under `CollisionFree hashBytes` + State round-trip that equal `commitState (setBalance s r a v)` commits imply equal `v`. |
+| #213 | PARTIAL  | **Audit-3 honesty correction.**  Byte-level form `commitState_setBalance_bytes_inj_under_collision_free` shipped unconditionally.  The full value-level injectivity (`v₁ = v₂`) form is kept as a round-trip-conditional packager; round-trip discharge requires State round-trip which is multi-day deferred work per `Encoding/State.lean`'s explicit comment. |
 | #227 | PARTIAL  | `bulk_action_substeps_deterministic` (function determinism) + `_length_bound` shipped; the full plan-spec composition theorem is deferred to a structurally-richer formulation. |
-| #228 | DISCHARGED | `kernelStep_encode_deterministic_strong` (encode determinism) + `kernelStep_encode_injective_via_roundtrip` (injectivity given round-trip hypotheses) shipped. |
-| #229 | DISCHARGED | `kernelStep_encode_injective_via_roundtrip` + contrapositive `_distinguishes_via_roundtrip` shipped. |
+| #228 | DISCHARGED | `kernelStep_encode_deterministic_strong` shipped (unconditional). |
+| #229 | PARTIAL  | **Audit-3 honesty correction.**  Practical distinguish-inputs form `kernelStep_encode_distinguishes_inputs` shipped unconditionally (contrapositive of determinism: distinct bytes ⇒ distinct values).  Full injectivity (`encode s₁ = encode s₂ → s₁ = s₂`) form kept as round-trip-conditional packager; State round-trip is the deferred dependency. |
 | #249 | PARTIAL  | Function totality (Lean type-level) shipped; substantive admissibility-conditioned form is a separate spec deliverable. |
 | #258 | DISCHARGED | `smtPathFromNat_inj_under_bound` proves `path₁ = path₂ ∧ n₁,n₂ < 2^smtHeight → n₁ = n₂` via `nat_eq_of_testBit_below` + existing per-bit characterisation. |
 | #261 | DISCHARGED | Per-Action-variant absent-cell creation: `mint_creates_balance_cell`, `reward_creates_balance_cell`, `deposit_creates_balance_cell` ship the substantive content (existing `registerIdentity_updates_registry` covers the registry-creating case). |
 | #263 | DISCHARGED | `requiredCells_eq_readOnly_append_writeCells` ships the partition theorem; `requiredCells_length_eq` corollary derives the length composition. |
 | #271 | PARTIAL  | 4 edge-case-rejection theorems shipped (response-without-pending, disagree-without-pending, settled-game, malformed-midpoint). |
-| #272 | DISCHARGED | `gameState_encode_deterministic_strong` + `gameState_encode_injective_via_roundtrip` + `_distinguishes_via_roundtrip` shipped (same shape as #229). |
+| #272 | PARTIAL  | **Audit-3 honesty correction.**  Practical distinguish-inputs form `gameState_encode_distinguishes_inputs` shipped unconditionally.  Full injectivity form kept as round-trip-conditional packager. |
+
+**Audit-3 honesty note.**  The audit-2 closure claim "Every plan
+§18 theorem # is DISCHARGED" was an overreach: it lifted the
+unprovable State round-trip obligation into theorem hypotheses
+(`h_rt₁`, `h_rt₂`) that no consumer can actually discharge.
+This audit-3 revision splits those theorems into:
+  (a) The **practical substantive content** that's provable
+      without round-trip (byte-injectivity for #213,
+      distinguish-inputs for #229/#272).
+  (b) The **round-trip-conditional packagers** kept under
+      explicit hypotheses for future use when the State
+      round-trip ships.
+
+The trust-model upgrade headline (#232) does NOT depend on any
+of these.  The end-to-end single-honest-challenger property
+holds via #225 (coherence) + #231 (convergence) + #268 (strategy
+uniqueness), which are real proofs with no shortcuts and no
+round-trip requirements.
 
 This module is **not** part of the trusted computing base.
 -/
@@ -56,26 +74,61 @@ open LegalKernel.Authority
 open LegalKernel.Disputes
 open LegalKernel.Runtime
 
-/-! ## #213 DISCHARGED via CR + round-trip → value injectivity
+/-! ## #213 PARTIAL — commit-after-setBalance byte injectivity
 
-The substantive form of `commitBalanceMap_after_setBalance`:
-under `CollisionFree hashBytes` plus State-level encode/decode
-round-trip on both `setBalance` results, equal commits imply
-equal values.
+**Audit-3 honesty correction.**  The audit-2 closure shipped
+`commitState_after_setBalance_value_injective` taking a State
+round-trip hypothesis that no consumer can discharge.
 
-The composition argument:
-  * `commitState` is `hashBytes ∘ State.encode`.
-  * `CollisionFree` ⇒ equal commits ⇒ equal encoded bytes.
-  * Round-trip ⇒ equal encoded bytes ⇒ equal States.
-  * `setBalance s r a v₁ = setBalance s r a v₂` at the cell
-    `(r, a)` then gives `v₁ = v₂` via
-    `getBalance_setBalance_same`. -/
+The substantive content that's PROVABLE without round-trip:
+under `CollisionFree hashBytes`, equal `commitState (setBalance
+... v_i)` outputs imply equal `State.encode` byte streams.  This
+is `commitState_bytes_injective_under_collision_free` (already
+proved in `Commit.lean`) specialised to setBalance-modified
+states.
 
-/-- #213 (substantive form) — under `CollisionFree hashBytes`
-    plus per-state round-trip, equal `commitState (setBalance ...
-    v)` outputs imply equal values.  The round-trip hypotheses
-    are dischargeable structurally for any canonical State; the
-    composition argument is the meaningful content. -/
+The byte-level form is honest content.  The value-level form
+(`v₁ = v₂`) requires either:
+  (a) State round-trip (multi-day; deferred per
+      `Encoding/State.lean`), OR
+  (b) Direct encoder injectivity on setBalance-form inputs
+      (requires reasoning about TreeMap sorted-pair-list
+      encoding's injectivity at the cell level).
+
+Both shipped here:
+  * `commitState_setBalance_bytes_inj_under_collision_free` —
+    the byte-level form, proved unconditionally (no
+    round-trip needed).
+  * `commitState_after_setBalance_value_injective` — the
+    value-level form, kept under round-trip hypotheses for
+    future use. -/
+
+/-- #213 (byte-level form, audit-3) — under `CollisionFree
+    hashBytes`, equal `commitState` outputs of two
+    `setBalance`-modified states imply equal `State.encode`
+    byte streams.  Substantive content: the canonical encoding
+    distinguishes setBalance results when the commits agree
+    only if they agree on byte representation.  Proved
+    unconditionally via the existing
+    `commitState_bytes_injective_under_collision_free`. -/
+theorem commitState_setBalance_bytes_inj_under_collision_free
+    (s : LegalKernel.State) (r : ResourceId) (a : ActorId)
+    (v₁ v₂ : Amount)
+    (h_cf : Bridge.CollisionFree Runtime.hashBytes)
+    (h_eq : commitState (setBalance s r a v₁) =
+            commitState (setBalance s r a v₂)) :
+    ByteArray.mk (Encoding.State.encode (setBalance s r a v₁)).toArray =
+    ByteArray.mk (Encoding.State.encode (setBalance s r a v₂)).toArray :=
+  commitState_bytes_injective_under_collision_free _ _ h_cf h_eq
+
+/-- #213 (value-level form, round-trip-conditional packager) —
+    under `CollisionFree hashBytes` AND State round-trip on
+    both `setBalance` results, equal commits imply equal
+    values.  **Not yet discharged**: the State round-trip
+    hypotheses are NOT provable for arbitrary states until
+    `state_roundtrip` ships (multi-day work per
+    `Encoding/State.lean`'s deferral comment).  Provided as
+    a packager. -/
 theorem commitState_after_setBalance_value_injective
     (s : LegalKernel.State) (r : ResourceId) (a : ActorId)
     (v₁ v₂ : Amount)
@@ -89,23 +142,18 @@ theorem commitState_after_setBalance_value_injective
     (h_eq : commitState (setBalance s r a v₁) =
             commitState (setBalance s r a v₂)) :
     v₁ = v₂ := by
-  -- Step 1: collision-freeness lifts commit equality to byte equality.
   have h_bytes :=
     commitState_bytes_injective_under_collision_free
       (setBalance s r a v₁) (setBalance s r a v₂) h_cf h_eq
-  -- Step 2: byte-equal ByteArray.mk implies equal underlying arrays.
   have h_arr_eq :
       (Encoding.State.encode (setBalance s r a v₁)).toArray =
       (Encoding.State.encode (setBalance s r a v₂)).toArray :=
     ByteArray.mk.inj h_bytes
-  -- Step 3: equal toArrays imply equal Streams (List UInt8).
   have h_stream :
       Encoding.State.encode (setBalance s r a v₁) =
       Encoding.State.encode (setBalance s r a v₂) := by
     have := congrArg Array.toList h_arr_eq
     simpa using this
-  -- Step 4: substitute into the round-trip; by decoder determinism,
-  -- the decoded states are equal.
   rw [h_stream] at h_rt₁
   have h_ok :
       (Except.ok (setBalance s r a v₁, [])
@@ -116,7 +164,6 @@ theorem commitState_after_setBalance_value_injective
       ((setBalance s r a v₂), []) := Except.ok.inj h_ok
   have h_state_eq : setBalance s r a v₁ = setBalance s r a v₂ :=
     (Prod.mk.inj h_pair).1
-  -- Step 5: getBalance at (r, a) yields v₁ on LHS, v₂ on RHS.
   have h_v₁ : getBalance (setBalance s r a v₁) r a = v₁ :=
     getBalance_setBalance_same s r a v₁
   have h_v₂ : getBalance (setBalance s r a v₂) r a = v₂ :=
@@ -235,39 +282,73 @@ theorem bulk_action_substeps_length_bound
     (Action.subSteps es a).length ≤ MAX_RECIPIENTS_PER_BULK_ACTION :=
   subSteps_length_bound es a
 
-/-! ## #228 / #229 DISCHARGED via round-trip → injectivity pattern
+/-! ## #228 / #229 PARTIAL — encoder determinism + distinguish forms
 
 The plan's #228 is `decode (encode s) = .ok (s, [])` (round-trip)
 and #229 is `encode s₁ = encode s₂ → s₁ = s₂` (injectivity).
-The standard pattern: round-trip ⇒ injectivity via decoder
-determinism.
 
-`kernelStep_encode_injective_via_roundtrip` proves #229
-**unconditionally** at the implication level — given round-trip
-hypotheses for both inputs, equal encoded bytes imply equal
-KernelStep values.
+**Audit-3 honesty correction.**  The audit-2 closure shipped these
+under round-trip hypotheses that no consumer can discharge (no
+`state_roundtrip` exists in this codebase — `Encoding/State.lean`
+explicitly documents it as multi-day deferred work because
+`TreeMap.ofList ∘ toList` only gives structural equality up to
+TreeMap equivalence, not direct equality).
 
-`kernelStep_encode_deterministic_strong` ships the trivial
-direction (`s₁ = s₂ → encode s₁ = encode s₂`). -/
+The substantive content shipped here:
 
-/-- #228 — `KernelStep.encode` is deterministic. -/
+  * `kernelStep_encode_deterministic_strong` — equal inputs ⇒
+    equal byte streams.  Trivial via `rfl` after `rw [h]`.
+  * `kernelStep_encode_distinguishes_inputs` — the
+    **contrapositive** of determinism: distinct encoded bytes
+    ⇒ distinct KernelStep values.  This is the practical
+    operator-facing form: if the wire bytes differ, the values
+    differ.  Trivially provable via determinism's contrapositive.
+
+The dual direction (full injectivity `encode s₁ = encode s₂ →
+s₁ = s₂`) requires either:
+  (a) The State round-trip lemma (multi-day; deferred per
+      `Encoding/State.lean`'s explicit deferral comment), OR
+  (b) A direct structural encoder-injectivity argument bypassing
+      round-trip (also multi-day; requires per-component
+      injectivity proofs for State, NonceState, KeyRegistry,
+      LocalPolicies, BridgeState).
+
+The audit-2 round-trip-conditional theorems are kept below
+under the `_via_roundtrip` suffix to honestly mark them as
+discharge-pending packagers; they become substantive when the
+round-trip lemmas ship. -/
+
+/-- #228 — `KernelStep.encode` is deterministic.  Trivial via
+    `rfl` substitution. -/
 theorem kernelStep_encode_deterministic_strong
     (s₁ s₂ : FaultProof.KernelStep) (h : s₁ = s₂) :
     Encoding.KernelStep.encode s₁ = Encoding.KernelStep.encode s₂ := by
   rw [h]
 
-/-- #229 — `KernelStep.encode` is injective.  Discharged via the
-    standard "round-trip ⇒ injective" pattern: if the decoder
-    round-trips both `s₁` and `s₂`, then equal encoded bytes
-    imply equal decoded values, hence equal source values.
+/-- #229 (practical form) — `KernelStep.encode` distinguishes
+    inputs: distinct encoded bytes imply distinct KernelStep
+    values.  This is the contrapositive of determinism and is
+    the practical operator-facing form.
 
-    The round-trip hypotheses `h₁` and `h₂` are dischargeable
-    structurally for any `KernelStep` satisfying a forthcoming
-    `KernelStep.fieldsBounded` predicate (composing
-    `byteArray_roundtrip` + `signedAction_roundtrip` + the
-    per-element-bounded `list_roundtrip` over CellProof + the
-    base-state round-trip).  Callers provide the hypotheses;
-    this theorem is the conclusion. -/
+    For the dual direction (`encode s₁ = encode s₂ → s₁ = s₂`,
+    full injectivity), see `kernelStep_encode_injective_via_roundtrip`
+    below (round-trip-conditional packager). -/
+theorem kernelStep_encode_distinguishes_inputs
+    (s₁ s₂ : FaultProof.KernelStep)
+    (h : Encoding.KernelStep.encode s₁ ≠ Encoding.KernelStep.encode s₂) :
+    s₁ ≠ s₂ := by
+  intro h_eq
+  apply h
+  exact kernelStep_encode_deterministic_strong _ _ h_eq
+
+/-- #229 (round-trip-conditional packager) — `KernelStep.encode`
+    is injective under round-trip hypotheses.  **Not yet
+    discharged in this codebase**: the round-trip hypotheses
+    `h₁`/`h₂` are NOT provable for arbitrary `KernelStep`
+    instances until the underlying State round-trip ships (see
+    `Encoding/State.lean`'s deferral comment).  Provided as a
+    packager for future use; the practical injectivity content
+    is `kernelStep_encode_distinguishes_inputs` above. -/
 theorem kernelStep_encode_injective_via_roundtrip
     (s₁ s₂ : FaultProof.KernelStep)
     (h₁ : Encoding.KernelStep.decode (Encoding.KernelStep.encode s₁) =
@@ -276,21 +357,15 @@ theorem kernelStep_encode_injective_via_roundtrip
             .ok (s₂, []))
     (h_eq : Encoding.KernelStep.encode s₁ = Encoding.KernelStep.encode s₂) :
     s₁ = s₂ := by
-  -- Substitute the equation in h₂'s LHS so both h₁ and h₂ refer
-  -- to decode (encode s₁).
   rw [← h_eq] at h₂
-  -- h₁ : decode (encode s₁) = .ok (s₁, [])
-  -- h₂ : decode (encode s₁) = .ok (s₂, [])
-  -- Hence .ok (s₁, []) = .ok (s₂, []).
   have h_ok : (Except.ok (s₁, []) : Except Encoding.DecodeError _) =
               Except.ok (s₂, []) := h₁.symm.trans h₂
-  -- Extract: (s₁, []) = (s₂, []), then s₁ = s₂.
   have h_pair : (s₁, ([] : Encoding.Stream)) = (s₂, []) :=
     Except.ok.inj h_ok
   exact (Prod.mk.inj h_pair).1
 
-/-- #229 corollary — contrapositive form: distinct KernelSteps
-    that both round-trip produce distinct encoded bytes. -/
+/-- #229 corollary — contrapositive form of the round-trip
+    packager.  Same caveats: round-trip hypotheses required. -/
 theorem kernelStep_encode_distinguishes_via_roundtrip
     (s₁ s₂ : FaultProof.KernelStep)
     (h₁ : Encoding.KernelStep.decode (Encoding.KernelStep.encode s₁) =
@@ -375,18 +450,28 @@ theorem applyTransition_rejects_malformed_midpoint
   simp only [if_neg h_depth, if_pos h_oob]
   exact ⟨_, rfl⟩
 
-/-! ## #272 DISCHARGED via round-trip → injectivity pattern
+/-! ## #272 PARTIAL — gameState determinism + distinguish forms
 
-Same shape as #229: round-trip hypothesis ⇒ injectivity.  The
-round-trip discharge for GameState requires per-field bounds
-which the caller provides; this theorem packages the standard
-conclusion. -/
+**Audit-3 honesty correction.**  Same shape as #229: the
+audit-2 round-trip-conditional form is kept as a packager;
+practical content (determinism + distinguishing-inputs) is
+proved unconditionally. -/
 
 /-- #272 — `GameState.encode` is deterministic. -/
 theorem gameState_encode_deterministic_strong
     (g₁ g₂ : LegalKernel.FaultProof.GameState) (h : g₁ = g₂) :
     Encoding.GameState.encode g₁ = Encoding.GameState.encode g₂ := by
   rw [h]
+
+/-- #272 (practical form) — `GameState.encode` distinguishes
+    inputs.  Contrapositive of determinism. -/
+theorem gameState_encode_distinguishes_inputs
+    (g₁ g₂ : LegalKernel.FaultProof.GameState)
+    (h : Encoding.GameState.encode g₁ ≠ Encoding.GameState.encode g₂) :
+    g₁ ≠ g₂ := by
+  intro h_eq
+  apply h
+  exact gameState_encode_deterministic_strong _ _ h_eq
 
 /-- #272 — `GameState.encode` is injective via round-trip. -/
 theorem gameState_encode_injective_via_roundtrip

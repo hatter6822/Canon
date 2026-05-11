@@ -107,9 +107,9 @@ def tests : List TestCase :=
         let _ := @stepCommitBurn_size
         assert true "API exists"
     }
-  , { name := "tag_hashes_distinct_under_collision_free API stable"
+  , { name := "hashString_inj_under_collision_free API stable (renamed in audit-3)"
     , body := do
-        let _ := @tag_hashes_distinct_under_collision_free
+        let _ := @hashString_inj_under_collision_free
         assert true "API exists"
     }
     -- ## Determinism (value level)
