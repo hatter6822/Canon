@@ -1,0 +1,430 @@
+/-
+  Canon  - A Societal Kernel
+  Copyright (C) 2026  Adam Hall
+  This program comes with ABSOLUTELY NO WARRANTY.
+  This is free software, and you are welcome to redistribute it
+  under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+-/
+
+/-
+LegalKernel.FaultProof.SolidityStepVMCommit — Lean-side mirror of
+the L1 `CanonStepVM.executeStep` per-variant post-commit recipe.
+
+The Solidity recipe (per the audit-2 uniform-recipe hardening) is:
+
+  keccak256(abi.encodePacked(
+      preCommit,                              // 32 bytes
+      keccak256(bytes("variant-name")),       // 32 bytes (tag hash)
+      [packed-fields...]
+  ))
+
+Where each field's byte width:
+  * uint64    → 8 bytes big-endian
+  * uint256   → 32 bytes big-endian
+  * bytes32   → 32 bytes
+  * bytes (variable) → keccak256(bytes) (32 bytes)
+
+This module ships one `stepCommit<Variant>` function per Action
+constructor that produces the **exact same bytes** Solidity's
+`_step<Variant>` would.  Under the production keccak256 binding
+(`Bridge.HashAdaptor.isKeccak256Linked = true`), Lean-side
+`stepCommit<X> = Solidity's _stepX` output byte-for-byte; this
+is the cross-stack equivalence claim, verified at the WU H.10.1
+fixture-corpus level.
+
+**Why this isn't `commitExtendedState`.**  The L1 step VM
+operates over per-cell proofs without holding the full
+ExtendedState; its post-commit is a step-VM-specific hash, not
+the full 5-component `commitExtendedState`.  The bisection
+game's chain of commits uses step-VM commits throughout (state-
+root submission, midpoints, terminal disputation).  Cross-stack
+correctness requires Lean and Solidity to agree on the step-VM
+commit recipe; that agreement is what this module establishes.
+
+This module is **not** part of the trusted computing base.
+-/
+
+import LegalKernel.Bridge.Eip712
+import LegalKernel.Bridge.HashAdaptor
+import LegalKernel.Runtime.Hash
+import LegalKernel.Authority.Crypto
+
+namespace LegalKernel
+namespace FaultProof
+namespace SolidityStepVMCommit
+
+open LegalKernel.Authority
+
+/-! ## Endian-encoding helpers
+
+These match the byte layout `abi.encodePacked` produces in
+Solidity 0.8.x: each integer is big-endian, fixed-width per its
+declared type. -/
+
+/-- Encode a `Nat` (assumed `< 2^64`) as 8 big-endian bytes.
+    Matches Solidity's `abi.encodePacked(uint64)`. -/
+def uint64BE (n : Nat) : ByteArray :=
+  ByteArray.mk
+    #[((n >>> 56) &&& 0xFF).toUInt8,
+      ((n >>> 48) &&& 0xFF).toUInt8,
+      ((n >>> 40) &&& 0xFF).toUInt8,
+      ((n >>> 32) &&& 0xFF).toUInt8,
+      ((n >>> 24) &&& 0xFF).toUInt8,
+      ((n >>> 16) &&& 0xFF).toUInt8,
+      ((n >>>  8) &&& 0xFF).toUInt8,
+      ( n         &&& 0xFF).toUInt8]
+
+/-- Encode a `Nat` (assumed `< 2^256`) as 32 big-endian bytes.
+    Matches Solidity's `abi.encodePacked(uint256)`.  Inlined as
+    a 32-element array literal so `rfl` can decide its size. -/
+def uint256BE (n : Nat) : ByteArray :=
+  ByteArray.mk
+    #[((n >>> 248) &&& 0xFF).toUInt8,
+      ((n >>> 240) &&& 0xFF).toUInt8,
+      ((n >>> 232) &&& 0xFF).toUInt8,
+      ((n >>> 224) &&& 0xFF).toUInt8,
+      ((n >>> 216) &&& 0xFF).toUInt8,
+      ((n >>> 208) &&& 0xFF).toUInt8,
+      ((n >>> 200) &&& 0xFF).toUInt8,
+      ((n >>> 192) &&& 0xFF).toUInt8,
+      ((n >>> 184) &&& 0xFF).toUInt8,
+      ((n >>> 176) &&& 0xFF).toUInt8,
+      ((n >>> 168) &&& 0xFF).toUInt8,
+      ((n >>> 160) &&& 0xFF).toUInt8,
+      ((n >>> 152) &&& 0xFF).toUInt8,
+      ((n >>> 144) &&& 0xFF).toUInt8,
+      ((n >>> 136) &&& 0xFF).toUInt8,
+      ((n >>> 128) &&& 0xFF).toUInt8,
+      ((n >>> 120) &&& 0xFF).toUInt8,
+      ((n >>> 112) &&& 0xFF).toUInt8,
+      ((n >>> 104) &&& 0xFF).toUInt8,
+      ((n >>>  96) &&& 0xFF).toUInt8,
+      ((n >>>  88) &&& 0xFF).toUInt8,
+      ((n >>>  80) &&& 0xFF).toUInt8,
+      ((n >>>  72) &&& 0xFF).toUInt8,
+      ((n >>>  64) &&& 0xFF).toUInt8,
+      ((n >>>  56) &&& 0xFF).toUInt8,
+      ((n >>>  48) &&& 0xFF).toUInt8,
+      ((n >>>  40) &&& 0xFF).toUInt8,
+      ((n >>>  32) &&& 0xFF).toUInt8,
+      ((n >>>  24) &&& 0xFF).toUInt8,
+      ((n >>>  16) &&& 0xFF).toUInt8,
+      ((n >>>   8) &&& 0xFF).toUInt8,
+      ( n          &&& 0xFF).toUInt8]
+
+/-- Size of `uint64BE` is exactly 8. -/
+theorem uint64BE_size (n : Nat) : (uint64BE n).size = 8 := by
+  unfold uint64BE
+  rfl
+
+/-- Size of `uint256BE` is exactly 32. -/
+theorem uint256BE_size (n : Nat) : (uint256BE n).size = 32 := by
+  unfold uint256BE
+  rfl
+
+/-! ## Per-variant tag hashes
+
+Each tag is the keccak256 of the ASCII bytes of the variant name,
+matching Solidity's `keccak256("variant-name")` exactly.
+
+At the Lean level we use `LegalKernel.Runtime.hashBytes` (which
+under the production binding = keccak256; under the FNV-1a-64
+fallback = FNV).  These are byte-equal to Solidity's tag hashes
+ONLY under the production binding; the fallback produces
+8-byte FNV outputs that won't match Solidity's 32-byte
+keccak256.  The cross-stack test correctly skips when the
+binding isn't linked. -/
+
+/-- Hash a string's UTF-8 bytes via the production hash adaptor.
+    `s.toUTF8` already returns a `ByteArray`. -/
+def hashString (s : String) : ByteArray :=
+  LegalKernel.Runtime.hashBytes s.toUTF8
+
+/-- Tag hash for `transfer`. -/
+def tagTransfer             : ByteArray := hashString "transfer"
+/-- Tag hash for `mint`. -/
+def tagMint                 : ByteArray := hashString "mint"
+/-- Tag hash for `burn`. -/
+def tagBurn                 : ByteArray := hashString "burn"
+/-- Tag hash for `freezeResource`. -/
+def tagFreezeResource       : ByteArray := hashString "freezeResource"
+/-- Tag hash for `replaceKey`. -/
+def tagReplaceKey           : ByteArray := hashString "replaceKey"
+/-- Tag hash for `reward`. -/
+def tagReward               : ByteArray := hashString "reward"
+/-- Tag hash for `distributeOthers`. -/
+def tagDistributeOthers     : ByteArray := hashString "distributeOthers"
+/-- Tag hash for `proportionalDilute`. -/
+def tagProportionalDilute   : ByteArray := hashString "proportionalDilute"
+/-- Tag hash for `dispute`. -/
+def tagDispute              : ByteArray := hashString "dispute"
+/-- Tag hash for `disputeWithdraw`. -/
+def tagDisputeWithdraw      : ByteArray := hashString "disputeWithdraw"
+/-- Tag hash for `verdict`. -/
+def tagVerdict              : ByteArray := hashString "verdict"
+/-- Tag hash for `rollback`. -/
+def tagRollback             : ByteArray := hashString "rollback"
+/-- Tag hash for `registerIdentity`. -/
+def tagRegisterIdentity     : ByteArray := hashString "registerIdentity"
+/-- Tag hash for `deposit`. -/
+def tagDeposit              : ByteArray := hashString "deposit"
+/-- Tag hash for `withdraw`. -/
+def tagWithdraw             : ByteArray := hashString "withdraw"
+/-- Tag hash for `declareLocalPolicy`. -/
+def tagDeclareLocalPolicy   : ByteArray := hashString "declareLocalPolicy"
+/-- Tag hash for `revokeLocalPolicy`. -/
+def tagRevokeLocalPolicy    : ByteArray := hashString "revokeLocalPolicy"
+/-- Tag hash for `faultProofChallenge`. -/
+def tagFaultProofChallenge  : ByteArray := hashString "faultProofChallenge"
+/-- Tag hash for `faultProofResolution`. -/
+def tagFaultProofResolution : ByteArray := hashString "faultProofResolution"
+
+/-! ## Per-variant commit functions (one per Action constructor) -/
+
+/-- `transfer` step-VM commit.  Mirrors Solidity's `_stepTransfer`
+    post-commit recipe exactly:
+    `keccak256(preCommit || TAG_TRANSFER || r || sender || newSenderBal
+              || receiver || newReceiverBal || signer)`.
+
+    Self-transfer handling: when `sender == receiver`, both
+    `newSenderBal` and `newReceiverBal` should equal the original
+    pre-balance (per the §4.11 post-debit re-read pattern). -/
+def stepCommitTransfer
+    (preCommit : ByteArray)
+    (r sender receiver signer : Nat)
+    (newSenderBalance newReceiverBalance : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagTransfer ++
+     uint64BE r ++ uint64BE sender ++ uint256BE newSenderBalance ++
+     uint64BE receiver ++ uint256BE newReceiverBalance ++
+     uint64BE signer)
+
+/-- `mint` step-VM commit.  Mirrors Solidity's `_stepMint`. -/
+def stepCommitMint
+    (preCommit : ByteArray)
+    (r to signer : Nat) (newToBalance : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagMint ++
+     uint64BE r ++ uint64BE to ++ uint256BE newToBalance ++
+     uint64BE signer)
+
+/-- `burn` step-VM commit.  Mirrors Solidity's `_stepBurn`. -/
+def stepCommitBurn
+    (preCommit : ByteArray)
+    (r fromActor signer : Nat) (newFromBalance : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagBurn ++
+     uint64BE r ++ uint64BE fromActor ++ uint256BE newFromBalance ++
+     uint64BE signer)
+
+/-- `freezeResource` step-VM commit. -/
+def stepCommitFreezeResource
+    (preCommit : ByteArray) (r signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagFreezeResource ++
+     uint64BE r ++ uint64BE signer)
+
+/-- `replaceKey` step-VM commit.  The variable-length newKey is
+    hashed to 32 bytes for the uniform fixed-length packing. -/
+def stepCommitReplaceKey
+    (preCommit : ByteArray)
+    (actor signer : Nat) (newKey : ByteArray) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagReplaceKey ++
+     uint64BE actor ++ LegalKernel.Runtime.hashBytes newKey ++
+     uint64BE signer)
+
+/-- `reward` step-VM commit. -/
+def stepCommitReward
+    (preCommit : ByteArray)
+    (r to signer : Nat) (newToBalance : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagReward ++
+     uint64BE r ++ uint64BE to ++ uint256BE newToBalance ++
+     uint64BE signer)
+
+/-- `distributeOthers` step-VM commit head.  The bulk loop's
+    per-recipient hash chain follows. -/
+def stepCommitDistributeOthersHead
+    (preCommit : ByteArray)
+    (r excluded signer : Nat) (amount : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagDistributeOthers ++
+     uint64BE r ++ uint64BE excluded ++ uint256BE amount ++
+     uint64BE signer)
+
+/-- `distributeOthers` bulk-step per-recipient hash chain step.
+    Each recipient's balance update is folded into the running
+    accumulator hash. -/
+def stepCommitDistributeOthersFold
+    (acc : ByteArray) (keyB : Nat) (newBalance : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (acc ++ uint64BE keyB ++ uint256BE newBalance)
+
+/-- `proportionalDilute` step-VM commit head. -/
+def stepCommitProportionalDiluteHead
+    (preCommit : ByteArray)
+    (r excluded signer : Nat) (totalReward sumOthers : Nat) :
+    ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagProportionalDilute ++
+     uint64BE r ++ uint64BE excluded ++
+     uint256BE totalReward ++ uint256BE sumOthers ++
+     uint64BE signer)
+
+/-- `dispute` step-VM commit.  Variable-length actionFields
+    hashed for fixed-length packing. -/
+def stepCommitDispute
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagDispute ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `disputeWithdraw` step-VM commit. -/
+def stepCommitDisputeWithdraw
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagDisputeWithdraw ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `verdict` step-VM commit. -/
+def stepCommitVerdict
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagVerdict ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `rollback` step-VM commit. -/
+def stepCommitRollback
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagRollback ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `registerIdentity` step-VM commit. -/
+def stepCommitRegisterIdentity
+    (preCommit : ByteArray)
+    (actor signer : Nat) (pk : ByteArray) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagRegisterIdentity ++
+     uint64BE actor ++ LegalKernel.Runtime.hashBytes pk ++
+     uint64BE signer)
+
+/-- `deposit` step-VM commit. -/
+def stepCommitDeposit
+    (preCommit : ByteArray)
+    (r recipient signer : Nat)
+    (newRecipientBalance depositId : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagDeposit ++
+     uint64BE r ++ uint64BE recipient ++
+     uint256BE newRecipientBalance ++ uint256BE depositId ++
+     uint64BE signer)
+
+/-- `withdraw` step-VM commit. -/
+def stepCommitWithdraw
+    (preCommit : ByteArray)
+    (r sender signer : Nat) (newSenderBalance : Nat)
+    (recipientL1 : ByteArray) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagWithdraw ++
+     uint64BE r ++ uint64BE sender ++ uint256BE newSenderBalance ++
+     LegalKernel.Runtime.hashBytes recipientL1 ++ uint64BE signer)
+
+/-- `declareLocalPolicy` step-VM commit. -/
+def stepCommitDeclareLocalPolicy
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagDeclareLocalPolicy ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `revokeLocalPolicy` step-VM commit. -/
+def stepCommitRevokeLocalPolicy
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagRevokeLocalPolicy ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `faultProofChallenge` step-VM commit. -/
+def stepCommitFaultProofChallenge
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagFaultProofChallenge ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-- `faultProofResolution` step-VM commit. -/
+def stepCommitFaultProofResolution
+    (preCommit : ByteArray)
+    (actionFields : ByteArray) (signer : Nat) : ByteArray :=
+  LegalKernel.Runtime.hashBytes
+    (preCommit ++ tagFaultProofResolution ++
+     LegalKernel.Runtime.hashBytes actionFields ++
+     uint64BE signer)
+
+/-! ## Determinism + structural theorems -/
+
+/-- Per-variant determinism: equal inputs ⇒ equal output bytes.
+    Mechanical via `rfl`. -/
+theorem stepCommitTransfer_deterministic
+    (preCommit₁ preCommit₂ : ByteArray)
+    (r₁ r₂ s₁ s₂ rc₁ rc₂ sg₁ sg₂ : Nat)
+    (nsb₁ nsb₂ nrb₁ nrb₂ : Nat)
+    (h_pre : preCommit₁ = preCommit₂)
+    (h_r : r₁ = r₂) (h_s : s₁ = s₂) (h_rc : rc₁ = rc₂) (h_sg : sg₁ = sg₂)
+    (h_nsb : nsb₁ = nsb₂) (h_nrb : nrb₁ = nrb₂) :
+    stepCommitTransfer preCommit₁ r₁ s₁ rc₁ sg₁ nsb₁ nrb₁ =
+    stepCommitTransfer preCommit₂ r₂ s₂ rc₂ sg₂ nsb₂ nrb₂ := by
+  rw [h_pre, h_r, h_s, h_rc, h_sg, h_nsb, h_nrb]
+
+/-- `stepCommitTransfer` produces 32 bytes (the runtime
+    `hashBytes` adaptor returns 32 bytes by `hashBytes_size`). -/
+theorem stepCommitTransfer_size
+    (preCommit : ByteArray) (r sender receiver signer : Nat)
+    (nsb nrb : Nat) :
+    (stepCommitTransfer preCommit r sender receiver signer nsb nrb).size = 32 := by
+  unfold stepCommitTransfer
+  exact LegalKernel.Runtime.hashBytes_size _
+
+/-- `stepCommitMint` produces 32 bytes. -/
+theorem stepCommitMint_size
+    (preCommit : ByteArray) (r to signer ntb : Nat) :
+    (stepCommitMint preCommit r to signer ntb).size = 32 := by
+  unfold stepCommitMint
+  exact LegalKernel.Runtime.hashBytes_size _
+
+/-- `stepCommitBurn` produces 32 bytes. -/
+theorem stepCommitBurn_size
+    (preCommit : ByteArray) (r fr signer nfb : Nat) :
+    (stepCommitBurn preCommit r fr signer nfb).size = 32 := by
+  unfold stepCommitBurn
+  exact LegalKernel.Runtime.hashBytes_size _
+
+/-- Cross-variant distinguishability skeleton: distinct tag-name
+    strings produce distinct tag hashes under `CollisionFree`
+    on `hashBytes`.  Conclusion is the contrapositive of CR
+    applied to `hashString s₁ = hashString s₂`. -/
+theorem tag_hashes_distinct_under_collision_free
+    (h_cf : LegalKernel.Bridge.CollisionFree
+              LegalKernel.Runtime.hashBytes)
+    (s₁ s₂ : String) :
+    hashString s₁ = hashString s₂ → s₁.toUTF8 = s₂.toUTF8 := by
+  intro h_eq
+  exact h_cf _ _ h_eq
+
+end SolidityStepVMCommit
+end FaultProof
+end LegalKernel

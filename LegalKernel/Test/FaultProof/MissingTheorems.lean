@@ -138,6 +138,62 @@ def tests : List TestCase :=
         let _ := @applyTransition_rejects_malformed_midpoint
         assert true "API exists"
     }
+    -- ## NEW: substantive theorems closed in audit-2
+  , { name := "#213 substantive: commitState_after_setBalance_value_injective API stable"
+    , body := do
+        let _ := @commitState_after_setBalance_value_injective
+        assert true "API exists"
+    }
+  , { name := "#229: kernelStep_encode_injective_via_roundtrip API stable"
+    , body := do
+        let _ := @kernelStep_encode_injective_via_roundtrip
+        assert true "API exists"
+    }
+  , { name := "#229: kernelStep_encode_distinguishes_via_roundtrip API stable"
+    , body := do
+        let _ := @kernelStep_encode_distinguishes_via_roundtrip
+        assert true "API exists"
+    }
+  , { name := "#272: gameState_encode_injective_via_roundtrip API stable"
+    , body := do
+        let _ := @gameState_encode_injective_via_roundtrip
+        assert true "API exists"
+    }
+  , { name := "#272: gameState_encode_distinguishes_via_roundtrip API stable"
+    , body := do
+        let _ := @gameState_encode_distinguishes_via_roundtrip
+        assert true "API exists"
+    }
+  , { name := "#261.mint: mint_creates_balance_cell API stable"
+    , body := do
+        let _ := @mint_creates_balance_cell
+        assert true "API exists"
+    }
+  , { name := "#261.reward: reward_creates_balance_cell API stable"
+    , body := do
+        let _ := @reward_creates_balance_cell
+        assert true "API exists"
+    }
+  , { name := "#261.deposit: deposit_creates_balance_cell API stable"
+    , body := do
+        let _ := @deposit_creates_balance_cell
+        assert true "API exists"
+    }
+    -- ## Value-level checks for #261
+  , { name := "#261.mint value-level: minting to fresh actor creates balance"
+    , body := do
+        let s : LegalKernel.State := { balances := Std.TreeMap.empty }
+        -- getBalance s 1 10 is 0 since the cell is absent.
+        let h_absent : getBalance s 1 10 = 0 := rfl
+        let result := getBalance ((Laws.mint 1 10 42).apply_impl s) 1 10
+        assertEq (expected := 42) (actual := result)
+          "mint creates balance with the minted amount"
+        -- Theorem-level check too.
+        let _proof :
+            getBalance ((Laws.mint 1 10 42).apply_impl s) 1 10 = 42 :=
+          mint_creates_balance_cell s 1 10 42 h_absent
+        assert true "theorem holds at value level"
+    }
   ]
 
 end LegalKernel.Test.FaultProof.MissingTheorems

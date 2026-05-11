@@ -159,6 +159,48 @@ contract CanonStepVM {
     error TooManyCellProofs();
 
     /* ---------------------------------------------------------- */
+    /* Per-variant commit tag hashes                              */
+    /* ---------------------------------------------------------- */
+
+    /// @notice **Uniform step-VM commit recipe (audit-2 hardening).**
+    ///         Each per-variant step function computes
+    ///         `keccak256(preCommit || tagHash || packed-fields)`
+    ///         where `tagHash := keccak256(bytes(variant-name))`.
+    ///         The Lean side mirrors this byte-for-byte via
+    ///         `LegalKernel.FaultProof.SolidityStepVMCommit`.
+    ///
+    ///         Each field's width:
+    ///           * uint64           → 8 bytes BE
+    ///           * uint256          → 32 bytes BE
+    ///           * bytes32          → 32 bytes
+    ///           * dynamic bytes    → keccak256(bytes) (32 bytes)
+    ///
+    ///         The uniform format avoids `abi.encode`'s dynamic-
+    ///         offset complexity (which is hard to mirror byte-
+    ///         exactly in Lean) AND avoids `abi.encodePacked`'s
+    ///         tag-collision risk (since each variant uses a
+    ///         distinct 32-byte tagHash).
+    bytes32 internal constant TAG_TRANSFER             = keccak256("transfer");
+    bytes32 internal constant TAG_MINT                 = keccak256("mint");
+    bytes32 internal constant TAG_BURN                 = keccak256("burn");
+    bytes32 internal constant TAG_FREEZE_RESOURCE      = keccak256("freezeResource");
+    bytes32 internal constant TAG_REPLACE_KEY          = keccak256("replaceKey");
+    bytes32 internal constant TAG_REWARD               = keccak256("reward");
+    bytes32 internal constant TAG_DISTRIBUTE_OTHERS    = keccak256("distributeOthers");
+    bytes32 internal constant TAG_PROPORTIONAL_DILUTE  = keccak256("proportionalDilute");
+    bytes32 internal constant TAG_DISPUTE              = keccak256("dispute");
+    bytes32 internal constant TAG_DISPUTE_WITHDRAW     = keccak256("disputeWithdraw");
+    bytes32 internal constant TAG_VERDICT              = keccak256("verdict");
+    bytes32 internal constant TAG_ROLLBACK             = keccak256("rollback");
+    bytes32 internal constant TAG_REGISTER_IDENTITY    = keccak256("registerIdentity");
+    bytes32 internal constant TAG_DEPOSIT              = keccak256("deposit");
+    bytes32 internal constant TAG_WITHDRAW             = keccak256("withdraw");
+    bytes32 internal constant TAG_DECLARE_LP           = keccak256("declareLocalPolicy");
+    bytes32 internal constant TAG_REVOKE_LP            = keccak256("revokeLocalPolicy");
+    bytes32 internal constant TAG_FAULT_PROOF_CHAL     = keccak256("faultProofChallenge");
+    bytes32 internal constant TAG_FAULT_PROOF_RES      = keccak256("faultProofResolution");
+
+    /* ---------------------------------------------------------- */
     /* External: executeStep                                      */
     /* ---------------------------------------------------------- */
 
@@ -406,9 +448,12 @@ contract CanonStepVM {
               _decodeNat(cellProofs[receiverProofIdx].cellValue) + amount;
         }
 
-        // Recompute the post-state commit by combining writes.
-        bytes32 postCommit = keccak256(abi.encode(
+        // Recompute the post-state commit per the uniform step-VM
+        // recipe (audit-2 hardening).  Lean-side mirror lives in
+        // `LegalKernel.FaultProof.SolidityStepVMCommit.stepCommitTransfer`.
+        bytes32 postCommit = keccak256(abi.encodePacked(
             preStateCommit,
+            TAG_TRANSFER,
             r, sender, newSenderBalance,
             receiver, newReceiverBalance,
             signer));
@@ -434,8 +479,8 @@ contract CanonStepVM {
         uint256 toProofIdx = _findBalanceCellProof(cellProofs, r, to);
         uint256 newToBalance = _decodeNat(cellProofs[toProofIdx].cellValue) + amount;
 
-        return keccak256(abi.encode(
-            preStateCommit, "mint", r, to, newToBalance, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_MINT, r, to, newToBalance, signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -464,8 +509,8 @@ contract CanonStepVM {
         if (fromBalance < amount) revert InsufficientBalance();
         uint256 newFromBalance = fromBalance - amount;
 
-        return keccak256(abi.encode(
-            preStateCommit, "burn", r, fromActor, newFromBalance, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_BURN, r, fromActor, newFromBalance, signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -482,8 +527,8 @@ contract CanonStepVM {
         uint64 r = _decodeUint64BE(actionFields, 0);
         cellProofs;  // freezeResource only reads registry+nonce; no balance read
 
-        return keccak256(abi.encode(
-            preStateCommit, "freezeResource", r, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_FREEZE_RESOURCE, r, signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -502,8 +547,10 @@ contract CanonStepVM {
         bytes calldata newKey = actionFields[8:];
         cellProofs;
 
-        return keccak256(abi.encode(
-            preStateCommit, "replaceKey", actor, newKey, signer));
+        // newKey is variable-length; hash it to 32 bytes for the
+        // uniform fixed-length packing.
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_REPLACE_KEY, actor, keccak256(newKey), signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -524,8 +571,8 @@ contract CanonStepVM {
         uint256 toProofIdx = _findBalanceCellProof(cellProofs, r, to);
         uint256 newToBalance = _decodeNat(cellProofs[toProofIdx].cellValue) + amount;
 
-        return keccak256(abi.encode(
-            preStateCommit, "reward", r, to, newToBalance, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_REWARD, r, to, newToBalance, signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -546,8 +593,8 @@ contract CanonStepVM {
         // Bulk: iterate cellProofs (one per recipient).
         // Each balance proof (cellKind == Balance, keyA == r,
         // keyB != excluded) gets +amount.
-        bytes32 acc = keccak256(abi.encode(
-            preStateCommit, "distributeOthers", r, excluded, amount, signer));
+        bytes32 acc = keccak256(abi.encodePacked(
+            preStateCommit, TAG_DISTRIBUTE_OTHERS, r, excluded, amount, signer));
         for (uint256 i = 0; i < cellProofs.length &&
                             i < MAX_RECIPIENTS_PER_BULK_ACTION; i++) {
             CellProof calldata p = cellProofs[i];
@@ -555,7 +602,7 @@ contract CanonStepVM {
                 p.keyA == r &&
                 p.keyB != excluded) {
                 uint256 newBalance = _decodeNat(p.cellValue) + amount;
-                acc = keccak256(abi.encode(acc, p.keyB, newBalance));
+                acc = keccak256(abi.encodePacked(acc, p.keyB, newBalance));
             }
         }
         return acc;
@@ -593,8 +640,8 @@ contract CanonStepVM {
         }
 
         // Second pass: per-recipient credit = totalReward * v / sumOthers.
-        bytes32 acc = keccak256(abi.encode(
-            preStateCommit, "proportionalDilute", r, excluded,
+        bytes32 acc = keccak256(abi.encodePacked(
+            preStateCommit, TAG_PROPORTIONAL_DILUTE, r, excluded,
             totalReward, sumOthers, signer));
         for (uint256 i = 0; i < cellProofs.length &&
                             i < MAX_RECIPIENTS_PER_BULK_ACTION; i++) {
@@ -605,7 +652,7 @@ contract CanonStepVM {
                 uint256 v = _decodeNat(p.cellValue);
                 uint256 credit = sumOthers == 0 ? 0 : totalReward * v / sumOthers;
                 uint256 newBalance = v + credit;
-                acc = keccak256(abi.encode(acc, p.keyB, newBalance));
+                acc = keccak256(abi.encodePacked(acc, p.keyB, newBalance));
             }
         }
         return acc;
@@ -622,8 +669,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "dispute", actionFields, signer));
+        // Dynamic actionFields hashed for fixed-length packing.
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_DISPUTE, keccak256(actionFields), signer));
     }
 
     function _stepDisputeWithdraw(
@@ -633,8 +681,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "disputeWithdraw", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_DISPUTE_WITHDRAW,
+            keccak256(actionFields), signer));
     }
 
     function _stepVerdict(
@@ -644,8 +693,8 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "verdict", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_VERDICT, keccak256(actionFields), signer));
     }
 
     function _stepRollback(
@@ -655,8 +704,8 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "rollback", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_ROLLBACK, keccak256(actionFields), signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -674,8 +723,9 @@ contract CanonStepVM {
         bytes calldata pk = actionFields[8:];
         cellProofs;
 
-        return keccak256(abi.encode(
-            preStateCommit, "registerIdentity", actor, pk, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_REGISTER_IDENTITY, actor,
+            keccak256(pk), signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -698,9 +748,9 @@ contract CanonStepVM {
         uint256 newRecipientBalance =
           _decodeNat(cellProofs[recipientProofIdx].cellValue) + amount;
 
-        return keccak256(abi.encode(
-            preStateCommit, "deposit", r, recipient, newRecipientBalance,
-            depositId, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_DEPOSIT, r, recipient,
+            newRecipientBalance, depositId, signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -724,9 +774,9 @@ contract CanonStepVM {
         if (senderBalance < amount) revert InsufficientBalance();
         uint256 newSenderBalance = senderBalance - amount;
 
-        return keccak256(abi.encode(
-            preStateCommit, "withdraw", r, sender, newSenderBalance,
-            recipientL1, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_WITHDRAW, r, sender, newSenderBalance,
+            keccak256(recipientL1), signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -740,8 +790,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "declareLocalPolicy", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_DECLARE_LP,
+            keccak256(actionFields), signer));
     }
 
     function _stepRevokeLocalPolicy(
@@ -751,8 +802,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "revokeLocalPolicy", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_REVOKE_LP,
+            keccak256(actionFields), signer));
     }
 
     /* ---------------------------------------------------------- */
@@ -766,8 +818,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "faultProofChallenge", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_FAULT_PROOF_CHAL,
+            keccak256(actionFields), signer));
     }
 
     function _stepFaultProofResolution(
@@ -777,8 +830,9 @@ contract CanonStepVM {
         CellProof[] calldata cellProofs
     ) internal pure returns (bytes32) {
         cellProofs;
-        return keccak256(abi.encode(
-            preStateCommit, "faultProofResolution", actionFields, signer));
+        return keccak256(abi.encodePacked(
+            preStateCommit, TAG_FAULT_PROOF_RES,
+            keccak256(actionFields), signer));
     }
 
     /* ---------------------------------------------------------- */

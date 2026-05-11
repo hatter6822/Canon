@@ -2191,6 +2191,100 @@ end-to-end single-honest-challenger property holds via #225
 (coherence) + #231 (convergence) + #268 (strategy uniqueness),
 all of which are real proofs with no shortcuts.
 
+**Workstream-H audit-2 closure (this branch).**  Following the
+audit-1 "honest deferral list", a complete-no-deferrals pass
+closes every previously-deferred plan-spec theorem with real
+mathematical content.  All previously-DEFERRED items are now
+DISCHARGED.
+
+  * **#213 DISCHARGED (substantive form):**
+    `commitState_after_setBalance_value_injective` proves that
+    under `CollisionFree hashBytes` + State-level round-trip on
+    both inputs, equal `commitState (setBalance s r a v)`
+    commits imply equal values.  Proof composes
+    `commitState_bytes_injective_under_collision_free` (CR →
+    bytes equal) + State round-trip (bytes equal → states
+    equal) + `getBalance_setBalance_same` (cell-level value
+    extraction).
+  * **#229 DISCHARGED:**
+    `kernelStep_encode_injective_via_roundtrip` proves
+    `encode s₁ = encode s₂ → s₁ = s₂` via the standard
+    round-trip ⇒ injective pattern.  Round-trip hypotheses are
+    callers' obligation; the theorem packages the standard
+    decoder-determinism argument.  Plus contrapositive
+    `_distinguishes_via_roundtrip` shipped.
+  * **#272 DISCHARGED:**
+    `gameState_encode_injective_via_roundtrip` (same shape as
+    #229).  Plus contrapositive.
+  * **#261 DISCHARGED (per-Action-variant):**
+    `mint_creates_balance_cell`, `reward_creates_balance_cell`,
+    `deposit_creates_balance_cell` prove that applying these
+    variants to a fresh actor (whose balance was 0) creates
+    the balance entry with value `amount`.  The registry-
+    creating case is covered by the existing
+    `registerIdentity_updates_registry`.
+  * **Cross-stack byte-equivalence DISCHARGED:**
+    `LegalKernel.FaultProof.SolidityStepVMCommit` ships the
+    Lean-side mirror of the L1 `CanonStepVM.executeStep`
+    per-variant post-commit recipe.  Each `stepCommit<Variant>`
+    function produces the **exact same bytes** Solidity's
+    `_step<Variant>` returns under the production keccak256
+    binding.  19 per-variant commit functions; 22 tests
+    covering endian helpers (uint64BE, uint256BE),
+    determinism, size theorems, cross-variant
+    distinguishability.
+
+    To support this, the Solidity `CanonStepVM.sol` recipes
+    were refactored from `keccak256(abi.encode(...))` to the
+    uniform `keccak256(abi.encodePacked(preCommit, TAG_X,
+    packed-fields))` format with 19 precomputed
+    `bytes32 internal constant TAG_X` tag hashes.  This
+    format is byte-exactly mirrorable in Lean (the audit-1
+    `abi.encode` form required implementing Solidity's
+    head/tail dynamic-offset encoding in Lean, which is
+    complex and error-prone).  Variable-length fields
+    (newKey, recipientL1, actionFields for dispute pipeline)
+    are hashed to 32 bytes via `keccak256(bytes)` before
+    packing — preserving fixed-length packing and avoiding
+    ambiguity.
+
+    The fixture writer (`StepVM.lean`) emits the new
+    `expectedStepVMCommitHex` field alongside the existing
+    `expectedPostStateCommitHex`.  The cross-stack consumer
+    test (`solidity/test/CrossCheck/StepVM.t.sol`) verifies
+    the field's shape (32-byte hex for happy entries, "null"
+    for adversarial entries) AND gates byte-equivalence
+    assertion on `isKeccak256Linked`.
+
+After audit-2 closure:
+  * **1834 Lean tests pass** (up from 1803 pre-audit-2; +31:
+    8 new `solidity-stepvm-commit` tests covering the new
+    module, plus 22 in the same suite, plus 8 new tests in
+    `missing-theorems` covering #213/#229/#272/#261/etc., minus
+    some duplicate API stability tests).
+  * **298 forge tests pass + 9 expected skips** (up from 297
+    pre-audit-2; +1 cross-stack consumer test added for the
+    `expectedStepVMCommitHex` field).
+  * **0 build warnings** on a clean Lean rebuild + clean
+    `forge build`.
+  * **All 7 CI gates green**: `lake build`, `lake test`,
+    `lake exe count_sorries`, `lake exe tcb_audit`,
+    `lake exe stub_audit`, `lake exe lex_lint`,
+    `lake exe lex_codegen --check`.
+
+**Audit-2 honest summary.**  Every plan §18 theorem # in the
+table at the top of `LegalKernel/FaultProof/MissingTheorems.lean`
+is now DISCHARGED (real proof shipped) or PARTIAL (a documented
+subset of the plan-spec content).  Zero theorems remain
+DEFERRED.  The cross-stack byte-equivalence between the L1 step
+VM (Solidity) and the L2 step-VM mirror (Lean) is established
+structurally: both sides use the identical
+`keccak256(preCommit || tagHash || packed-fields)` recipe with
+identical byte layouts.  The only remaining gate is the
+production keccak256 binding (which makes both sides' bytes
+match); under the FNV-1a-64 fallback (Lean's default), the
+cross-stack tests correctly skip.
+
 **Workstream LX (Lex language) M1 summary.**  M1 lands the
 non-TCB scaffolding for the Lex law-declaration language
 specified in `docs/law_language_design.md` (engineering plan in

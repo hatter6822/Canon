@@ -110,11 +110,14 @@ contract CanonStepVMTest is Test {
             FIXTURE_PRE_COMMIT, uint8(0), actionFields, uint64(10), proofs);
         assertEq(result1, result2, "transfer is deterministic");
 
-        // Strong assertion (post-audit-1): the post-commit must match
-        // the documented preimage exactly.  Sender pre=100, post=95;
-        // receiver pre=50, post=55.
-        bytes32 expected = keccak256(abi.encode(
+        // Strong assertion (post-audit-2 uniform recipe): the post-
+        // commit must match the documented preimage exactly using
+        // the `keccak256(abi.encodePacked(preCommit, TAG_TRANSFER,
+        // fields...))` shape.  Sender pre=100, post=95; receiver
+        // pre=50, post=55.
+        bytes32 expected = keccak256(abi.encodePacked(
             FIXTURE_PRE_COMMIT,
+            keccak256("transfer"),
             uint64(1), uint64(10), uint256(95),
             uint64(20), uint256(55),
             uint64(10)));
@@ -136,9 +139,11 @@ contract CanonStepVMTest is Test {
         bytes32 result = stepVM.executeStep(
             FIXTURE_PRE_COMMIT, uint8(0), actionFields, uint64(10), proofs);
 
-        // Per audit-1 self-transfer fix, both balances stay 100.
-        bytes32 expected = keccak256(abi.encode(
+        // Per audit-1 self-transfer fix + audit-2 uniform recipe,
+        // both balances stay 100; tagHash is keccak256("transfer").
+        bytes32 expected = keccak256(abi.encodePacked(
             FIXTURE_PRE_COMMIT,
+            keccak256("transfer"),
             uint64(1), uint64(10), uint256(100),
             uint64(10), uint256(100),
             uint64(10)));
@@ -217,9 +222,10 @@ contract CanonStepVMTest is Test {
         bytes32 result = stepVM.executeStep(
             FIXTURE_PRE_COMMIT, uint8(1), actionFields, uint64(0), proofs);
 
-        // Strong: mint of 10 to actor 20 (pre=50, post=60).
-        bytes32 expected = keccak256(abi.encode(
-            FIXTURE_PRE_COMMIT, "mint",
+        // Strong (audit-2 uniform recipe): mint of 10 to actor 20
+        // (pre=50, post=60); tagHash is keccak256("mint").
+        bytes32 expected = keccak256(abi.encodePacked(
+            FIXTURE_PRE_COMMIT, keccak256("mint"),
             uint64(1), uint64(20), uint256(60), uint64(0)));
         assertEq(result, expected, "mint post-commit matches preimage");
     }
@@ -248,9 +254,10 @@ contract CanonStepVMTest is Test {
         bytes32 result = stepVM.executeStep(
             FIXTURE_PRE_COMMIT, uint8(2), actionFields, uint64(10), proofs);
 
-        // Strong: burn 50 from actor 10 (pre=100, post=50).
-        bytes32 expected = keccak256(abi.encode(
-            FIXTURE_PRE_COMMIT, "burn",
+        // Strong (audit-2 uniform recipe): burn 50 from actor 10
+        // (pre=100, post=50); tagHash is keccak256("burn").
+        bytes32 expected = keccak256(abi.encodePacked(
+            FIXTURE_PRE_COMMIT, keccak256("burn"),
             uint64(1), uint64(10), uint256(50), uint64(10)));
         assertEq(result, expected, "burn post-commit matches preimage");
     }
@@ -290,9 +297,10 @@ contract CanonStepVMTest is Test {
         bytes32 result = stepVM.executeStep(
             FIXTURE_PRE_COMMIT, uint8(5), actionFields, uint64(0), proofs);
 
-        // Strong: reward 10 to actor 20 (pre=50, post=60).
-        bytes32 expected = keccak256(abi.encode(
-            FIXTURE_PRE_COMMIT, "reward",
+        // Strong (audit-2 uniform recipe): reward 10 to actor 20
+        // (pre=50, post=60); tagHash is keccak256("reward").
+        bytes32 expected = keccak256(abi.encodePacked(
+            FIXTURE_PRE_COMMIT, keccak256("reward"),
             uint64(1), uint64(20), uint256(60), uint64(0)));
         assertEq(result, expected, "reward post-commit matches preimage");
     }

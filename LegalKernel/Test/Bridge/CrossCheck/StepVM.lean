@@ -25,6 +25,7 @@ This module is **not** part of the trusted computing base.
 -/
 
 import LegalKernel.FaultProof.Coherence
+import LegalKernel.FaultProof.SolidityStepVMCommit
 import LegalKernel.FaultProof.Step
 import LegalKernel.Test.Bridge.CrossCheck.Framework
 import LegalKernel.Test.Framework
@@ -47,9 +48,15 @@ structure StepVMFixture where
   preStateCommitHex  : String
   /-- The signed-action encoded bytes (hex). -/
   signedActionHex    : String
-  /-- The expected post-state commit (hex), or "null" for
-      adversarial cases. -/
+  /-- The expected post-state commit via `commitExtendedState` —
+      the canonical 5-component state commit. -/
   expectedPostStateCommitHex : String
+  /-- The expected post-state commit via Solidity's step-VM
+      recipe (audit-2 hardening: `keccak256(preCommit || tagHash
+      || packed-fields)`).  Under the production keccak256
+      binding, this equals what `CanonStepVM.executeStep`
+      returns byte-for-byte. -/
+  expectedStepVMCommitHex    : String
   /-- The expected revert reason, or "null" for happy paths. -/
   expectedRevertReason       : String
   deriving Repr
@@ -76,6 +83,18 @@ def buildTransferHappy
   let es := ExtendedState.empty
   let preCommit := commitExtendedState es
   let postCommit := recomputeCommitment es st
+  -- For the step-VM commit, compute what Solidity's
+  -- `_stepTransfer` would produce on the same inputs.  Sender
+  -- pre-balance is 0 (empty state); post = 0 - amount which is 0
+  -- under Nat truncation.  Receiver pre = 0; post = 0 + amount.
+  -- (Self-transfer case handled if sender == receiver: both stay 0.)
+  let isSelf := decide (sender = receiver)
+  let newSenderBal : Nat := if isSelf then 0 else 0  -- truncated to 0
+  let newReceiverBal : Nat := if isSelf then 0 else amount
+  let stepVMCommit :=
+    SolidityStepVMCommit.stepCommitTransfer
+      preCommit r.toNat sender.toNat receiver.toNat sender.toNat
+      newSenderBal newReceiverBal
   { fixtureId := s!"transfer-happy-{idx}",
     actionVariant := "transfer",
     preStateCommitHex :=
@@ -85,6 +104,8 @@ def buildTransferHappy
         (ByteArray.mk (Encoding.Encodable.encode (T := Authority.SignedAction) st).toArray),
     expectedPostStateCommitHex :=
       Test.Bridge.CrossCheck.hexFromBytes postCommit,
+    expectedStepVMCommitHex :=
+      Test.Bridge.CrossCheck.hexFromBytes stepVMCommit,
     expectedRevertReason := "null" }
 
 /-- Build a happy-path fixture for `Action.mint`. -/
@@ -101,6 +122,11 @@ def buildMintHappy
   let es := ExtendedState.empty
   let preCommit := commitExtendedState es
   let postCommit := recomputeCommitment es st
+  -- Solidity's `_stepMint`: newToBal = preToBal + amount = 0 + amount.
+  let newToBal := amount
+  let stepVMCommit :=
+    SolidityStepVMCommit.stepCommitMint
+      preCommit r.toNat to.toNat signer.toNat newToBal
   { fixtureId := s!"mint-happy-{idx}",
     actionVariant := "mint",
     preStateCommitHex :=
@@ -110,6 +136,8 @@ def buildMintHappy
         (ByteArray.mk (Encoding.Encodable.encode (T := Authority.SignedAction) st).toArray),
     expectedPostStateCommitHex :=
       Test.Bridge.CrossCheck.hexFromBytes postCommit,
+    expectedStepVMCommitHex :=
+      Test.Bridge.CrossCheck.hexFromBytes stepVMCommit,
     expectedRevertReason := "null" }
 
 /-- Build an adversarial fixture: bad pre-state commit. -/
@@ -123,6 +151,7 @@ def buildAdversarialBadPreCommit
       Test.Bridge.CrossCheck.hexFromBytes badCommit,
     signedActionHex := "0x",
     expectedPostStateCommitHex := "null",
+    expectedStepVMCommitHex := "null",
     expectedRevertReason := "BadCellProof" }
 
 /-! ## Fixture corpora (one list per variant)
@@ -223,6 +252,8 @@ def tests : List Test.TestCase :=
                  , ("signedActionHex",          .str f.signedActionHex)
                  , ("expectedPostStateCommitHex",
                     .str f.expectedPostStateCommitHex)
+                 , ("expectedStepVMCommitHex",
+                    .str f.expectedStepVMCommitHex)
                  , ("expectedRevertReason",     .str f.expectedRevertReason)
                  ])
         let header : Test.Bridge.CrossCheck.Json := .obj

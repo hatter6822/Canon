@@ -141,6 +141,7 @@ import LegalKernel.Test.FaultProof.Verify
 import LegalKernel.Test.FaultProof.Trust
 import LegalKernel.Test.FaultProof.PerVariantCoherence
 import LegalKernel.Test.FaultProof.MissingTheorems
+import LegalKernel.Test.FaultProof.SolidityStepVMCommit
 import LegalKernel.Test.FaultProof.Transcript
 import LegalKernel.Test.Bridge.CrossCheck.StepVM
 import LegalKernel.Test.Bridge.CrossCheck.BisectionGame
@@ -324,6 +325,8 @@ def main : IO UInt32 := do
                                     LegalKernel.Test.FaultProof.PerVariantCoherence.tests)
   failed := failed + (← runAll "faultproof-missing-theorems"
                                     LegalKernel.Test.FaultProof.MissingTheorems.tests)
+  failed := failed + (← runAll "faultproof-solidity-stepvm-commit"
+                                    LegalKernel.Test.FaultProof.SolidityStepVMCommit.tests)
   failed := failed + (← runAll "faultproof-transcript"
                                     LegalKernel.Test.FaultProof.Transcript.tests)
   failed := failed + (← runAll "crosscheck-step-vm"

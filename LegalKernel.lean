@@ -251,6 +251,7 @@ import LegalKernel.FaultProof.Witness
 import LegalKernel.FaultProof.Coherence
 import LegalKernel.FaultProof.PerVariantCoherence
 import LegalKernel.FaultProof.MissingTheorems
+import LegalKernel.FaultProof.SolidityStepVMCommit
 import LegalKernel.FaultProof.Transcript
 import LegalKernel.FaultProof.Strategy
 import LegalKernel.FaultProof.Convergence
