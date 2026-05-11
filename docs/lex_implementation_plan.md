@@ -134,19 +134,20 @@ trust.
     hand-written form: a deployment may opt in to Lex by
     writing `law` declarations alongside the existing
     artefacts (additive `lex_codegen` mode).
-  * **M2 status (this branch):** **complete.**  All 17
-    kernel-built-in laws have a Lex re-expression in
-    `LegalKernel/Laws/Lex/<Law>.lean`; the byte-equivalence
-    is verified by elaboration-time `rfl`-close `example`s
-    + the run-time `laws-lex-m2` regression suite (24
-    cases).  The `lex_law` macro gained a `lex_params
-    bracketedBinder+` clause for parameterised laws.
-    `kernelBuildTag` bumped to `"canon-lex-m2-canonical"`.
-    See CLAUDE.md "Workstream-LX M2 milestone summary" for
-    the full per-WU breakdown and documented deviations
-    (twin-file structure, deferred canonical-mode flip,
-    `Law.mk` not yet `@[deprecated]`, empty
-    `lex_satisfies` pending M3 synthesizer integration).
+  * **Milestone status.**  M1, M2, and M3 are all
+    **complete**.  M1 shipped the macro skeleton + property
+    synthesizer.  M2 re-expressed all 17 kernel-built-in
+    laws in `LegalKernel/Laws/Lex/<Law>.lean` with
+    byte-equivalence verified by elaboration-time `rfl`-close
+    `example`s + the run-time `laws-lex-m2` regression suite.
+    M3 added deployment manifests, the `lex_diff` /
+    `lex_format` governance tooling, and the
+    `Deployments/Examples/UsdClearing.lean` worked example.
+    The `kernelBuildTag` has since been bumped beyond
+    `"canon-lex-m3-manifests"` to `"canon-fault-proof-migration"`
+    (Workstream H landed downstream).  Per-WU completion
+    narratives live in git history (`git log --grep="LX"`),
+    not in this plan.
   * **Frozen indices reserved by this workstream:** none
     in M1 (no new `Action` or `Event` constructors).  M2
     leaves the existing 17 `Action` constructor indices
