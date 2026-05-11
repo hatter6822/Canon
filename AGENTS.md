@@ -65,7 +65,10 @@ lake exe tcb_audit                  # TCB allowlist gate
 lake exe stub_audit                 # stub-detection gate
 lake exe lex_lint                   # Lex registry + sidecar gate
 lake exe lex_codegen --check        # Lex codegen-consistency gate
+                                    #   (also: --canonical for full-body
+                                    #   regeneration, --gen-property-tests)
 lake exe lex_diff <before> <after>  # Lex semantic-diff binary
+                                    #   (also: --git <ref-a> <ref-b>)
 lake exe lex_format <file>          # Lex pretty-printer
 
 # Runtime smoke test.
@@ -86,8 +89,9 @@ executable, and `lean_lib`; consult it before adding new targets.
 
 **Toolchain.** Lean 4 v4.29.1 (pinned in `lean-toolchain`).  Bumping
 the toolchain requires recomputing the four
-`LEAN_TOOLCHAIN_SHA256_*` constants in `scripts/setup.sh` and
-landing both changes in the same PR.
+`LEAN_TOOLCHAIN_SHA256_*` archive constants (one per
+`(format, architecture)` pair: zst/zip × x86_64/aarch64) in
+`scripts/setup.sh` and landing both changes in the same PR.
 
 ## Module build verification (mandatory)
 
@@ -106,14 +110,16 @@ After any source change, also run:
   term-level API-stability test whose elaboration fails if the
   theorem signature changes.
 * `lake exe count_sorries` — fails on any `sorry` in proof position
-  in a kernel-TCB module (`Kernel.lean`, `RBMapLemmas.lean`,
-  `Laws/Transfer.lean`).  The detector masks `--` comments, `/- -/`
-  blocks, and `"..."` string literals, so the word "sorry" in
-  prose is fine; only the *term* in proof position is forbidden.
-* `lake exe tcb_audit` — fails if a TCB core module imports anything
-  not on `tcb_allowlist.txt` *or* in `Tools.Common.tcbInternalImports`
-  (the explicit, enumerated list of project-internal modules a TCB
-  core file may import).
+  in a kernel-adjacent module (`Kernel.lean`, `RBMapLemmas.lean`,
+  `Laws/Transfer.lean` — the `Tools.Common.kernelTcbFiles` list).
+  The detector masks `--` comments, `/- -/` blocks, and `"..."`
+  string literals, so the word "sorry" in prose is fine; only the
+  *term* in proof position is forbidden.
+* `lake exe tcb_audit` — fails if a TCB-core module
+  (`Kernel.lean`, `RBMapLemmas.lean` — the `Tools.Common.tcbCoreFiles`
+  list) imports anything not on `tcb_allowlist.txt` *or* in
+  `Tools.Common.tcbInternalImports` (the explicit, enumerated list
+  of project-internal modules a TCB-core file may import).
 * `lake exe stub_audit` — catches placeholder-body stubs
   (`:= ByteArray.empty`, `:= []`, etc.) accompanied by red-flag
   docstring tokens.  Allowlist: `tools/stub_allowlist.txt`.
@@ -127,7 +133,9 @@ CI (`.github/workflows/ci.yml`) runs all of the above on every PR.
 
 ```
 canon/
-├── lakefile.lean              -- Lake config (library, executables, audit binaries)
+├── lakefile.lean              -- Lake config (lean_lib, lean_exe, plus
+│                                  input_file/input_dir build deps for the Lex
+│                                  registry and codegen-input directory)
 ├── lean-toolchain             -- pinned Lean version
 ├── tcb_allowlist.txt          -- TCB import allowlist
 ├── lex_index_registry.txt     -- frozen action-index registry (append-only)
@@ -135,6 +143,11 @@ canon/
 ├── Replay.lean                -- `canon-replay` audit binary
 ├── Tests.lean                 -- @[test_driver]; imports every test module
 ├── LegalKernel.lean           -- umbrella module (re-exports everything)
+├── Deployments.lean           -- umbrella for the `Deployments` lean_lib
+├── LexLint.lean               -- entry-point shim for `lex_lint` exe
+├── LexCodegen.lean            -- entry-point shim for `lex_codegen` exe
+├── LexDiff.lean               -- entry-point shim for `lex_diff` exe
+├── LexFormat.lean             -- entry-point shim for `lex_format` exe
 ├── LegalKernel/
 │   ├── Kernel.lean            -- §4.12 trusted core (TCB)
 │   ├── RBMapLemmas.lean       -- §8.3 RBMap proof library (TCB)
@@ -142,7 +155,11 @@ canon/
 │   ├── Laws/                  -- one law per file (transfer, mint, burn, freeze,
 │   │                             reward, distributeOthers, proportionalDilute,
 │   │                             deposit, withdraw, replaceKey, registerIdentity,
-│   │                             dispute pipeline, local-policy laws, Lex/)
+│   │                             dispute pipeline, local-policy laws).  Lex
+│   │                             re-expressions live alongside the hand-written
+│   │                             law (or at top level for Lex-only laws); the
+│   │                             old `Laws/Lex/` subdirectory was removed
+│   │                             during the LX-M2 in-place migration.
 │   ├── Authority/             -- Crypto, Action, Identity, Nonce, LocalPolicy,
 │   │                             LocalPolicySemantics, SignedAction
 │   ├── Encoding/              -- CBE codec (CBOR, Encodable, Action, SignedAction,
@@ -157,8 +174,11 @@ canon/
 │   ├── _lex_inputs/           -- Lex codegen-input JSON sidecars (one per Lex law)
 │   └── Test/                  -- IO-based test harness; one suite per module
 ├── Deployments/Examples/      -- LX-M3 worked example deployments (UsdClearing)
-├── Tools/                     -- audit binaries (TcbAudit, CountSorries, StubAudit,
-│                                  LexCommon, LexLint, LexCodegen, LexDiff, LexFormat)
+├── Tools/                     -- audit binaries (TcbAudit, CountSorries,
+│                                  StubAudit, LexLint, LexCodegen, LexDiff,
+│                                  LexFormat) + shared libraries (Common — used
+│                                  by all three TCB / stub audits; LexCommon —
+│                                  used by the four Lex audit binaries)
 ├── solidity/                  -- Workstream E: L1 mirror (5 contracts, 4 libraries,
 │                                  16 forge test suites).  See solidity/README.md.
 ├── scripts/setup.sh           -- SHA-256-verified toolchain + Foundry installer
@@ -193,20 +213,29 @@ LegalKernel.Kernel             (TCB; imports RBMapLemmas)
 LegalKernel.Conservation       (non-TCB; imports Kernel + RBMapLemmas)
 LegalKernel.Laws.*             (non-TCB; imports Conservation + Kernel)
 
-LegalKernel.Authority.*        (non-TCB; layered: Crypto → Action → Identity →
-                                Nonce → LocalPolicy{,Semantics} → SignedAction)
+LegalKernel.Authority.*        (non-TCB; intra-Authority layering is
+                                Crypto → Action → Identity → Nonce →
+                                LocalPolicy{,Semantics} → SignedAction.
+                                Note that `Authority.Action` also imports
+                                every `Laws.*` module plus `Bridge.AddressBook`,
+                                `Bridge.State`, and `Disputes.Types` because
+                                the `Action` inductive has constructors that
+                                reference those types — the linear chain above
+                                shows the intra-Authority order only.)
 
 LegalKernel.Encoding.*         (non-TCB; CBOR / Encodable foundation, then
                                 Action → SignedAction → State → SignInput;
                                 Disputes / LocalPolicy add their own variants)
 
 LegalKernel.DSL.{Law, LawSyntax, LexLaw, LexProperty,
-                  LexImplLowering, LexDeployment}
-                                (non-TCB; depends on Kernel + Authority)
+                  LexImplCalculus, LexImplLowering,
+                  LexPreGrammar, LexEvents, LexDeployment,
+                  LexShim}      (non-TCB; depends on Kernel + Authority)
 
 LegalKernel.Events.{Types, Extract}            (non-TCB; depends on Authority)
 LegalKernel.Runtime.{Hash, LogFile, Replay,
-                      Snapshot, Loop}          (non-TCB; depends on Encoding + Events)
+                      Snapshot, AttestedSnapshot,
+                      Loop}                    (non-TCB; depends on Encoding + Events)
 
 LegalKernel.Disputes.{Types, Filing, Evidence,
                        Verdict, LawClassification,
@@ -219,9 +248,13 @@ LegalKernel.Bridge.*                          (non-TCB; Workstreams A – D)
 LegalKernel                                   (umbrella; re-exports everything)
 Main / Replay / Tests                         (executables)
 
+Tools.Common                                  (lean_lib `ToolsCommon`; shared
+                                               helpers for the TCB / stub audits)
+Tools.LexCommon                               (lean_lib `LexCommon`; shared
+                                               helpers for the Lex audit binaries)
 Tools.{TcbAudit, CountSorries, StubAudit,
-       LexCommon, LexLint, LexCodegen,
-       LexDiff, LexFormat}                    (audit binaries; no Lean-level
+       LexLint, LexCodegen, LexDiff,
+       LexFormat}                             (audit binaries; no Lean-level
                                                dependency on the kernel)
 ```
 
@@ -325,10 +358,12 @@ foreground progress.  Prevent this proactively:
   `LegalKernel/RBMapLemmas.lean` requires two reviewers per Genesis
   Plan §13.6.  Law modules and tests require one reviewer.
 
-- **No `sorry` in kernel-adjacent code (ABSOLUTE).**  The kernel
-  TCB (`Kernel.lean`, `RBMapLemmas.lean`, `Laws/Transfer.lean`) must
-  not contain a `sorry` in proof position.  `lake exe count_sorries`
-  is the mechanical check; CI blocks the merge on a non-zero count.
+- **No `sorry` in kernel-adjacent code (ABSOLUTE).**  The
+  kernel-adjacent files (`Kernel.lean`, `RBMapLemmas.lean`,
+  `Laws/Transfer.lean` — strictly wider than the TCB core, which
+  is just `Kernel.lean` + `RBMapLemmas.lean`) must not contain a
+  `sorry` in proof position.  `lake exe count_sorries` is the
+  mechanical check; CI blocks the merge on a non-zero count.
   Comments referencing the *word* "sorry" are allowed; only the
   *term* in proof position is forbidden.
 
@@ -468,11 +503,11 @@ Selected headline theorems by tier:
 | Phase 6 | `applyVerdict` is provably total under witness | `applyVerdict_under_witness_succeeds` | `Disputes/Verdict.lean` (Option-C) |
 | Phase 6 | Dispute pipeline composes with monotonic deployments | `disputable_monotonic_total_supply_nondecreasing` | `Disputes/MonotonicDeployment.lean` |
 | LP    | Local policies cannot lock out meta-actions | `localPolicy_meta_action_independent` | `Authority/SignedAction.lean`     |
-| WS-A  | EIP-712 wrap injectivity              | `eip712Wrap_injective`            | `Bridge/Eip712.lean`                    |
-| WS-B  | Bridge actor policy authorises only registry actions | `bridgePolicy_*` family | `Bridge/BridgeActor.lean`             |
-| WS-C  | Deposit / withdraw replay impossible  | `deposit_replay_blocked_by_consumed`, `withdraw_bumps_nextWdId` | `Bridge/Admissible.lean` |
-| WS-D  | SMT verifier completeness + soundness | `verifyProof_complete`, `verifyProof_sound` | `Bridge/WithdrawalRoot.lean` |
-| WS-D  | Finalisation is monotonic in L1 block | `isFinalised_monotonic_in_currentBlock` | `Bridge/Finalisation.lean`        |
+| E-A   | EIP-712 wrap injectivity              | `eip712Wrap_injective`            | `Bridge/Eip712.lean`                    |
+| E-B   | Bridge actor policy authorises only registry actions | `bridgePolicy_*` family | `Bridge/BridgeActor.lean`             |
+| E-C   | Deposit / withdraw replay impossible  | `deposit_replay_blocked_by_consumed`, `withdraw_bumps_nextWdId` | `Bridge/Admissible.lean` |
+| E-D   | SMT verifier completeness + soundness | `verifyProof_complete`, `verifyProof_sound` | `Bridge/WithdrawalRoot.lean` |
+| E-D   | Finalisation is monotonic in L1 block | `isFinalised_monotonic_in_currentBlock` | `Bridge/Finalisation.lean`        |
 | LX    | Locality / freeze-preservation typeclass firewalls | `LocalTo`, `FreezePreserving`, `FreezePreservingLawSet` | `Conservation.lean` |
 | LX    | Registry-preservation classification  | `RegistryPreserving`              | `Authority/SignedAction.lean`           |
 
@@ -484,9 +519,9 @@ many encoding theorems use only `propext` and `Quot.sound`).
 
 Modifying any TCB-tier property is a TCB change and triggers the
 two-reviewer gate; modifying any non-TCB property needs one
-reviewer.  The Phase-3, Workstream-A, and Workstream-D properties
-additionally depend on trust assumptions about deployment-supplied
-crypto (see "Trust assumptions" above).
+reviewer.  The Phase-3, Workstream E-A, and Workstream E-D
+properties additionally depend on trust assumptions about
+deployment-supplied crypto (see "Trust assumptions" above).
 
 ## Std core integration
 
@@ -625,11 +660,15 @@ every match before submission.
 ## Current development status
 
 **Build tag** (`kernelBuildTag` in `LegalKernel.lean`):
-`"canon-lex-m3-manifests"`.
+`"canon-lex-m3-manifests"`.  `Test/Umbrella.lean` pins this value
+in a regression test, so any phase / milestone bump must update
+both the constant and the test in the same PR.
 
-**Test count.**  ~1605 tests across ~89 suites (`lake test`).  The
-exact number drifts with every PR; the umbrella `Test/Umbrella.lean`
-build-tag check is the canonical pin.
+**Test count.**  ~1605 tests across ~89 suites at the time of the
+last milestone (LX-M3).  The exact number drifts with every PR;
+`lake test` is the canonical query.  Unlike the build tag, the
+test count is not pinned — only its monotonic growth is enforced
+by individual regression tests landing alongside new theorems.
 
 **TCB audit (latest run).**  `#print axioms` on every kernel,
 Phase-2, Phase-3, Phase-4, Phase-5, and Phase-6 theorem returns a
@@ -639,10 +678,11 @@ axioms have been introduced in any phase.  `Verify` and
 audit output of theorems that mention them.
 
 **TCB import discipline.**  `Tools.Common.tcbInternalImports`
-enumerates the project-internal modules each TCB core file may
-import — only `LegalKernel.Kernel` and `LegalKernel.RBMapLemmas`.
+enumerates the project-internal modules each TCB-core file
+(`Kernel.lean`, `RBMapLemmas.lean`) may import — only
+`LegalKernel.Kernel` and `LegalKernel.RBMapLemmas` themselves.
 This is a *specific allowlist*, not a `LegalKernel.*` namespace
-pattern: a TCB core file that tries to import e.g.
+pattern: a TCB-core file that tries to import e.g.
 `LegalKernel.Laws.Transfer` fails the audit and blocks the merge.
 
 **Test patterns.**  Tests use two complementary patterns:
@@ -660,9 +700,10 @@ admissibility witness construction) because the `Verify` opaque
 cannot be reduced at the Lean level — the runtime adaptor wires
 the actual cryptographic implementation.  The algebraic core of
 the theorems (the post-advance nonce inequality) is value-level
-checked separately.  Per-suite `MockCrypto` (Audit-3.3 / 3.4)
-supplies `mockVerify` / `mockSign` for happy-path coverage that
-the production opaque `Verify` (returns `false`) cannot exercise.
+checked separately.  The shared `LegalKernel/Test/MockCrypto.lean`
+module supplies `mockVerify` / `mockSign` for happy-path coverage
+that the production opaque `Verify` (which returns `false` at the
+Lean level) cannot exercise.
 
 **Active development history.**  Per-audit and per-WU completion
 narratives live in git history (see `git log --grep="WU"` /
