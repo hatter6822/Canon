@@ -729,8 +729,8 @@ Quot.sound]`.  No custom axioms have been introduced in any phase.
 `Verify` and `hashBytes` are `opaque`, not `axiom`, so they do
 not appear in the audit output of theorems that mention them.
 Workstream H adds one new opaque (`l1FaultProofVerifier` in
-`Bridge/L1EventVerifier.lean`) for the deployment-side L1 event
-watcher; per the same opaque pattern as `Verify` / `hashBytes`,
+`LegalKernel/FaultProof/Witness.lean`) for the deployment-side L1
+event watcher; per the same opaque pattern as `Verify` / `hashBytes`,
 it does not appear in `#print axioms` output.
 
 **TCB import discipline.**  `Tools.Common.tcbInternalImports`
