@@ -62,7 +62,7 @@ elan toolchain install "$(cat lean-toolchain)"
 source ~/.elan/env
 lake build                          # full project build
 lake build LegalKernel.<Module>     # one module (fastest feedback)
-lake test                           # ~1835 tests across ~100 suites
+lake test                           # ~1907 tests across ~100 suites
 lake exe count_sorries              # zero-sorry kernel gate
 lake exe tcb_audit                  # TCB allowlist gate
 lake exe stub_audit                 # stub-detection gate
@@ -728,7 +728,7 @@ every match before submission.
 this value in a regression test, so any phase / milestone bump
 must update both the constant and the test in the same PR.
 
-**Test count.**  ~1845 tests across ~100 suites at the time of
+**Test count.**  ~1907 tests across ~100 suites at the time of
 the AR milestone (Workstream AR).  The exact number drifts with
 every PR; `lake test` is the canonical query.  Unlike the build
 tag, the test count is not pinned — only its monotonic growth is
@@ -745,6 +745,14 @@ Highlights of the AR remediation pass:
     `checkSignatureInvalidWith` plus `--deployment-id <hex>` CLI
     flag on both `canon` and `canon-replay` (the audit binary
     refuses to run without it).  Closes M-1 + M-5.
+  * AR.2.5: parameterised `checkEvidenceWith verify d`
+    dispatcher in `Disputes/Evidence.lean` so the
+    `signatureInvalid` claim arm routes through
+    `checkSignatureInvalidWith` with an explicit deploymentId.
+    Plain `checkEvidence` is preserved as the back-compat alias
+    `checkEvidenceWith Verify ByteArray.empty`.  Closes the
+    cross-deployment-replay observability gap surfaced by the
+    third audit pass at the dispute pipeline's Stage 2.
   * AR.3: `bootstrapFromSnapshot` chain-anchor check
     (`.anchorMismatch`) + `bootstrapFromAttestedSnapshot` wrapper.
     Closes M-2.
