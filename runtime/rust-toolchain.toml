@@ -1,0 +1,31 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# RH-H — pinned Rust toolchain for the `runtime/` workspace.
+#
+# The Lean toolchain lives at `lean-toolchain` (the project root);
+# this file is the Rust analogue, scoped to the `runtime/` workspace.
+# `rustup` reads this file automatically when any `cargo` invocation
+# starts inside the workspace tree (including from sub-directories of
+# `runtime/`).
+#
+# Channel choice.  `1.83` is the stable LTS as of the plan's authoring
+# (per `docs/planning/rust_host_runtime_plan.md` §4 RH-H step 2).
+# Bumping the channel is a workspace-level PR per the plan §7 risk
+# register — we don't let any single sub-stream silently drift the
+# toolchain.  `Cargo.toml`'s `[workspace.package].rust-version = "1.83"`
+# documents the same constraint at the package level, so cargo refuses
+# to build under any older toolchain even when this file is missing.
+#
+# Components.  `clippy` and `rustfmt` are pulled in eagerly so the
+# four CI gates (`cargo build`, `cargo test`, `cargo clippy`,
+# `cargo fmt --check`) can run without an extra `rustup component
+# add` step.
+
+[toolchain]
+channel = "1.83"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

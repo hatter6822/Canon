@@ -22,15 +22,23 @@ behind those interface contracts.
 
 ## Status
 
-  * **Workstream prefix:** `RH` (Rust Host).  Sub-streams:
+  * **Workstream prefix:** `RH` (Rust Host).  Sub-stream status:
     - **RH-A** Cryptographic adaptors (E-A Rust).
+      Skeleton crates landed under RH-H; implementation pending.
     - **RH-B** L1 ingestor (E-B Rust).
+      Skeleton crate landed under RH-H; implementation pending.
     - **RH-C** Network adaptor (Phase 5 WU 5.4).
+      Skeleton crate landed under RH-H; implementation pending.
     - **RH-D** Event subscription (Phase 5 WU 5.7).
+      Skeleton crate landed under RH-H; implementation pending.
     - **RH-E** SQLite indexer + Rust DB layer (Phase 5 WU 5.8).
+      Skeleton crates landed under RH-H; implementation pending.
     - **RH-F** Performance benchmark (Phase 5 WU 5.11).
+      Skeleton crate landed under RH-H; implementation pending.
     - **RH-G** Fault-proof observer (Workstream H, WU H.10.5).
+      Skeleton crate landed under RH-H; implementation pending.
     - **RH-H** Workspace + CI harness (the cross-cutting unit).
+      **Complete.**  See §RH-H below for the closeout.
   * **Effort estimate:** 14–22 calendar weeks for one full-time
     Rust engineer (or ~9–14 weeks with two engineers post-RH-H).
   * **Build-posture target:** All Rust crates build under `cargo
@@ -359,6 +367,80 @@ extension; cross-stack fixture corpus packaging for Rust.
 **Risk.**  Low.  Standard Rust workspace setup.
 
 **Effort.**  ~3 engineer-days.
+
+#### RH-H — Closeout
+
+**Status.**  **Complete.**
+
+**Landed deliverables.**
+
+  * `runtime/Cargo.toml` workspace manifest listing 10 member
+    crates (the eight plan-defined work-unit crates plus
+    `canon-cli-common` and `canon-cross-stack` — the latter pair
+    are shared infrastructure consumed by every binary).
+  * `runtime/rust-toolchain.toml` pinning stable 1.83 with
+    `clippy` and `rustfmt` components.  Workspace's
+    `rust-version = "1.83"` documents the MSRV at the package
+    level so cargo rejects pre-1.83 toolchains before any
+    compilation begins.
+  * Two **fully-implemented** crates:
+    - `canon-cli-common` — `OperatorExitCode` exit-code
+      discipline + `tracing-subscriber` initialisation + shared
+      path constants.
+    - `canon-cross-stack` — `.cxsf` fixture-file format spec +
+      loader + writer.  21 unit tests covering round-trip,
+      truncation, single-bit-flip safety, error-path coverage.
+      Used as a dev-dep by downstream crates via
+      `canon-cross-stack = { workspace = true }`.
+  * **Skeleton** crates for the eight remaining work units
+    (RH-A.1, RH-A.2, RH-B, RH-C, RH-D, RH-E.0, RH-E.1, RH-F,
+    RH-G).  Each skeleton:
+    - Compiles clean and passes `cargo clippy --workspace
+      --all-targets -- -D warnings`.
+    - Declares the planned dependency edges (e.g. `canon-indexer
+      → canon-storage`, `canon-faultproof-observer →
+      canon-storage`) so the implementing WUs don't churn the
+      dependency graph.
+    - Documents the planned surface in its `lib.rs` / `main.rs`
+      module docstring.
+    - Skeleton binaries exit code `3 = NotImplemented` (a
+      `canon-cli-common::exit::OperatorExitCode` variant) so a
+      deployment that wires up the skeleton today gets a loud,
+      supervisor-visible refusal rather than a silent no-op.
+    - Does **not** export the eventual C-ABI symbols
+      (`canon_verify_ecdsa`, `canon_hash_bytes`, etc.).  Linking
+      against the skeleton today produces an explicit
+      "undefined reference" at link time — the conservative
+      fail-loud posture preferred over an always-false fallback.
+  * `runtime/tests/cross-stack/` directory + README documenting
+    the `.cxsf` fixture format and the downstream-consumer
+    pattern.
+  * `.github/workflows/ci-rust.yml` workflow.  Path-filtered to
+    `runtime/**`; runs `cargo fmt --check`, `cargo build
+    --workspace --all-targets --locked`, `cargo test --workspace
+    --locked`, `cargo clippy --workspace --all-targets --locked
+    -- -D warnings` in that order (fmt-first for fast-fail).
+    Lean-side `.github/workflows/ci.yml` is unchanged.
+  * `Cargo.lock` committed (the workspace contains binaries;
+    lockfile commit is a reproducibility requirement).
+  * `runtime/README.md` per-area developer guide.
+  * `CLAUDE.md` / `AGENTS.md` build-and-run section extended
+    with the four Rust gates; "Source layout" updated to
+    include `runtime/`.
+  * `README.md` quickstart extended with the Rust workspace
+    block; status table extended with the RH-H row.
+
+**Audit posture at landing.**
+
+  * `cargo build --workspace --all-targets` — green.
+  * `cargo test --workspace` — green (~30 tests across ~13 crate-
+    internal suites + 1 integration suite).
+  * `cargo clippy --workspace --all-targets -- -D warnings` —
+    clean.
+  * `cargo fmt --all -- --check` — clean.
+  * `unsafe_code = "forbid"` workspace-wide.
+  * `missing_docs = "warn"` workspace-wide in libraries; CI
+    `-D warnings` promotes to hard error.
 
 ---
 

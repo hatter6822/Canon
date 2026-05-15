@@ -1,0 +1,41 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# `canon-faultproof-observer` — RH-G skeleton.  The implementing
+# work unit (RH-G.{1..7}) lands the off-chain daemon that watches L1
+# for bisection-game events, computes honest-strategy responses, and
+# submits them.  See `docs/planning/rust_host_runtime_plan.md`
+# §RH-G and `docs/fault_proof_runbook.md` §7.
+
+[package]
+name = "canon-faultproof-observer"
+description = "Off-chain fault-proof bisection-game observer (RH-G skeleton)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "canon-faultproof-observer"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+canon-cli-common = { workspace = true }
+canon-storage = { path = "../canon-storage" }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"

@@ -1,0 +1,36 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# `canon-l1-ingest` — RH-B skeleton.  The implementing work unit
+# (RH-B.{1..6}) lands the L1 watcher daemon that translates Ethereum
+# events to `SignedAction`s and forwards them to `canon-host`.  See
+# `docs/planning/rust_host_runtime_plan.md` §RH-B.
+
+[package]
+name = "canon-l1-ingest"
+description = "Ethereum L1 event ingest daemon for Canon (RH-B skeleton)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "canon-l1-ingest"
+path = "src/main.rs"
+
+[dependencies]
+canon-cli-common = { workspace = true }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"
