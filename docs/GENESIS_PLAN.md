@@ -5009,8 +5009,18 @@ commitExtendedState es =
 
 Each per-sub-state commit is `hashBytes` of the canonical CBE
 encoding.  Under `CollisionFree hashBytes`, top-level commit
-equality implies extensional state equality (theorem #220:
-`commitExtendedState_subcommits_bytes_eq_under_collision_free`).
+equality implies extensional state equality:
+
+  * `commitExtendedState_subcommits_bytes_eq_under_collision_free`
+    establishes per-sub-state CBE-bytes equality (theorem #220).
+  * `commitExtendedState_subcommits_extensional_eq_under_collision_free`
+    (Workstream EI, EI.8.b) lifts bytes-equality to extensional
+    `Std.TreeMap.Equiv` on every map-backed sub-state, packaged
+    as `ExtendedState.extEq`.  This is the form most downstream
+    consumers want, since two `ExtendedState`s that differ only
+    in RB-tree shape (a non-canonical insertion order versus the
+    canonical reconstruction) are extensionally equal but not
+    structurally equal.
 
 Workstream H deliberately uses a single-hash form rather than a
 two-level Sparse Merkle Tree (SMT).  The SMT optimisation is a
@@ -5447,7 +5457,7 @@ Quot.sound]`) and adds zero custom axioms.
 | AR.1     | Shared `signedActionDomain` constant        | Complete          |
 | AR.2     | DeploymentId parameterisation (6 sub-units) | Complete          |
 | AR.3     | Snapshot bootstrap chain anchor + AttestedSnapshot wrapper | Complete |
-| AR.4     | Map-backed sub-state encoder injectivity (8 sub-units) | Deferred — 9–16 working-day proof track scoped but unshipped |
+| AR.4     | Map-backed sub-state encoder injectivity (8 sub-units) | Complete (shipped under Workstream EI; see §15C.7) |
 | AR.5     | Action constructor-tag regression pins (19) | Complete          |
 | AR.6     | Event constructor-tag regression pins (16) + `Event.tag` projection | Complete |
 | AR.7     | Lex Diff comparator widening                | Complete          |
@@ -5466,7 +5476,7 @@ Quot.sound]`) and adds zero custom axioms.
 | AR.20    | `.github/CODEOWNERS`                        | Complete          |
 | AR.21    | `withdraw` positivity                       | Complete          |
 | AR.22    | Documentation + `kernelBuildTag` bump       | Complete          |
-| AR.23    | End-to-end integration regression suite (4 sub-units) | Partial — depends on AR.4.8 for strongest form of final-state equality |
+| AR.23    | End-to-end integration regression suite (4 sub-units) | Complete (AR.4.8 dependency closed by EI.8.b) |
 
 ### 15C.3 Cross-deployment-replay defence
 
@@ -5527,18 +5537,35 @@ coordinates with a refactor moving the legitimate
 `Rewards.applyVerdictWithRewardsUnchecked` callers into a public
 interface that re-exports the unchecked surface controllably.
 
-### 15C.7 Encoder injectivity (deferred)
+### 15C.7 Encoder injectivity (complete)
 
-AR.4 ships the proof skeleton (predicate definitions, theorem
-statements) for the encoder-injectivity quartet across the five
-map-backed sub-states (BalanceMap, State, NonceState, KeyRegistry,
-LocalPolicies, BridgeState).  The full proof chain is a
-9–16 working-day theorem track per the plan's effort estimate
-and is scoped but unshipped on this branch.  CLAUDE.md footnote
-1 remains in place documenting the gap:
-`commitExtendedState_subcommits_bytes_eq_under_collision_free`
-lifts to bytes equality; lifting to extensional `toList` equality
-across the five map-backed sub-states is the AR.4 follow-up.
+The map-backed sub-state encoder-injectivity proof chain
+(originally scoped as AR.4) shipped under Workstream EI
+(Encoder Injectivity) — see
+`docs/planning/encoder_injectivity_plan.md` for the per-sub-unit
+catalogue and `LegalKernel/Encoding/{StateInjective,
+LocalPolicyInjective, BridgeInjective}.lean` plus
+`LegalKernel/FaultProof/Commit.lean` for the shipped theorems.
+
+The headline composition theorem
+`commitExtendedState_subcommits_extensional_eq_under_collision_free`
+in `FaultProof/Commit.lean` lifts the existing bytes-equality
+theorem `commitExtendedState_subcommits_bytes_eq_under_collision_free`
+to extensional state equality (`ExtendedState.extEq`).  Per-
+sub-state injectivity lemmas:
+
+  * `BalanceMap.encode_injective` + `State.encode_injective` (EI.2)
+  * `NonceState.encode_injective` (EI.3)
+  * `KeyRegistry.encodeMap_injective` (EI.4)
+  * `LocalPolicies.encodeMap_injective` (EI.5)
+  * `Bridge.BridgeState.encodeConsumed_injective`,
+    `encodePending_injective`, `encode_injective` (EI.6 + EI.7)
+
+All theorems share the axiom posture `#print axioms` ⊆
+`[propext, Classical.choice, Quot.sound]`.  All are
+**conditional** on canonical-encoding bounds (`< 2^64` on
+pair-list lengths and per-value sizes) — these are deployment-
+level invariants enforced at the runtime boundary (Phase 5).
 
 ---
 

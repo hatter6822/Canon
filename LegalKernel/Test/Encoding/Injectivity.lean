@@ -42,6 +42,9 @@ and Appendix A (theorem-to-test cross-reference matrix).
 import LegalKernel.Test.Framework
 import LegalKernel.Encoding.State
 import LegalKernel.Encoding.StateInjective
+import LegalKernel.Encoding.LocalPolicyInjective
+import LegalKernel.Encoding.BridgeInjective
+import LegalKernel.FaultProof.Commit
 
 namespace LegalKernel.Test.Encoding
 namespace InjectivityTests
@@ -50,6 +53,7 @@ open Std
 open LegalKernel
 open LegalKernel.Authority
 open LegalKernel.Encoding
+open LegalKernel.FaultProof
 
 /-! ## Shared fixtures
 
@@ -966,6 +970,518 @@ def test_state_Equiv_getBalance_eq_refl : TestCase := {
     assertEq v_99 (0 : Amount)    "genState's (99, 99) absent balance"
 }
 
+/-! ### EI.3 — `NonceState.encode_injective` -/
+
+/-- Shared `NonceState` fixtures. -/
+def genNonceState_empty : LegalKernel.Authority.NonceState :=
+  LegalKernel.Authority.NonceState.empty
+
+/-- Single-actor nonce-3 fixture. -/
+def genNonceState_single : LegalKernel.Authority.NonceState :=
+  { next := (∅ : Std.TreeMap ActorId Nonce compare).insert (5 : ActorId) (3 : Nonce) }
+
+/-- Three-actor mixed-nonce fixture. -/
+def genNonceState_three : LegalKernel.Authority.NonceState :=
+  { next :=
+      (((∅ : Std.TreeMap ActorId Nonce compare).insert (3 : ActorId) (1 : Nonce)
+        ).insert (5 : ActorId) (7 : Nonce)
+       ).insert (9 : ActorId) (42 : Nonce) }
+
+/-- Term-level API stability for `NonceState.encode_injective`. -/
+def test_nonceState_encode_injective_api : TestCase := {
+  name := "NonceState.encode_injective API stability"
+  body := do
+    let _proof : ∀ (n₁ n₂ : LegalKernel.Authority.NonceState),
+        n₁.next.toList.length < 256 ^ 8 → n₂.next.toList.length < 256 ^ 8 →
+        (∀ p ∈ n₁.next.toList, p.2 < 256 ^ 8) →
+        (∀ p ∈ n₂.next.toList, p.2 < 256 ^ 8) →
+        NonceState.encode n₁ = NonceState.encode n₂ →
+        n₁.next.Equiv n₂.next :=
+      NonceState.encode_injective
+    pure ()
+}
+
+/-- Term-level API stability for the `expectedNonce`-corollary. -/
+def test_nonceState_expectedNonce_corollary_api : TestCase := {
+  name := "NonceState.expectedNonce_eq_of_encode_eq API stability"
+  body := do
+    let _proof : ∀ (n₁ n₂ : LegalKernel.Authority.NonceState),
+        n₁.next.toList.length < 256 ^ 8 → n₂.next.toList.length < 256 ^ 8 →
+        (∀ p ∈ n₁.next.toList, p.2 < 256 ^ 8) →
+        (∀ p ∈ n₂.next.toList, p.2 < 256 ^ 8) →
+        NonceState.encode n₁ = NonceState.encode n₂ →
+        ∀ a : ActorId, n₁.next[a]? = n₂.next[a]? :=
+      NonceState.expectedNonce_eq_of_encode_eq
+    pure ()
+}
+
+/-- Distinct nonces produce distinct encodings. -/
+def test_nonceState_encode_distinguishes_nonce : TestCase := {
+  name := "NonceState.encode distinguishes states with distinct nonces"
+  body := do
+    let n1 := genNonceState_single
+    let n2 : LegalKernel.Authority.NonceState :=
+      { next := (∅ : Std.TreeMap ActorId Nonce compare).insert (5 : ActorId) (4 : Nonce) }
+    let e1 := NonceState.encode n1
+    let e2 := NonceState.encode n2
+    assert (e1 != e2) "NonceState.encode collided on distinct nonces"
+}
+
+/-- Distinct actors produce distinct encodings. -/
+def test_nonceState_encode_distinguishes_actor : TestCase := {
+  name := "NonceState.encode distinguishes states with distinct actors"
+  body := do
+    let n1 := genNonceState_single
+    let n2 : LegalKernel.Authority.NonceState :=
+      { next := (∅ : Std.TreeMap ActorId Nonce compare).insert (6 : ActorId) (3 : Nonce) }
+    let e1 := NonceState.encode n1
+    let e2 := NonceState.encode n2
+    assert (e1 != e2) "NonceState.encode collided on distinct actors"
+}
+
+/-- NonceState.encode is order-of-insertion invariant. -/
+def test_nonceState_encode_order_invariant : TestCase := {
+  name := "NonceState.encode is order-of-insertion invariant"
+  body := do
+    let n_forward : LegalKernel.Authority.NonceState :=
+      { next :=
+          (((∅ : Std.TreeMap ActorId Nonce compare).insert (3 : ActorId) (1 : Nonce)
+            ).insert (5 : ActorId) (7 : Nonce)
+           ).insert (9 : ActorId) (42 : Nonce) }
+    let n_backward : LegalKernel.Authority.NonceState :=
+      { next :=
+          (((∅ : Std.TreeMap ActorId Nonce compare).insert (9 : ActorId) (42 : Nonce)
+            ).insert (5 : ActorId) (7 : Nonce)
+           ).insert (3 : ActorId) (1 : Nonce) }
+    let e_forward  := NonceState.encode n_forward
+    let e_backward := NonceState.encode n_backward
+    assertEq e_forward e_backward "NonceState.encode differs by insertion order"
+}
+
+/-! ### EI.4 — `KeyRegistry.encodeMap_injective` -/
+
+/-- Shared `KeyRegistry` fixtures. -/
+def genKeyRegistry_empty : LegalKernel.Authority.KeyRegistry :=
+  LegalKernel.Authority.KeyRegistry.empty
+
+/-- Single-actor public-key fixture (using a deterministic 4-byte payload). -/
+def genKeyRegistry_single : LegalKernel.Authority.KeyRegistry :=
+  (∅ : LegalKernel.Authority.KeyRegistry).insert (5 : ActorId)
+    (ByteArray.mk #[1, 2, 3, 4] : LegalKernel.Authority.PublicKey)
+
+/-- Three-actor mixed-key fixture. -/
+def genKeyRegistry_three : LegalKernel.Authority.KeyRegistry :=
+  (((∅ : LegalKernel.Authority.KeyRegistry).insert (3 : ActorId)
+       (ByteArray.mk #[1, 2, 3] : LegalKernel.Authority.PublicKey)
+   ).insert (5 : ActorId)
+       (ByteArray.mk #[4, 5, 6] : LegalKernel.Authority.PublicKey)
+   ).insert (7 : ActorId)
+       (ByteArray.mk #[7, 8, 9] : LegalKernel.Authority.PublicKey)
+
+/-- Term-level API stability for `KeyRegistry.encodeMap_injective`. -/
+def test_keyRegistry_encodeMap_injective_api : TestCase := {
+  name := "KeyRegistry.encodeMap_injective API stability"
+  body := do
+    let _proof : ∀ (kr₁ kr₂ : LegalKernel.Authority.KeyRegistry),
+        kr₁.toList.length < 256 ^ 8 → kr₂.toList.length < 256 ^ 8 →
+        (∀ p ∈ kr₁.toList, p.2.size < 256 ^ 8) →
+        (∀ p ∈ kr₂.toList, p.2.size < 256 ^ 8) →
+        KeyRegistry.encodeMap kr₁ = KeyRegistry.encodeMap kr₂ →
+        kr₁.Equiv kr₂ :=
+      KeyRegistry.encodeMap_injective
+    pure ()
+}
+
+/-- Distinct keys produce distinct encodings. -/
+def test_keyRegistry_encode_distinguishes_key : TestCase := {
+  name := "KeyRegistry.encodeMap distinguishes registries with distinct keys"
+  body := do
+    let kr1 := genKeyRegistry_single
+    let kr2 : LegalKernel.Authority.KeyRegistry :=
+      (∅ : LegalKernel.Authority.KeyRegistry).insert (5 : ActorId)
+        (ByteArray.mk #[9, 9, 9, 9] : LegalKernel.Authority.PublicKey)
+    let e1 := KeyRegistry.encodeMap kr1
+    let e2 := KeyRegistry.encodeMap kr2
+    assert (e1 != e2) "KeyRegistry.encodeMap collided on distinct keys"
+}
+
+/-- Distinct actors produce distinct encodings. -/
+def test_keyRegistry_encode_distinguishes_actor : TestCase := {
+  name := "KeyRegistry.encodeMap distinguishes registries with distinct actors"
+  body := do
+    let kr1 := genKeyRegistry_single
+    let kr2 : LegalKernel.Authority.KeyRegistry :=
+      (∅ : LegalKernel.Authority.KeyRegistry).insert (6 : ActorId)
+        (ByteArray.mk #[1, 2, 3, 4] : LegalKernel.Authority.PublicKey)
+    let e1 := KeyRegistry.encodeMap kr1
+    let e2 := KeyRegistry.encodeMap kr2
+    assert (e1 != e2) "KeyRegistry.encodeMap collided on distinct actors"
+}
+
+/-- KeyRegistry encoding is order-of-insertion invariant. -/
+def test_keyRegistry_encode_order_invariant : TestCase := {
+  name := "KeyRegistry.encodeMap is order-of-insertion invariant"
+  body := do
+    let kr_forward : LegalKernel.Authority.KeyRegistry :=
+      (((∅ : LegalKernel.Authority.KeyRegistry).insert (3 : ActorId)
+           (ByteArray.mk #[1, 2, 3] : LegalKernel.Authority.PublicKey)
+       ).insert (5 : ActorId)
+           (ByteArray.mk #[4, 5, 6] : LegalKernel.Authority.PublicKey)
+       ).insert (7 : ActorId)
+           (ByteArray.mk #[7, 8, 9] : LegalKernel.Authority.PublicKey)
+    let kr_backward : LegalKernel.Authority.KeyRegistry :=
+      (((∅ : LegalKernel.Authority.KeyRegistry).insert (7 : ActorId)
+           (ByteArray.mk #[7, 8, 9] : LegalKernel.Authority.PublicKey)
+       ).insert (5 : ActorId)
+           (ByteArray.mk #[4, 5, 6] : LegalKernel.Authority.PublicKey)
+       ).insert (3 : ActorId)
+           (ByteArray.mk #[1, 2, 3] : LegalKernel.Authority.PublicKey)
+    let e_forward  := KeyRegistry.encodeMap kr_forward
+    let e_backward := KeyRegistry.encodeMap kr_backward
+    assertEq e_forward e_backward "KeyRegistry.encodeMap differs by insertion order"
+}
+
+/-! ### EI.5.c — `LocalPolicy.encodeAsBytes_injective` -/
+
+/-- Term-level API stability for `LocalPolicy.encodeAsBytes_injective`. -/
+def test_localPolicy_encodeAsBytes_injective_api : TestCase := {
+  name := "LocalPolicy.encodeAsBytes_injective API stability"
+  body := do
+    let _proof : ∀ (p₁ p₂ : LegalKernel.Authority.LocalPolicy),
+        LocalPolicy.fieldsBounded p₁ → LocalPolicy.fieldsBounded p₂ →
+        LocalPolicy.encodeAsBytes p₁ = LocalPolicy.encodeAsBytes p₂ →
+        p₁ = p₂ :=
+      LocalPolicy.encodeAsBytes_injective
+    pure ()
+}
+
+/-! ### EI.5.d — `LocalPolicies.encodeMap_injective` -/
+
+/-- Shared `LocalPolicies` fixtures. -/
+def genLocalPolicies_empty : LegalKernel.Authority.LocalPolicies :=
+  LegalKernel.Authority.LocalPolicies.empty
+
+/-- Single-actor policy fixture. -/
+def genLocalPolicies_single : LegalKernel.Authority.LocalPolicies :=
+  (∅ : LegalKernel.Authority.LocalPolicies).insert (5 : ActorId)
+    ({ clauses := [.denyTags [0, 1]] } : LegalKernel.Authority.LocalPolicy)
+
+/-- Term-level API stability for `LocalPolicies.encodeMap_injective`. -/
+def test_localPolicies_encodeMap_injective_api : TestCase := {
+  name := "LocalPolicies.encodeMap_injective API stability"
+  body := do
+    let _proof : ∀ (lp₁ lp₂ : LegalKernel.Authority.LocalPolicies),
+        lp₁.toList.length < 256 ^ 8 → lp₂.toList.length < 256 ^ 8 →
+        (∀ p ∈ lp₁.toList, (LocalPolicy.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ lp₂.toList, (LocalPolicy.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ lp₁.toList, LocalPolicy.fieldsBounded p.2) →
+        (∀ p ∈ lp₂.toList, LocalPolicy.fieldsBounded p.2) →
+        LocalPolicies.encodeMap lp₁ = LocalPolicies.encodeMap lp₂ →
+        lp₁.Equiv lp₂ :=
+      LocalPolicies.encodeMap_injective
+    pure ()
+}
+
+/-- Term-level API stability for the `lookup`-corollary. -/
+def test_localPolicies_lookup_corollary_api : TestCase := {
+  name := "LocalPolicies.lookup_eq_of_encode_eq API stability"
+  body := do
+    let _proof : ∀ (lp₁ lp₂ : LegalKernel.Authority.LocalPolicies),
+        lp₁.toList.length < 256 ^ 8 → lp₂.toList.length < 256 ^ 8 →
+        (∀ p ∈ lp₁.toList, (LocalPolicy.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ lp₂.toList, (LocalPolicy.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ lp₁.toList, LocalPolicy.fieldsBounded p.2) →
+        (∀ p ∈ lp₂.toList, LocalPolicy.fieldsBounded p.2) →
+        LocalPolicies.encodeMap lp₁ = LocalPolicies.encodeMap lp₂ →
+        ∀ a : ActorId, lp₁.lookup a = lp₂.lookup a :=
+      LocalPolicies.lookup_eq_of_encode_eq
+    pure ()
+}
+
+/-- Distinct policies produce distinct encodings. -/
+def test_localPolicies_encode_distinguishes_policy : TestCase := {
+  name := "LocalPolicies.encodeMap distinguishes tables with distinct policies"
+  body := do
+    let lp1 := genLocalPolicies_single
+    let lp2 : LegalKernel.Authority.LocalPolicies :=
+      (∅ : LegalKernel.Authority.LocalPolicies).insert (5 : ActorId)
+        ({ clauses := [.denyTags [0, 2]] } : LegalKernel.Authority.LocalPolicy)
+    let e1 := LocalPolicies.encodeMap lp1
+    let e2 := LocalPolicies.encodeMap lp2
+    assert (e1 != e2) "LocalPolicies.encodeMap collided on distinct policies"
+}
+
+/-! ### EI.6.a — `Bridge.DepositRecord.encode_injective` -/
+
+/-- Term-level API stability for `Bridge.DepositRecord.encode_injective`. -/
+def test_depositRecord_encode_injective_api : TestCase := {
+  name := "Bridge.DepositRecord.encode_injective API stability"
+  body := do
+    let _proof : ∀ (rec₁ rec₂ : LegalKernel.Bridge.DepositRecord),
+        rec₁.resource.toNat < 256 ^ 8 ∧ rec₁.amount < 256 ^ 8 →
+        rec₂.resource.toNat < 256 ^ 8 ∧ rec₂.amount < 256 ^ 8 →
+        Bridge.DepositRecord.encode rec₁ = Bridge.DepositRecord.encode rec₂ →
+        rec₁ = rec₂ :=
+      Bridge.DepositRecord.encode_injective
+    pure ()
+}
+
+/-- Distinct records produce distinct encodings. -/
+def test_depositRecord_encode_distinguishes : TestCase := {
+  name := "Bridge.DepositRecord.encode distinguishes distinct records"
+  body := do
+    let rec1 : LegalKernel.Bridge.DepositRecord := { resource := 1, amount := 100 }
+    let rec2 : LegalKernel.Bridge.DepositRecord := { resource := 1, amount := 200 }
+    let rec3 : LegalKernel.Bridge.DepositRecord := { resource := 2, amount := 100 }
+    let e1 := Bridge.DepositRecord.encode rec1
+    let e2 := Bridge.DepositRecord.encode rec2
+    let e3 := Bridge.DepositRecord.encode rec3
+    assert (e1 != e2) "DepositRecord.encode collided on distinct amounts"
+    assert (e1 != e3) "DepositRecord.encode collided on distinct resources"
+}
+
+/-! ### EI.6.b — `Bridge.DepositRecord.encodeAsBytes_injective` -/
+
+/-- Term-level API stability for `Bridge.DepositRecord.encodeAsBytes_injective`. -/
+def test_depositRecord_encodeAsBytes_injective_api : TestCase := {
+  name := "Bridge.DepositRecord.encodeAsBytes_injective API stability"
+  body := do
+    let _proof : ∀ (rec₁ rec₂ : LegalKernel.Bridge.DepositRecord),
+        rec₁.resource.toNat < 256 ^ 8 ∧ rec₁.amount < 256 ^ 8 →
+        rec₂.resource.toNat < 256 ^ 8 ∧ rec₂.amount < 256 ^ 8 →
+        Bridge.DepositRecord.encodeAsBytes rec₁ = Bridge.DepositRecord.encodeAsBytes rec₂ →
+        rec₁ = rec₂ :=
+      Bridge.DepositRecord.encodeAsBytes_injective
+    pure ()
+}
+
+/-! ### EI.6.c — `Bridge.BridgeState.encodeConsumed_injective` -/
+
+/-- Empty bridge-state fixture. -/
+def genBridgeState_empty : LegalKernel.Bridge.BridgeState :=
+  LegalKernel.Bridge.BridgeState.empty
+
+/-- Single-deposit bridge-state fixture. -/
+def genBridgeState_single_consumed : LegalKernel.Bridge.BridgeState :=
+  { consumed := (∅ : Std.TreeMap LegalKernel.Bridge.DepositId LegalKernel.Bridge.DepositRecord compare).insert
+      (1 : LegalKernel.Bridge.DepositId) { resource := 1, amount := 100 }
+    pending  := ∅
+    nextWdId := 0 }
+
+/-- Term-level API stability for `BridgeState.encodeConsumed_injective`. -/
+def test_bridgeState_encodeConsumed_injective_api : TestCase := {
+  name := "Bridge.BridgeState.encodeConsumed_injective API stability"
+  body := do
+    let _proof : ∀ (bs₁ bs₂ : LegalKernel.Bridge.BridgeState),
+        bs₁.consumed.toList.length < 256 ^ 8 → bs₂.consumed.toList.length < 256 ^ 8 →
+        (∀ p ∈ bs₁.consumed.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₁.consumed.toList, (Bridge.DepositRecord.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, (Bridge.DepositRecord.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₁.consumed.toList, p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8) →
+        Bridge.BridgeState.encodeConsumed bs₁ = Bridge.BridgeState.encodeConsumed bs₂ →
+        bs₁.consumed.Equiv bs₂.consumed :=
+      Bridge.BridgeState.encodeConsumed_injective
+    pure ()
+}
+
+/-- Distinct consumed maps produce distinct encodings. -/
+def test_bridgeState_encodeConsumed_distinguishes : TestCase := {
+  name := "Bridge.BridgeState.encodeConsumed distinguishes distinct consumed maps"
+  body := do
+    let bs1 := genBridgeState_single_consumed
+    let bs2 : LegalKernel.Bridge.BridgeState :=
+      { consumed := (∅ : Std.TreeMap LegalKernel.Bridge.DepositId LegalKernel.Bridge.DepositRecord compare).insert
+          (1 : LegalKernel.Bridge.DepositId) { resource := 1, amount := 200 }
+        pending  := ∅
+        nextWdId := 0 }
+    let e1 := Bridge.BridgeState.encodeConsumed bs1
+    let e2 := Bridge.BridgeState.encodeConsumed bs2
+    assert (e1 != e2) "encodeConsumed collided on distinct amounts"
+}
+
+/-! ### EI.7.a — `Bridge.EthAddress.toBytes_injective` -/
+
+/-- Term-level API stability for `EthAddress.toBytes_injective`. -/
+def test_ethAddress_toBytes_injective_api : TestCase := {
+  name := "Bridge.EthAddress.toBytes_injective API stability"
+  body := do
+    let _proof : ∀ (e₁ e₂ : LegalKernel.Bridge.EthAddress),
+        Bridge.EthAddress.toBytes e₁ = Bridge.EthAddress.toBytes e₂ →
+        e₁ = e₂ :=
+      Bridge.EthAddress.toBytes_injective
+    pure ()
+}
+
+/-- Distinct EthAddresses produce distinct byte serialisations. -/
+def test_ethAddress_toBytes_distinguishes : TestCase := {
+  name := "Bridge.EthAddress.toBytes distinguishes distinct addresses"
+  body := do
+    let e1 : LegalKernel.Bridge.EthAddress := ⟨0, by decide⟩
+    let e2 : LegalKernel.Bridge.EthAddress := ⟨1, by decide⟩
+    let b1 := Bridge.EthAddress.toBytes e1
+    let b2 := Bridge.EthAddress.toBytes e2
+    assert (b1 != b2) "EthAddress.toBytes collided on distinct addresses"
+}
+
+/-! ### EI.7.b — `Bridge.PendingWithdrawal.encode_injective` -/
+
+/-- Term-level API stability for `PendingWithdrawal.encode_injective`. -/
+def test_pendingWithdrawal_encode_injective_api : TestCase := {
+  name := "Bridge.PendingWithdrawal.encode_injective API stability"
+  body := do
+    let _proof : ∀ (wd₁ wd₂ : LegalKernel.Bridge.PendingWithdrawal),
+        wd₁.resource.toNat < 256 ^ 8 →
+        wd₁.amount < 256 ^ 8 →
+        wd₁.l2LogIndex < 256 ^ 8 →
+        wd₂.resource.toNat < 256 ^ 8 →
+        wd₂.amount < 256 ^ 8 →
+        wd₂.l2LogIndex < 256 ^ 8 →
+        Bridge.PendingWithdrawal.encode wd₁ = Bridge.PendingWithdrawal.encode wd₂ →
+        wd₁ = wd₂ :=
+      Bridge.PendingWithdrawal.encode_injective
+    pure ()
+}
+
+/-- Distinct withdrawals produce distinct encodings. -/
+def test_pendingWithdrawal_encode_distinguishes : TestCase := {
+  name := "Bridge.PendingWithdrawal.encode distinguishes distinct withdrawals"
+  body := do
+    let wd1 : LegalKernel.Bridge.PendingWithdrawal :=
+      { resource := 1, recipient := ⟨0, by decide⟩, amount := 100, l2LogIndex := 0 }
+    let wd2 : LegalKernel.Bridge.PendingWithdrawal :=
+      { resource := 1, recipient := ⟨0, by decide⟩, amount := 200, l2LogIndex := 0 }
+    let e1 := Bridge.PendingWithdrawal.encode wd1
+    let e2 := Bridge.PendingWithdrawal.encode wd2
+    assert (e1 != e2) "PendingWithdrawal.encode collided on distinct amounts"
+}
+
+/-! ### EI.7.c — `Bridge.PendingWithdrawal.encodeAsBytes_injective` -/
+
+/-- Term-level API stability for `PendingWithdrawal.encodeAsBytes_injective`. -/
+def test_pendingWithdrawal_encodeAsBytes_injective_api : TestCase := {
+  name := "Bridge.PendingWithdrawal.encodeAsBytes_injective API stability"
+  body := do
+    let _proof : ∀ (wd₁ wd₂ : LegalKernel.Bridge.PendingWithdrawal),
+        wd₁.resource.toNat < 256 ^ 8 →
+        wd₁.amount < 256 ^ 8 →
+        wd₁.l2LogIndex < 256 ^ 8 →
+        wd₂.resource.toNat < 256 ^ 8 →
+        wd₂.amount < 256 ^ 8 →
+        wd₂.l2LogIndex < 256 ^ 8 →
+        Bridge.PendingWithdrawal.encodeAsBytes wd₁ = Bridge.PendingWithdrawal.encodeAsBytes wd₂ →
+        wd₁ = wd₂ :=
+      Bridge.PendingWithdrawal.encodeAsBytes_injective
+    pure ()
+}
+
+/-! ### EI.7.d — `Bridge.BridgeState.encodePending_injective` -/
+
+/-- Term-level API stability for `BridgeState.encodePending_injective`. -/
+def test_bridgeState_encodePending_injective_api : TestCase := {
+  name := "Bridge.BridgeState.encodePending_injective API stability"
+  body := do
+    let _proof : ∀ (bs₁ bs₂ : LegalKernel.Bridge.BridgeState),
+        bs₁.pending.toList.length < 256 ^ 8 → bs₂.pending.toList.length < 256 ^ 8 →
+        (∀ p ∈ bs₁.pending.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₁.pending.toList, (Bridge.PendingWithdrawal.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList, (Bridge.PendingWithdrawal.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₁.pending.toList,
+          p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8 ∧ p.2.l2LogIndex < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList,
+          p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8 ∧ p.2.l2LogIndex < 256 ^ 8) →
+        Bridge.BridgeState.encodePending bs₁ = Bridge.BridgeState.encodePending bs₂ →
+        bs₁.pending.Equiv bs₂.pending :=
+      Bridge.BridgeState.encodePending_injective
+    pure ()
+}
+
+/-! ### EI.7.e — `Bridge.BridgeState.encode_injective` -/
+
+/-- Term-level API stability for `BridgeState.encode_injective`. -/
+def test_bridgeState_encode_injective_api : TestCase := {
+  name := "Bridge.BridgeState.encode_injective API stability"
+  body := do
+    let _proof : ∀ (bs₁ bs₂ : LegalKernel.Bridge.BridgeState),
+        bs₁.consumed.toList.length < 256 ^ 8 → bs₂.consumed.toList.length < 256 ^ 8 →
+        (∀ p ∈ bs₁.consumed.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₁.consumed.toList, (Bridge.DepositRecord.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, (Bridge.DepositRecord.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₁.consumed.toList, p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8) →
+        (∀ p ∈ bs₂.consumed.toList, p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8) →
+        bs₁.pending.toList.length < 256 ^ 8 → bs₂.pending.toList.length < 256 ^ 8 →
+        (∀ p ∈ bs₁.pending.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList, p.1 < 256 ^ 8) →
+        (∀ p ∈ bs₁.pending.toList, (Bridge.PendingWithdrawal.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList, (Bridge.PendingWithdrawal.encodeAsBytes p.2).size < 256 ^ 8) →
+        (∀ p ∈ bs₁.pending.toList,
+          p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8 ∧ p.2.l2LogIndex < 256 ^ 8) →
+        (∀ p ∈ bs₂.pending.toList,
+          p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8 ∧ p.2.l2LogIndex < 256 ^ 8) →
+        bs₁.nextWdId < 256 ^ 8 → bs₂.nextWdId < 256 ^ 8 →
+        Bridge.BridgeState.encode bs₁ = Bridge.BridgeState.encode bs₂ →
+        bs₁.consumed.Equiv bs₂.consumed ∧ bs₁.pending.Equiv bs₂.pending ∧
+        bs₁.nextWdId = bs₂.nextWdId :=
+      Bridge.BridgeState.encode_injective
+    pure ()
+}
+
+/-- Distinct full bridge states produce distinct encodings. -/
+def test_bridgeState_encode_distinguishes : TestCase := {
+  name := "Bridge.BridgeState.encode distinguishes distinct bridges"
+  body := do
+    let bs1 := genBridgeState_single_consumed
+    let bs2 : LegalKernel.Bridge.BridgeState := { bs1 with nextWdId := 1 }
+    let e1 := Bridge.BridgeState.encode bs1
+    let e2 := Bridge.BridgeState.encode bs2
+    assert (e1 != e2) "BridgeState.encode collided on distinct nextWdId"
+}
+
+/-! ### EI.8 — Composition theorem -/
+
+/-- Term-level API stability for `ExtendedState.extEq`. -/
+def test_extendedState_extEq_api : TestCase := {
+  name := "ExtendedState.extEq definition is invokable"
+  body := do
+    let _proof : ∀ (es₁ es₂ : LegalKernel.Authority.ExtendedState),
+        ExtendedState.extEq es₁ es₂ ↔
+          State.Equiv es₁.base es₂.base ∧
+          es₁.nonces.next.Equiv es₂.nonces.next ∧
+          es₁.registry.Equiv es₂.registry ∧
+          es₁.localPolicies.Equiv es₂.localPolicies ∧
+          es₁.bridge.consumed.Equiv es₂.bridge.consumed ∧
+          es₁.bridge.pending.Equiv es₂.bridge.pending ∧
+          es₁.bridge.nextWdId = es₂.bridge.nextWdId :=
+      fun _ _ => Iff.rfl
+    pure ()
+}
+
+/-- `ExtendedState.extEq.refl` reflexivity sanity check. -/
+def test_extendedState_extEq_refl : TestCase := {
+  name := "ExtendedState.extEq.refl holds on a non-trivial fixture"
+  body := do
+    let es : LegalKernel.Authority.ExtendedState := LegalKernel.Authority.ExtendedState.empty
+    let _h : ExtendedState.extEq es es := ExtendedState.extEq.refl es
+    pure ()
+}
+
+/-- Term-level API stability for the composition theorem
+    (closes CLAUDE.md footnote 1). -/
+def test_commitExtendedState_subcommits_extensional_eq_api : TestCase := {
+  name := "commitExtendedState_subcommits_extensional_eq API stability"
+  body := do
+    let _proof : ∀ (es₁ es₂ : LegalKernel.Authority.ExtendedState),
+        LegalKernel.Bridge.CollisionFree LegalKernel.Runtime.hashBytes →
+        ExtendedState.CanonicalBounds es₁ → ExtendedState.CanonicalBounds es₂ →
+        commitExtendedState es₁ = commitExtendedState es₂ →
+        ExtendedState.extEq es₁ es₂ :=
+      commitExtendedState_subcommits_extensional_eq_under_collision_free
+    pure ()
+}
+
 /-! ## Suite registration
 
 `tests` accumulates all EI sub-unit test cases.  The four
@@ -1038,6 +1554,48 @@ def tests : List TestCase :=
   , test_state_Equiv_symm_roundtrip
   , test_state_Equiv_outer_isSome_eq_refl
   , test_state_Equiv_getBalance_eq_refl
+    -- EI.3 — NonceState.encode_injective.
+  , test_nonceState_encode_injective_api
+  , test_nonceState_expectedNonce_corollary_api
+  , test_nonceState_encode_distinguishes_nonce
+  , test_nonceState_encode_distinguishes_actor
+  , test_nonceState_encode_order_invariant
+    -- EI.4 — KeyRegistry.encodeMap_injective.
+  , test_keyRegistry_encodeMap_injective_api
+  , test_keyRegistry_encode_distinguishes_key
+  , test_keyRegistry_encode_distinguishes_actor
+  , test_keyRegistry_encode_order_invariant
+    -- EI.5.c — LocalPolicy.encodeAsBytes_injective.
+  , test_localPolicy_encodeAsBytes_injective_api
+    -- EI.5.d — LocalPolicies.encodeMap_injective.
+  , test_localPolicies_encodeMap_injective_api
+  , test_localPolicies_lookup_corollary_api
+  , test_localPolicies_encode_distinguishes_policy
+    -- EI.6.a — Bridge.DepositRecord.encode_injective.
+  , test_depositRecord_encode_injective_api
+  , test_depositRecord_encode_distinguishes
+    -- EI.6.b — Bridge.DepositRecord.encodeAsBytes_injective.
+  , test_depositRecord_encodeAsBytes_injective_api
+    -- EI.6.c — Bridge.BridgeState.encodeConsumed_injective.
+  , test_bridgeState_encodeConsumed_injective_api
+  , test_bridgeState_encodeConsumed_distinguishes
+    -- EI.7.a — Bridge.EthAddress.toBytes_injective.
+  , test_ethAddress_toBytes_injective_api
+  , test_ethAddress_toBytes_distinguishes
+    -- EI.7.b — Bridge.PendingWithdrawal.encode_injective.
+  , test_pendingWithdrawal_encode_injective_api
+  , test_pendingWithdrawal_encode_distinguishes
+    -- EI.7.c — Bridge.PendingWithdrawal.encodeAsBytes_injective.
+  , test_pendingWithdrawal_encodeAsBytes_injective_api
+    -- EI.7.d — Bridge.BridgeState.encodePending_injective.
+  , test_bridgeState_encodePending_injective_api
+    -- EI.7.e — Bridge.BridgeState.encode_injective.
+  , test_bridgeState_encode_injective_api
+  , test_bridgeState_encode_distinguishes
+    -- EI.8 — Composition theorem + ExtendedState.extEq.
+  , test_extendedState_extEq_api
+  , test_extendedState_extEq_refl
+  , test_commitExtendedState_subcommits_extensional_eq_api
   ]
 
 end InjectivityTests

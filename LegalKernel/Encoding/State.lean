@@ -383,6 +383,76 @@ theorem encodeSortedPairs_injective_bounded
                 = Except.ok (pairs₂, []) := decn₁.symm.trans decn₂
   exact (Prod.mk.injEq _ _ _ _).mp (Except.ok.inj heq_pairs) |>.1
 
+/-! ### `encodeSortedPairs_self_delim_split` (EI.7.e precursor)
+
+The "with suffix" variant of `encodeSortedPairs_injective_bounded`:
+given two `encodeSortedPairs` encodings concatenated with their
+respective suffixes, both the pair-list and the suffix are
+recoverable.  Captures the **self-delimiting** property of CBE map
+encodings.
+
+The proof is a small variation of `encodeSortedPairs_injective_bounded`:
+`cborHeadRoundtrip_append` and `decodeNPairs_encode_foldr_in` both
+already handle arbitrary suffixes, so we thread the per-suffix
+copies through transitivity to derive both the pair-list and suffix
+equalities. -/
+
+/-- Self-delimiting property of `encodeSortedPairs`: from byte-equality
+    of two encoded-pair-list prefixes with arbitrary suffixes, recover
+    both the pair-list equality and the suffix equality.  EI.7.e
+    precursor — `docs/planning/encoder_injectivity_plan.md` §4.7. -/
+theorem encodeSortedPairs_self_delim_split
+    {K V : Type} [Encodable K] [Encodable V]
+    (pairs₁ pairs₂ : List (K × V))
+    (h_len₁ : pairs₁.length < 256 ^ 8)
+    (h_len₂ : pairs₂.length < 256 ^ 8)
+    (hK₁ : ∀ p ∈ pairs₁, ∀ (rest : Stream),
+              Encodable.decode (T := K) (Encodable.encode p.1 ++ rest) = .ok (p.1, rest))
+    (hV₁ : ∀ p ∈ pairs₁, ∀ (rest : Stream),
+              Encodable.decode (T := V) (Encodable.encode p.2 ++ rest) = .ok (p.2, rest))
+    (hK₂ : ∀ p ∈ pairs₂, ∀ (rest : Stream),
+              Encodable.decode (T := K) (Encodable.encode p.1 ++ rest) = .ok (p.1, rest))
+    (hV₂ : ∀ p ∈ pairs₂, ∀ (rest : Stream),
+              Encodable.decode (T := V) (Encodable.encode p.2 ++ rest) = .ok (p.2, rest))
+    (rest₁ rest₂ : Stream)
+    (h : encodeSortedPairs pairs₁ ++ rest₁ = encodeSortedPairs pairs₂ ++ rest₂) :
+    pairs₁ = pairs₂ ∧ rest₁ = rest₂ := by
+  unfold encodeSortedPairs at h
+  -- Re-associate so the CBE head is followed by (body ++ rest).
+  rw [List.append_assoc, List.append_assoc] at h
+  -- Apply `cborHeadRoundtrip_append` to both sides; the suffix is
+  -- arbitrary, so the lemma handles `body ++ rest` as a single suffix.
+  have rd₁ := cborHeadRoundtrip_append cbeTagMap pairs₁.length
+                (pairs₁.foldr (fun p acc =>
+                  Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₁) h_len₁
+  have rd₂ := cborHeadRoundtrip_append cbeTagMap pairs₂.length
+                (pairs₂.foldr (fun p acc =>
+                  Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₂) h_len₂
+  rw [h] at rd₁
+  have heq_head : (Except.ok (pairs₁.length,
+                    pairs₁.foldr (fun p acc =>
+                      Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₁)
+                  : Except DecodeError (Nat × Stream))
+                = Except.ok (pairs₂.length,
+                    pairs₂.foldr (fun p acc =>
+                      Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₂) :=
+    rd₁.symm.trans rd₂
+  have h_pair := (Prod.mk.injEq _ _ _ _).mp (Except.ok.inj heq_head)
+  have h_len_eq : pairs₁.length = pairs₂.length := h_pair.1
+  have h_body_rest_eq :
+      pairs₁.foldr (fun p acc => Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₁ =
+      pairs₂.foldr (fun p acc => Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) [] ++ rest₂ :=
+    h_pair.2
+  -- Apply `decodeNPairs_encode_foldr_in` to both sides with their
+  -- respective suffixes.
+  have decn₁ := decodeNPairs_encode_foldr_in pairs₁ hK₁ hV₁ rest₁
+  have decn₂ := decodeNPairs_encode_foldr_in pairs₂ hK₂ hV₂ rest₂
+  rw [h_body_rest_eq, h_len_eq] at decn₁
+  have heq_pairs : (Except.ok (pairs₁, rest₁)
+                  : Except DecodeError (List (K × V) × Stream))
+                = Except.ok (pairs₂, rest₂) := decn₁.symm.trans decn₂
+  exact (Prod.mk.injEq _ _ _ _).mp (Except.ok.inj heq_pairs)
+
 /-! ### EI.1.d (Equiv variant) — `encodeAsBytes` framing injectivity
 
 The `BalanceMap.encodeAsBytes` framing wrapper produces a
@@ -615,8 +685,15 @@ def Bridge.DepositRecord.decode (s : Stream) :
 
 /-- Wrap a `DepositRecord` payload as a length-prefixed CBE byte
     string for placement in the outer `consumed` map's value slot.
-    Mirrors the inner-map framing pattern in `BalanceMap.encodeAsBytes`. -/
-private def Bridge.DepositRecord.encodeAsBytes (rec : Bridge.DepositRecord) :
+    Mirrors the inner-map framing pattern in `BalanceMap.encodeAsBytes`.
+
+    **Visibility note (EI.6 / OQ-EI-2 option (a)).**  Promoted from
+    `private` to non-private when EI.6 shipped, so the per-sub-state
+    framing-injectivity lemma `Bridge.DepositRecord.encodeAsBytes_injective`
+    can live in `LegalKernel/Encoding/BridgeInjective.lean` alongside
+    `Bridge.DepositRecord.encode_injective`.  Mirrors the visibility
+    decision already taken for `BalanceMap.encodeAsBytes` during EI.2. -/
+def Bridge.DepositRecord.encodeAsBytes (rec : Bridge.DepositRecord) :
     ByteArray :=
   ByteArray.mk (Bridge.DepositRecord.encode rec).toArray
 
@@ -640,8 +717,14 @@ def Bridge.PendingWithdrawal.encode (wd : Bridge.PendingWithdrawal) : Stream :=
   Encodable.encode (T := Nat) wd.l2LogIndex
 
 /-- Wrap a `PendingWithdrawal` as a length-prefixed CBE byte string
-    for placement in the outer `pending` map's value slot. -/
-private def Bridge.PendingWithdrawal.encodeAsBytes
+    for placement in the outer `pending` map's value slot.
+
+    **Visibility note (EI.7 / OQ-EI-2 option (a)).**  Promoted from
+    `private` to non-private when EI.7 shipped, so the per-sub-state
+    framing-injectivity lemma `Bridge.PendingWithdrawal.encodeAsBytes_injective`
+    can live in `LegalKernel/Encoding/BridgeInjective.lean` alongside
+    `Bridge.PendingWithdrawal.encode_injective`. -/
+def Bridge.PendingWithdrawal.encodeAsBytes
     (wd : Bridge.PendingWithdrawal) : ByteArray :=
   ByteArray.mk (Bridge.PendingWithdrawal.encode wd).toArray
 
@@ -901,6 +984,71 @@ theorem depositRecord_roundtrip
   cases rec with
   | mk resource amount =>
     show Bridge.DepositRecord.mk resource.toNat.toUInt64 amount = ⟨resource, amount⟩
+    have : resource.toNat.toUInt64 = resource := UInt64.ofNat_toNat
+    rw [this]
+
+/-- Round-trip for `PendingWithdrawal`: under canonical-encoding bounds on
+    the resource, amount, and l2LogIndex `Nat` fields, encode-then-decode
+    is the identity.  The recipient field's round-trip is unconditional
+    (`EthAddress.toBytes` always produces a 20-byte payload that
+    `EthAddress.ofBytes` recovers exactly via the existing
+    `EthAddress.ofBytes_toBytes` lemma).
+
+    EI.7.b precursor — `docs/planning/encoder_injectivity_plan.md` §4.7. -/
+theorem pendingWithdrawal_roundtrip
+    (wd : Bridge.PendingWithdrawal) (rest : Stream)
+    (h_res : wd.resource.toNat < 256 ^ 8)
+    (h_amt : wd.amount < 256 ^ 8)
+    (h_idx : wd.l2LogIndex < 256 ^ 8) :
+    Bridge.PendingWithdrawal.decode (Bridge.PendingWithdrawal.encode wd ++ rest) =
+    .ok (wd, rest) := by
+  unfold Bridge.PendingWithdrawal.encode Bridge.PendingWithdrawal.decode
+  -- Re-associate the four-segment concatenation so each segment is
+  -- consumed left-to-right by its own decoder.
+  rw [show
+    Encodable.encode (T := Nat) wd.resource.toNat ++
+      Encodable.encode (T := ByteArray) (Bridge.EthAddress.toBytes wd.recipient) ++
+      Encodable.encode (T := Nat) wd.amount ++
+      Encodable.encode (T := Nat) wd.l2LogIndex ++ rest =
+    Encodable.encode (T := Nat) wd.resource.toNat ++
+      (Encodable.encode (T := ByteArray) (Bridge.EthAddress.toBytes wd.recipient) ++
+        (Encodable.encode (T := Nat) wd.amount ++
+          (Encodable.encode (T := Nat) wd.l2LogIndex ++ rest)))
+    from by simp [List.append_assoc]]
+  -- Segment 1: resource (Nat).
+  rw [nat_roundtrip wd.resource.toNat _ h_res]
+  dsimp only
+  have hp_res : wd.resource.toNat < 18446744073709551616 := by
+    have h_eq : (256 : Nat) ^ 8 = 18446744073709551616 := by decide
+    omega
+  rw [dif_pos hp_res]
+  -- Segment 2: recipient bytes (ByteArray).  `EthAddress.toBytes` is
+  -- always 20 bytes; well below 2^64.
+  have h_size : (Bridge.EthAddress.toBytes wd.recipient).size < 256 ^ 8 := by
+    rw [Bridge.EthAddress.toBytes_size]
+    decide
+  rw [byteArray_roundtrip _ _ h_size]
+  dsimp only
+  -- The `ofBytes (toBytes _)` step recovers the original `EthAddress`.
+  rw [Bridge.EthAddress.ofBytes_toBytes]
+  dsimp only
+  -- Segment 3: amount (Nat).
+  rw [nat_roundtrip wd.amount _ h_amt]
+  dsimp only
+  -- Segment 4: l2LogIndex (Nat).
+  rw [nat_roundtrip wd.l2LogIndex rest h_idx]
+  -- Reduce the constructed record back to `wd`.
+  show Except.ok ({ resource := wd.resource.toNat.toUInt64,
+                    recipient := wd.recipient,
+                    amount := wd.amount,
+                    l2LogIndex := wd.l2LogIndex }, rest)
+     = .ok (wd, rest)
+  congr 1
+  congr 1
+  cases wd with
+  | mk resource recipient amount l2LogIndex =>
+    show Bridge.PendingWithdrawal.mk resource.toNat.toUInt64 recipient amount l2LogIndex
+       = ⟨resource, recipient, amount, l2LogIndex⟩
     have : resource.toNat.toUInt64 = resource := UInt64.ofNat_toNat
     rw [this]
 

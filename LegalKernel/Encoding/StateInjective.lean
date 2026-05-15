@@ -73,6 +73,8 @@ open Std
 namespace LegalKernel
 namespace Encoding
 
+open LegalKernel.Authority
+
 /-! ## EI.2.a — `BalanceMap.encode_injective`
 
 The inner-map injectivity theorem.  Specialises
@@ -682,6 +684,257 @@ theorem State.encode_injective
       (fun p hp => h_amt₁ (r, bm₁) h_mem₁ p hp)
       (fun p hp => h_amt₂ (r, bm₂) h_mem₂ p hp)
       h_bytes_eq
+
+/-! ## EI.3 — `NonceState.encode_injective`
+
+The flat-map injectivity theorem for the per-actor nonce ledger.
+`NonceState.next : TreeMap ActorId Nonce compare`, encoded as a
+sorted-pair list of `(ActorId.toNat, Nonce)` pairs.  Specialises
+`encodeSortedPairs_injective_bounded` at `K := Nat, V := Nat`
+(since `Nonce` is `abbrev`-aliased to `Nat`) and lifts the
+projected-key equality through `UInt64.toNat_inj`.
+
+Conditional on canonical-encoding bounds: list length < 2^64
+(CBE head's 8-byte LE pair-count field) and per-nonce value
+< 2^64 (CBE Nat head's 8-byte LE payload).  Actor-key bound is
+automatic (UInt64.toNat is always < 2^64). -/
+
+/-- Internal helper: the `(a.toNat, n)`-projection on `(ActorId, Nonce)`
+    pairs is injective.  Mirrors `balanceMap_pair_proj_injective` but
+    on `Nonce`-valued pairs (also `Nat`-typed at the value position
+    via `Nonce := Nat`). -/
+private theorem nonceState_pair_proj_injective :
+    ∀ x y : ActorId × Nonce,
+      ((fun (p : ActorId × Nonce) => (p.1.toNat, p.2)) x =
+       (fun (p : ActorId × Nonce) => (p.1.toNat, p.2)) y) →
+      x = y := by
+  intro ⟨a₁, v₁⟩ ⟨a₂, v₂⟩ h
+  simp only [Prod.mk.injEq] at h
+  obtain ⟨hk, hv⟩ := h
+  have : a₁ = a₂ := UInt64.toNat_inj.mp hk
+  subst this; subst hv; rfl
+
+/-- EI.3.a — `NonceState.encode_injective`.  Equal canonical encodings
+    of two `NonceState`s imply extensional equality of the underlying
+    nonce ledger maps.
+
+    **Hypotheses.**  Canonical-encoding bounds on (1) the pair-list
+    length (CBE map-head 8-byte LE count field) and (2) each per-actor
+    nonce value (CBE Nat head's 8-byte LE payload).  The actor-key
+    side has no hypothesis: every `a : ActorId = UInt64` automatically
+    satisfies `a.toNat < 2^64`.
+
+    The conclusion is on the underlying `next` field rather than on
+    `NonceState` itself; `NonceState` is a single-field struct so the
+    distinction is mostly cosmetic, but downstream consumers may
+    want the flat `expectedNonce`-equality form (derivable below).
+
+    Workstream EI (`docs/planning/encoder_injectivity_plan.md` §4.3
+    EI.3.a). -/
+theorem NonceState.encode_injective
+    (n₁ n₂ : NonceState)
+    (h_len₁ : n₁.next.toList.length < 256 ^ 8)
+    (h_len₂ : n₂.next.toList.length < 256 ^ 8)
+    (h_nonce₁ : ∀ p ∈ n₁.next.toList, p.2 < 256 ^ 8)
+    (h_nonce₂ : ∀ p ∈ n₂.next.toList, p.2 < 256 ^ 8)
+    (h : NonceState.encode n₁ = NonceState.encode n₂) :
+    n₁.next.Equiv n₂.next := by
+  -- Step A: unfold the encoder to expose the pair-list shape.
+  unfold NonceState.encode at h
+  -- Step B: pair-list length bounds (length-after-map = length).
+  have h_plen₁ : (n₁.next.toList.map (fun (a, n) => (a.toNat, n))).length < 256 ^ 8 := by
+    rw [List.length_map]; exact h_len₁
+  have h_plen₂ : (n₂.next.toList.map (fun (a, n) => (a.toNat, n))).length < 256 ^ 8 := by
+    rw [List.length_map]; exact h_len₂
+  -- Step C: 256^8 = 2^64 conversion fact.
+  have h_uint64_pow : (256 : Nat) ^ 8 = 2 ^ 64 := by decide
+  -- Step D: per-pair round-trip hypotheses for the key carrier (Nat).
+  have hK₁ : ∀ p ∈ n₁.next.toList.map (fun (a, n) => (a.toNat, n)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nat) (Encodable.encode p.1 ++ rest) =
+                  .ok (p.1, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, _, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.1 < 256 ^ 8 := by
+      have : p.1 = q.1.toNat := by rw [← hq_eq]
+      rw [this, h_uint64_pow]; exact UInt64.toNat_lt q.1
+    exact nat_roundtrip p.1 rest hp_bound
+  have hK₂ : ∀ p ∈ n₂.next.toList.map (fun (a, n) => (a.toNat, n)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nat) (Encodable.encode p.1 ++ rest) =
+                  .ok (p.1, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, _, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.1 < 256 ^ 8 := by
+      have : p.1 = q.1.toNat := by rw [← hq_eq]
+      rw [this, h_uint64_pow]; exact UInt64.toNat_lt q.1
+    exact nat_roundtrip p.1 rest hp_bound
+  -- Step E: per-pair round-trip hypotheses for the value carrier (Nonce = Nat).
+  have hV₁ : ∀ p ∈ n₁.next.toList.map (fun (a, n) => (a.toNat, n)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nonce) (Encodable.encode p.2 ++ rest) =
+                  .ok (p.2, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, hq_mem, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.2 < 256 ^ 8 := by
+      have : p.2 = q.2 := by rw [← hq_eq]
+      rw [this]; exact h_nonce₁ q hq_mem
+    exact nat_roundtrip p.2 rest hp_bound
+  have hV₂ : ∀ p ∈ n₂.next.toList.map (fun (a, n) => (a.toNat, n)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nonce) (Encodable.encode p.2 ++ rest) =
+                  .ok (p.2, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, hq_mem, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.2 < 256 ^ 8 := by
+      have : p.2 = q.2 := by rw [← hq_eq]
+      rw [this]; exact h_nonce₂ q hq_mem
+    exact nat_roundtrip p.2 rest hp_bound
+  -- Step F: invoke `encodeSortedPairs_injective_bounded`.
+  have h_pairs : n₁.next.toList.map (fun (a, n) => (a.toNat, n))
+                 = n₂.next.toList.map (fun (a, n) => (a.toNat, n)) :=
+    encodeSortedPairs_injective_bounded
+      (n₁.next.toList.map (fun (a, n) => (a.toNat, n)))
+      (n₂.next.toList.map (fun (a, n) => (a.toNat, n)))
+      h_plen₁ h_plen₂ hK₁ hV₁ hK₂ hV₂ h
+  -- Step G: lift pair-list equality through the `(a.toNat, n)` projection.
+  have h_toList : n₁.next.toList = n₂.next.toList := by
+    have h_pairs' :
+        n₁.next.toList.map (fun p : ActorId × Nonce => (p.1.toNat, p.2))
+        = n₂.next.toList.map (fun p : ActorId × Nonce => (p.1.toNat, p.2)) :=
+      h_pairs
+    exact (List.map_inj_right nonceState_pair_proj_injective).mp h_pairs'
+  -- Step H: lift toList equality to Equiv via Std.
+  exact Std.TreeMap.equiv_iff_toList_eq.mpr h_toList
+
+/-- Corollary: `NonceState.encode_injective` lifts to pointwise
+    `expectedNonce`-equality on the parent `ExtendedState`.  Useful
+    for downstream consumers that read nonces via the high-level
+    accessor rather than the underlying `TreeMap.getElem?` call.
+
+    Note: shipped as a direct corollary of EI.3.a; the
+    `expectedNonce` definition lives in `Authority/Nonce.lean`. -/
+theorem NonceState.expectedNonce_eq_of_encode_eq
+    (n₁ n₂ : NonceState)
+    (h_len₁ : n₁.next.toList.length < 256 ^ 8)
+    (h_len₂ : n₂.next.toList.length < 256 ^ 8)
+    (h_nonce₁ : ∀ p ∈ n₁.next.toList, p.2 < 256 ^ 8)
+    (h_nonce₂ : ∀ p ∈ n₂.next.toList, p.2 < 256 ^ 8)
+    (h : NonceState.encode n₁ = NonceState.encode n₂) :
+    ∀ a : ActorId, n₁.next[a]? = n₂.next[a]? := by
+  intro a
+  have h_equiv : n₁.next.Equiv n₂.next :=
+    NonceState.encode_injective n₁ n₂ h_len₁ h_len₂ h_nonce₁ h_nonce₂ h
+  exact Std.TreeMap.Equiv.getElem?_eq h_equiv
+
+/-! ## EI.4 — `KeyRegistry.encodeMap_injective`
+
+The flat-map injectivity theorem for the per-actor public-key
+registry.  `KeyRegistry := TreeMap ActorId PublicKey compare`,
+encoded as a sorted-pair list of `(ActorId.toNat, PublicKey)`
+pairs.  Specialises `encodeSortedPairs_injective_bounded` at
+`K := Nat, V := ByteArray` (since `PublicKey` is `abbrev`-aliased
+to `ByteArray`).
+
+Conditional on canonical-encoding bounds: list length < 2^64 and
+per-key byte-size < 2^64.  Production `PublicKey` widths
+(secp256k1 33-byte compressed, Ed25519 32-byte) all satisfy the
+size bound trivially. -/
+
+/-- Internal helper: the `(a.toNat, pk)`-projection on
+    `(ActorId, PublicKey)` pairs is injective. -/
+private theorem keyRegistry_pair_proj_injective :
+    ∀ x y : ActorId × PublicKey,
+      ((fun (p : ActorId × PublicKey) => (p.1.toNat, p.2)) x =
+       (fun (p : ActorId × PublicKey) => (p.1.toNat, p.2)) y) →
+      x = y := by
+  intro ⟨a₁, v₁⟩ ⟨a₂, v₂⟩ h
+  simp only [Prod.mk.injEq] at h
+  obtain ⟨hk, hv⟩ := h
+  have : a₁ = a₂ := UInt64.toNat_inj.mp hk
+  subst this; subst hv; rfl
+
+/-- EI.4.a — `KeyRegistry.encodeMap_injective`.  Equal canonical
+    encodings of two `KeyRegistry`s imply extensional equality of the
+    underlying maps.
+
+    **Hypotheses.**  Canonical-encoding bounds on (1) the pair-list
+    length and (2) each per-actor public-key byte size.  Public-key
+    widths in practice are fixed (32 or 33 or 65 bytes); the bound
+    is a deployment-level invariant maintained at the runtime
+    boundary.
+
+    Workstream EI (`docs/planning/encoder_injectivity_plan.md` §4.4
+    EI.4.a). -/
+theorem KeyRegistry.encodeMap_injective
+    (kr₁ kr₂ : KeyRegistry)
+    (h_len₁ : kr₁.toList.length < 256 ^ 8)
+    (h_len₂ : kr₂.toList.length < 256 ^ 8)
+    (h_size₁ : ∀ p ∈ kr₁.toList, p.2.size < 256 ^ 8)
+    (h_size₂ : ∀ p ∈ kr₂.toList, p.2.size < 256 ^ 8)
+    (h : KeyRegistry.encodeMap kr₁ = KeyRegistry.encodeMap kr₂) :
+    kr₁.Equiv kr₂ := by
+  unfold KeyRegistry.encodeMap at h
+  have h_plen₁ : (kr₁.toList.map (fun (a, pk) => (a.toNat, pk))).length < 256 ^ 8 := by
+    rw [List.length_map]; exact h_len₁
+  have h_plen₂ : (kr₂.toList.map (fun (a, pk) => (a.toNat, pk))).length < 256 ^ 8 := by
+    rw [List.length_map]; exact h_len₂
+  have h_uint64_pow : (256 : Nat) ^ 8 = 2 ^ 64 := by decide
+  -- Per-pair round-trip hypotheses for the key carrier (Nat).
+  have hK₁ : ∀ p ∈ kr₁.toList.map (fun (a, pk) => (a.toNat, pk)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nat) (Encodable.encode p.1 ++ rest) =
+                  .ok (p.1, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, _, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.1 < 256 ^ 8 := by
+      have : p.1 = q.1.toNat := by rw [← hq_eq]
+      rw [this, h_uint64_pow]; exact UInt64.toNat_lt q.1
+    exact nat_roundtrip p.1 rest hp_bound
+  have hK₂ : ∀ p ∈ kr₂.toList.map (fun (a, pk) => (a.toNat, pk)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := Nat) (Encodable.encode p.1 ++ rest) =
+                  .ok (p.1, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, _, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_bound : p.1 < 256 ^ 8 := by
+      have : p.1 = q.1.toNat := by rw [← hq_eq]
+      rw [this, h_uint64_pow]; exact UInt64.toNat_lt q.1
+    exact nat_roundtrip p.1 rest hp_bound
+  -- Per-pair round-trip hypotheses for the value carrier (PublicKey = ByteArray).
+  have hV₁ : ∀ p ∈ kr₁.toList.map (fun (a, pk) => (a.toNat, pk)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := PublicKey) (Encodable.encode p.2 ++ rest) =
+                  .ok (p.2, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, hq_mem, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_size : p.2.size < 256 ^ 8 := by
+      have : p.2 = q.2 := by rw [← hq_eq]
+      rw [this]; exact h_size₁ q hq_mem
+    exact byteArray_roundtrip p.2 rest hp_size
+  have hV₂ : ∀ p ∈ kr₂.toList.map (fun (a, pk) => (a.toNat, pk)),
+              ∀ (rest : Stream),
+                Encodable.decode (T := PublicKey) (Encodable.encode p.2 ++ rest) =
+                  .ok (p.2, rest) := by
+    intro p hp_mem rest
+    obtain ⟨q, hq_mem, hq_eq⟩ := List.mem_map.mp hp_mem
+    have hp_size : p.2.size < 256 ^ 8 := by
+      have : p.2 = q.2 := by rw [← hq_eq]
+      rw [this]; exact h_size₂ q hq_mem
+    exact byteArray_roundtrip p.2 rest hp_size
+  have h_pairs : kr₁.toList.map (fun (a, pk) => (a.toNat, pk))
+                 = kr₂.toList.map (fun (a, pk) => (a.toNat, pk)) :=
+    encodeSortedPairs_injective_bounded
+      (kr₁.toList.map (fun (a, pk) => (a.toNat, pk)))
+      (kr₂.toList.map (fun (a, pk) => (a.toNat, pk)))
+      h_plen₁ h_plen₂ hK₁ hV₁ hK₂ hV₂ h
+  have h_toList : kr₁.toList = kr₂.toList := by
+    have h_pairs' :
+        kr₁.toList.map (fun p : ActorId × PublicKey => (p.1.toNat, p.2))
+        = kr₂.toList.map (fun p : ActorId × PublicKey => (p.1.toNat, p.2)) :=
+      h_pairs
+    exact (List.map_inj_right keyRegistry_pair_proj_injective).mp h_pairs'
+  exact Std.TreeMap.equiv_iff_toList_eq.mpr h_toList
 
 /-! ### Corollary: pointwise `getBalance` equality
 

@@ -1688,6 +1688,18 @@ note + runbook update.
 
 ### AR.4 — Map-backed sub-state encoder injectivity (eight sub-units)
 
+**Status: Complete.**  Shipped under Workstream EI (Encoder
+Injectivity) on
+`claude/encoder-injectivity-implementation-UggQv` and the
+predecessor branches `claude/review-encoder-plan-0p5MI`
+(EI.0), `claude/atomic-injectivity-foundation-yHSwQ` (EI.1),
+and `claude/implement-state-encode-nested-nbXhh` (EI.2).  All
+EI.0 – EI.8 sub-units landed.  See
+`docs/planning/encoder_injectivity_plan.md` for the per-sub-unit
+catalogue and `LegalKernel/Encoding/{StateInjective,
+LocalPolicyInjective, BridgeInjective}.lean` plus
+`LegalKernel/FaultProof/Commit.lean` for the shipped theorems.
+
 **Finding map (group level):** M-3 (`*_encode_deterministic`
 only; no `*_encode_injective` for `State`, `ExtendedState`,
 `BridgeState`, `LocalPolicies`, `KeyRegistry`, `NonceState`);
