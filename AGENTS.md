@@ -816,16 +816,18 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  35 tests across 8 non-empty suites at
+**Rust-side test count.**  44 tests across 8 non-empty suites at
 the RH-H landing.  `cargo test --workspace` from `runtime/` is
 the canonical query.  Most of the test mass lives in
-`canon-cross-stack` (21 unit tests + 2 integration tests covering
-round-trip, truncation, single-bit-flip safety, and explicit
-error-path coverage of the fixture loader);
-`canon-cli-common` contributes 7 (exit-code stability, logging
-idempotency, path helpers); the remaining skeleton crates each
-contribute a 1-test crate-name regression check.  The count will
-grow rapidly as RH-A onward materialises.
+`canon-cross-stack` (29 unit tests + 2 integration tests covering
+round-trip, every typed-error variant, every per-field truncation
+path, byte-truncation sweep, single-bit-flip safety, record order
+preservation, huge-count rejection, and `Send + Sync` boundary
+checks); `canon-cli-common` contributes 8 (exit-code distinctness
++ stability, logging idempotency, deterministic error wrapping,
+path helpers); the remaining skeleton crates each contribute a
+1-test crate-name regression check.  The count will grow rapidly
+as RH-A onward materialises.
 
 **Workstream RH-H (Rust host workspace + CI harness).**
 **Complete.**  Lands the workspace under `runtime/` (10 member
@@ -851,15 +853,23 @@ Headlines:
     --workspace`, `cargo clippy --workspace --all-targets --
     -D warnings`, `cargo fmt --all -- --check`) on every PR
     that touches `runtime/**`; Lean-only PRs do not trigger the
-    Rust workflow.
+    Rust workflow.  Third-party action SHAs verified against
+    upstream release tags (actions/checkout v4.3.1,
+    Swatinem/rust-cache v2.7.7).
   * `unsafe_code = "forbid"`, `missing_docs = "warn"`,
     `clippy::pedantic` enabled workspace-wide.
   * Cross-stack fixture format: 16-byte "CXSF" header (magic +
     version + kind tag + count), per-record `(u32 BE input-len,
     input, u32 BE expected-len, expected)`.  Self-describing,
-    bounded-length, byte-deterministic.
+    bounded-length, byte-deterministic.  Parser is panic-free in
+    all non-trivial code paths: `read_u32_be_at` returns
+    `Option<u32>` rather than `expect`-on-precondition, and
+    every error path returns a typed [`LoaderError`] variant.
   * `Cargo.lock` committed (workspace contains binaries; lockfile
     is a reproducibility requirement).
+  * `tempfile` pinned at `~3.14` (newer versions transitively
+    require Rust 1.85+ for `edition2024`; pin coupled to
+    `rust-toolchain.toml`'s 1.83 channel).
 
 **Workstream AR (Audit Remediation, see
 `docs/planning/audit_remediation_plan.md`)** is the most recent landing.

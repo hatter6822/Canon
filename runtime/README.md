@@ -101,7 +101,7 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (~30 tests at the RH-H landing).
+# Run every member crate's tests (44 tests at the RH-H landing).
 cargo test --workspace
 
 # Lint gate: every clippy warning is promoted to a hard error.

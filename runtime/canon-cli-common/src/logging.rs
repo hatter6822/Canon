@@ -9,16 +9,23 @@
 //! Wraps `tracing-subscriber` so every binary inherits the same log
 //! discipline:
 //!
-//!   * Level read from the `RUST_LOG` environment variable, falling
-//!     back to the level supplied at initialisation time.
-//!   * Human-readable single-line records by default; structured
-//!     JSON emission selectable via the `CANON_LOG_FORMAT=json`
-//!     environment variable for operator-side log shipping.
-//!   * `init()` is idempotent — calling it twice from the same
-//!     binary is a no-op rather than a panic.  The plan §7 risk
+//!   * Filter directive read from the `RUST_LOG` environment
+//!     variable, falling back to the level supplied at initialisation
+//!     time when `RUST_LOG` is unset.
+//!   * Human-readable single-line records with target / span-close
+//!     metadata.
+//!   * [`init`] is idempotent — calling it twice from the same
+//!     process is a no-op rather than a panic.  The plan §7 risk
 //!     register notes that misconfigured loggers are an operational
 //!     pain-point, so the API tolerates a redundant call rather than
 //!     crashing.
+//!
+//! Structured-JSON emission is intentionally **not** implemented in
+//! the RH-H skeleton.  Adding it requires turning on the
+//! `tracing-subscriber/json` feature plus a `serde_json` dependency
+//! and changing the formatter's type; that's an operator-grade
+//! follow-up scoped to whichever downstream WU first needs JSON
+//! output (typically `canon-l1-ingest` or `canon-faultproof-observer`).
 
 use std::sync::OnceLock;
 
@@ -33,10 +40,10 @@ static INITIALISED: OnceLock<()> = OnceLock::new();
 /// Logger-initialisation errors surfaced to the caller.
 ///
 /// `init()` returns `Err` only when the `RUST_LOG` environment
-/// variable contains a malformed filter directive that the
-/// `tracing-subscriber` parser rejects.  Every other failure (e.g.
-/// "logger already initialised") is converted to a no-op rather
-/// than an error.
+/// variable contains a malformed filter directive that
+/// `EnvFilter::try_new` rejects.  Every other failure (e.g.
+/// "logger already installed") is converted to a no-op rather than
+/// an error.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
     /// The `RUST_LOG` environment variable contained a directive
@@ -64,28 +71,15 @@ pub fn init(default_level: Level) -> Result<(), LoggingError> {
         Err(_) => EnvFilter::new(default_level.to_string()),
     };
 
-    let json_format = std::env::var("CANON_LOG_FORMAT").ok().as_deref() == Some("json");
-
-    let builder = tracing_subscriber::fmt()
+    // `try_init` returns `Err` only if a subscriber is already
+    // installed; we collapse that to success below to preserve
+    // idempotency under concurrent first-call races.
+    let init_result = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_span_events(FmtSpan::CLOSE)
-        .with_target(true);
+        .with_target(true)
+        .try_init();
 
-    let init_result = if json_format {
-        // The JSON formatter is enabled by the `json` feature in
-        // production builds.  At the workspace-skeleton stage we ship
-        // the human-readable formatter as default; a future PR may
-        // turn on `tracing-subscriber/json` and route this branch
-        // through `.json()`.  Until then, the JSON request falls back
-        // to the same line-oriented formatter with a sentinel target
-        // so operators can still see the request was acknowledged.
-        builder.with_target(true).try_init()
-    } else {
-        builder.try_init()
-    };
-
-    // `try_init` returns `Err` only if a subscriber is already
-    // installed; we collapse that to success (idempotency).
     if init_result.is_ok() {
         let _ = INITIALISED.set(());
     }
@@ -97,6 +91,7 @@ pub fn init(default_level: Level) -> Result<(), LoggingError> {
 mod tests {
     use super::{init, LoggingError};
     use tracing::Level;
+    use tracing_subscriber::EnvFilter;
 
     /// First-call init succeeds.  Second-call init is a no-op (does
     /// not panic, does not error).
@@ -110,25 +105,34 @@ mod tests {
         assert!(second.is_ok());
     }
 
-    /// `LoggingError` implements `std::error::Error` with a
-    /// non-empty Display.  Smoke test against the public surface.
+    /// `LoggingError::InvalidFilter` round-trips through `From` and
+    /// produces a non-empty `Display`.
+    ///
+    /// The test forces a parse failure via a deterministically-
+    /// invalid filter string ("=" with no target — rejected by the
+    /// `EnvFilter` parser).  Compared to the previous implementation
+    /// that used a conditional `if let Err = parse(...)`, this form
+    /// asserts the error path actually fires.
     #[test]
-    fn error_display_non_empty() {
-        // Construct via a deliberately-malformed filter spec.  The
-        // parse error is opaque (a `tracing-subscriber` internal),
-        // so we just check `to_string` is non-empty.
-        let parse_err = "not!a!valid!filter".parse::<tracing_subscriber::filter::Targets>();
-        if let Err(e) = parse_err {
-            // `Targets::parse` returns a different error type than
-            // `EnvFilter::try_new`; but both convert via
-            // `tracing_subscriber::filter::ParseError` upstream.
-            // The point of this test is to verify the
-            // `LoggingError::InvalidFilter` wrapper round-trips with
-            // a Display impl.  Skip if the parser accepted the
-            // string (forward-compatibility with newer
-            // tracing-subscriber versions).
-            let wrapped: LoggingError = e.into();
-            assert!(!wrapped.to_string().is_empty());
-        }
+    fn invalid_filter_error_wraps_and_displays() {
+        // Construct a real `EnvFilter::try_new` parse failure.  The
+        // unwrap on `expect_err` is the load-bearing assertion: if
+        // `tracing-subscriber` ever accepts this string, the test
+        // fails loudly rather than silently skipping the error path
+        // (the previous version's failure mode).
+        let parse_err =
+            EnvFilter::try_new("=").expect_err("EnvFilter must reject `=` as a filter directive");
+        let wrapped: LoggingError = parse_err.into();
+        let displayed = wrapped.to_string();
+        assert!(displayed.starts_with("invalid RUST_LOG directive: "));
+        assert!(displayed.len() > "invalid RUST_LOG directive: ".len());
+    }
+
+    /// `LoggingError` is `Send + Sync` (required for cross-thread
+    /// use; the audit binaries spawn worker threads).
+    #[test]
+    fn logging_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LoggingError>();
     }
 }

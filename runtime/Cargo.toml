@@ -67,13 +67,15 @@ publish = false
 # `dependency.workspace = true`.  Pin minor versions (per the RH plan
 # §7 risk register) so toolchain drift in any single sub-stream cannot
 # silently introduce a breaking dependency upgrade.
+#
+# The list is intentionally minimal: each entry is consumed by at
+# least one current member crate.  Future work units (RH-A onward)
+# add their own dependencies (e.g. `k256`, `sha3`, `tokio`, `ethers`)
+# to this table when they need them.
 [workspace.dependencies]
-anyhow = "1.0"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 
 # Workspace-internal crates (other members depend on these via the
 # `workspace = true` shorthand).

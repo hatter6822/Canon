@@ -66,9 +66,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Read-only token; no workflow step writes to the repo.
+# Workflow permissions.  `contents: read` is the read-only token used
+# by `actions/checkout` to fetch the tree.  `actions: write` is the
+# narrow extra scope `Swatinem/rust-cache` needs to save cache
+# entries via the GitHub Actions Cache service — this is *not* a
+# repo-write permission; it grants writes only to the per-repository
+# build-artifact cache.  No workflow step ever writes to the repo's
+# git contents.
 permissions:
   contents: read
+  actions: write
 
 # Set the working directory for every `run:` step to the Rust
 # workspace root.  Sub-jobs can override but rarely need to.
@@ -112,11 +119,12 @@ jobs:
           cargo fmt --version
 
       - name: Cache cargo artifacts
-        # Swatinem/rust-cache v2.7.6.
+        # Swatinem/rust-cache v2.7.7 (current as of pin date).
         # Caches the cargo registry, the git checkout cache, and
         # the per-workspace `target/` directory.  Keyed on
         # `Cargo.lock` so a dependency bump invalidates cleanly.
-        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
+        # SHA verified against the v2.7.7 release tag on GitHub.
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3
         with:
           workspaces: runtime
           shared-key: rh-h-workspace

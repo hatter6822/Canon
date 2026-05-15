@@ -386,11 +386,19 @@ extension; cross-stack fixture corpus packaging for Rust.
   * Two **fully-implemented** crates:
     - `canon-cli-common` — `OperatorExitCode` exit-code
       discipline + `tracing-subscriber` initialisation + shared
-      path constants.
+      path constants.  8 unit tests covering exit-code
+      distinctness, logger idempotency, deterministic error
+      wrapping, path helpers.
     - `canon-cross-stack` — `.cxsf` fixture-file format spec +
-      loader + writer.  21 unit tests covering round-trip,
-      truncation, single-bit-flip safety, error-path coverage.
-      Used as a dev-dep by downstream crates via
+      loader + writer.  29 unit tests + 2 integration tests
+      covering round-trip, every typed-error variant, every
+      per-field truncation path, byte-truncation sweep, single-
+      bit-flip safety, record-order preservation, huge-count
+      rejection, and `Send + Sync` boundary checks.  Parser is
+      panic-free in all non-trivial code paths
+      (`read_u32_be_at` returns `Option<u32>` rather than
+      panicking on precondition violation).  Used as a dev-dep
+      by downstream crates via
       `canon-cross-stack = { workspace = true }`.
   * **Skeleton** crates for the eight remaining work units
     (RH-A.1, RH-A.2, RH-B, RH-C, RH-D, RH-E.0, RH-E.1, RH-F,
@@ -433,14 +441,26 @@ extension; cross-stack fixture corpus packaging for Rust.
 **Audit posture at landing.**
 
   * `cargo build --workspace --all-targets` — green.
-  * `cargo test --workspace` — green (~30 tests across ~13 crate-
-    internal suites + 1 integration suite).
+  * `cargo test --workspace` — green (44 tests across 8 non-empty
+    suites: 29 in `canon-cross-stack` lib + 2 integration, 8 in
+    `canon-cli-common`, 1 each in five skeleton crates).
   * `cargo clippy --workspace --all-targets -- -D warnings` —
     clean.
   * `cargo fmt --all -- --check` — clean.
   * `unsafe_code = "forbid"` workspace-wide.
   * `missing_docs = "warn"` workspace-wide in libraries; CI
     `-D warnings` promotes to hard error.
+  * Third-party action SHAs verified against upstream release
+    tags before commit (actions/checkout v4.3.1 reuses the SHA
+    already pinned by `ci.yml`; Swatinem/rust-cache v2.7.7
+    SHA `f0deed1e0edfc6a9be95417288c0e1099b1eeec3`).
+  * Production code paths in `canon-cross-stack` have **zero
+    panics on attacker-controllable input**: every malformed-
+    input path returns a typed `LoaderError`.  Three remaining
+    panics live in `FixtureFile::to_bytes` and trigger only on
+    programmer-constructed fixtures with > `u32::MAX` records or
+    > `u32::MAX`-byte fields (both unreachable in practice on any
+    real host).
 
 ---
 

@@ -244,18 +244,28 @@ impl FixtureFile {
                 actual: bytes.len(),
             });
         }
+        // Header fields are at fixed offsets 0/4/8/12.  Every read
+        // is bounds-checked by the `bytes.len() < 16` guard above,
+        // so `read_u32_be_at` is documentation that we trust the
+        // bound rather than a runtime fallback.
         if &bytes[0..4] != MAGIC {
             return Err(LoaderError::BadMagic {
                 seen: [bytes[0], bytes[1], bytes[2], bytes[3]],
             });
         }
-        let version = read_u32_be(&bytes[4..8]);
+        let version = read_u32_be_at(bytes, 4).ok_or(LoaderError::TruncatedHeader {
+            actual: bytes.len(),
+        })?;
         if version != FORMAT_VERSION {
             return Err(LoaderError::UnsupportedVersion { version });
         }
-        let kind_tag = read_u32_be(&bytes[8..12]);
+        let kind_tag = read_u32_be_at(bytes, 8).ok_or(LoaderError::TruncatedHeader {
+            actual: bytes.len(),
+        })?;
         let kind = FixtureKind::from_tag(kind_tag);
-        let count = read_u32_be(&bytes[12..16]);
+        let count = read_u32_be_at(bytes, 12).ok_or(LoaderError::TruncatedHeader {
+            actual: bytes.len(),
+        })?;
         // Defence in depth: a u32-large count combined with the
         // 16-byte header could overflow `usize` arithmetic below
         // on 32-bit hosts.  Bound the count by a sane multiple of
@@ -280,19 +290,30 @@ impl FixtureFile {
 
     /// Serialise to an in-memory byte buffer.  Inverse of
     /// [`FixtureFile::from_bytes`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.records.len()` exceeds [`u32::MAX`], or if
+    /// any individual record's `input` / `expected` exceeds
+    /// [`u32::MAX`] bytes.  Both bounds are inherent to the on-disk
+    /// format (which uses 32-bit length prefixes); callers
+    /// constructing fixtures programmatically should respect them.
+    /// Constructing such a fixture requires > 18 EB of memory on a
+    /// 64-bit host so the bound is practically unreachable.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let total_size = 16usize.saturating_add(
-            self.records
-                .iter()
-                .map(|r| {
-                    4usize
-                        .saturating_add(r.input.len())
-                        .saturating_add(4)
-                        .saturating_add(r.expected.len())
-                })
-                .sum(),
-        );
+        // Total size = 16-byte header + Σ (4 + input.len() + 4 +
+        // expected.len()) over records.  Use a saturating fold so
+        // a theoretical overflow on a pathologically-large fixture
+        // returns `usize::MAX` (clamped) instead of panicking in
+        // debug builds; the actual allocation below would fail
+        // gracefully on OOM.
+        let total_size = self.records.iter().fold(16usize, |acc, r| {
+            acc.saturating_add(4)
+                .saturating_add(r.input.len())
+                .saturating_add(4)
+                .saturating_add(r.expected.len())
+        });
         let mut out = Vec::with_capacity(total_size);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
@@ -336,15 +357,17 @@ impl FixtureFile {
     }
 }
 
-/// Read a 4-byte big-endian u32 from a known-large-enough slice.
-fn read_u32_be(slice: &[u8]) -> u32 {
-    // Caller is responsible for ensuring `slice.len() >= 4`.
-    // The fixed-size array conversion here is infallible under that
-    // precondition.
-    let bytes: [u8; 4] = slice[..4]
-        .try_into()
-        .expect("caller passed at least 4 bytes");
-    u32::from_be_bytes(bytes)
+/// Read a 4-byte big-endian u32 from a slice, returning `None` if
+/// fewer than 4 bytes are available starting at `offset`.
+///
+/// The fallible signature replaces an earlier panic-on-precondition-
+/// violation form: every call site already bounds-checks before
+/// invoking, so the `None` arm is operationally unreachable, but
+/// expressing it as `Option<u32>` removes a latent panic and lets
+/// the compiler verify the bounds-checking discipline.
+fn read_u32_be_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let arr: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_be_bytes(arr))
 }
 
 /// Read a single fixture record starting at `cursor`.  Returns the
@@ -356,16 +379,13 @@ fn read_record(
     record_index: usize,
 ) -> Result<(FixtureRecord, usize), LoaderError> {
     // Input-length prefix.
+    let in_len_u32 = read_u32_be_at(bytes, cursor).ok_or(LoaderError::TruncatedRecord {
+        record_index,
+        field: "input_length_prefix",
+    })?;
     let after_in_len = cursor
         .checked_add(4)
         .ok_or(LoaderError::OffsetOverflow { record_index })?;
-    if after_in_len > bytes.len() {
-        return Err(LoaderError::TruncatedRecord {
-            record_index,
-            field: "input_length_prefix",
-        });
-    }
-    let in_len_u32 = read_u32_be(&bytes[cursor..after_in_len]);
     let in_len = usize::try_from(in_len_u32).map_err(|_| LoaderError::RecordTooLarge {
         record_index,
         field: "input",
@@ -390,16 +410,13 @@ fn read_record(
     let input = bytes[after_in_len..after_in].to_vec();
 
     // Expected-length prefix.
+    let exp_len_u32 = read_u32_be_at(bytes, after_in).ok_or(LoaderError::TruncatedRecord {
+        record_index,
+        field: "expected_length_prefix",
+    })?;
     let after_exp_len = after_in
         .checked_add(4)
         .ok_or(LoaderError::OffsetOverflow { record_index })?;
-    if after_exp_len > bytes.len() {
-        return Err(LoaderError::TruncatedRecord {
-            record_index,
-            field: "expected_length_prefix",
-        });
-    }
-    let exp_len_u32 = read_u32_be(&bytes[after_in..after_exp_len]);
     let exp_len = usize::try_from(exp_len_u32).map_err(|_| LoaderError::RecordTooLarge {
         record_index,
         field: "expected",
@@ -606,10 +623,10 @@ mod tests {
         }
     }
 
-    /// Truncated record (declared length > remaining bytes) →
-    /// typed error.
+    /// Truncated record at the `input_payload` field → typed error
+    /// with the field name.
     #[test]
-    fn rejects_truncated_record() {
+    fn rejects_truncated_input_payload() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
@@ -625,13 +642,86 @@ mod tests {
                 assert_eq!(record_index, 0);
                 assert_eq!(field, "input_payload");
             }
-            other => panic!("expected TruncatedRecord, got {other:?}"),
+            other => panic!("expected TruncatedRecord(input_payload), got {other:?}"),
         }
     }
 
-    /// Record-length-too-large → typed error.
+    /// Truncated record at the `input_length_prefix` field — the
+    /// 4-byte length prefix runs past EOF.
     #[test]
-    fn rejects_oversize_record() {
+    fn rejects_truncated_input_length_prefix() {
+        // Header claims 1 record but provides only 2 bytes of the
+        // record's 4-byte length-prefix field.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&FixtureKind::Hash.to_tag().to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // 2 of 4 needed bytes
+        match FixtureFile::from_bytes(&bytes) {
+            Err(LoaderError::TruncatedRecord {
+                record_index,
+                field,
+            }) => {
+                assert_eq!(record_index, 0);
+                assert_eq!(field, "input_length_prefix");
+            }
+            other => panic!("expected TruncatedRecord(input_length_prefix), got {other:?}"),
+        }
+    }
+
+    /// Truncated record at the `expected_length_prefix` field — the
+    /// input payload completes but the expected-length prefix runs
+    /// past EOF.
+    #[test]
+    fn rejects_truncated_expected_length_prefix() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&FixtureKind::Hash.to_tag().to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&3u32.to_be_bytes()); // input length = 3
+        bytes.extend_from_slice(&[0x01, 0x02, 0x03]); // input payload
+                                                      // Now we should have 4 bytes for expected length, but file ends.
+        match FixtureFile::from_bytes(&bytes) {
+            Err(LoaderError::TruncatedRecord {
+                record_index,
+                field,
+            }) => {
+                assert_eq!(record_index, 0);
+                assert_eq!(field, "expected_length_prefix");
+            }
+            other => panic!("expected TruncatedRecord(expected_length_prefix), got {other:?}"),
+        }
+    }
+
+    /// Truncated record at the `expected_payload` field — the
+    /// expected-length prefix says N bytes but only fewer remain.
+    #[test]
+    fn rejects_truncated_expected_payload() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&FixtureKind::Hash.to_tag().to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // empty input
+        bytes.extend_from_slice(&10u32.to_be_bytes()); // claims 10 expected bytes
+        bytes.extend_from_slice(&[0x01, 0x02]); // only 2 actually present
+        match FixtureFile::from_bytes(&bytes) {
+            Err(LoaderError::TruncatedRecord {
+                record_index,
+                field,
+            }) => {
+                assert_eq!(record_index, 0);
+                assert_eq!(field, "expected_payload");
+            }
+            other => panic!("expected TruncatedRecord(expected_payload), got {other:?}"),
+        }
+    }
+
+    /// Record-length-too-large at the `input` field → typed error.
+    #[test]
+    fn rejects_oversize_input_record() {
         let oversize: u32 =
             u32::try_from(MAX_RECORD_BYTES + 1).expect("MAX_RECORD_BYTES + 1 fits u32");
         let mut bytes = Vec::new();
@@ -650,7 +740,35 @@ mod tests {
                 assert_eq!(field, "input");
                 assert_eq!(length, oversize);
             }
-            other => panic!("expected RecordTooLarge, got {other:?}"),
+            other => panic!("expected RecordTooLarge(input), got {other:?}"),
+        }
+    }
+
+    /// Record-length-too-large at the `expected` field → typed
+    /// error.  The [`MAX_RECORD_BYTES`] bound is enforced
+    /// symmetrically.
+    #[test]
+    fn rejects_oversize_expected_record() {
+        let oversize: u32 =
+            u32::try_from(MAX_RECORD_BYTES + 1).expect("MAX_RECORD_BYTES + 1 fits u32");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&FixtureKind::Hash.to_tag().to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // 1 record
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // empty input
+        bytes.extend_from_slice(&oversize.to_be_bytes());
+        match FixtureFile::from_bytes(&bytes) {
+            Err(LoaderError::RecordTooLarge {
+                record_index,
+                field,
+                length,
+            }) => {
+                assert_eq!(record_index, 0);
+                assert_eq!(field, "expected");
+                assert_eq!(length, oversize);
+            }
+            other => panic!("expected RecordTooLarge(expected), got {other:?}"),
         }
     }
 
@@ -818,5 +936,72 @@ mod tests {
         assert_eq!(MAGIC, b"CXSF");
         assert_eq!(FORMAT_VERSION, 1);
         assert_eq!(MAX_RECORD_BYTES, 16 * 1024 * 1024);
+    }
+
+    /// A header that claims an absurdly-large record count is
+    /// rejected without OOM.  This is a defence-in-depth check
+    /// against the "huge count + tiny file" attack pattern: a
+    /// malformed header could theoretically request [`u32::MAX`]
+    /// records, but the loop bails on the first truncated record
+    /// long before any large allocation occurs.
+    #[test]
+    fn huge_count_rejected_without_oom() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&FixtureKind::Hash.to_tag().to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // claims 4B records
+                                                          // ... but no records follow.  Decoder must error on the
+                                                          // first truncated record, not crash with OOM.
+        match FixtureFile::from_bytes(&bytes) {
+            Err(LoaderError::TruncatedRecord {
+                record_index,
+                field,
+            }) => {
+                assert_eq!(record_index, 0);
+                assert_eq!(field, "input_length_prefix");
+            }
+            other => panic!("expected TruncatedRecord on first record, got {other:?}"),
+        }
+    }
+
+    /// Round-trip preserves record order even with permuted-looking
+    /// inputs.  Defends against a hypothetical encoder bug that
+    /// would write records in sorted order (instead of insertion
+    /// order) — the cross-stack contract requires order
+    /// preservation because Lean emits in a specific, deterministic
+    /// order.
+    #[test]
+    fn record_order_preserved() {
+        // Inputs intentionally non-sorted: [c, a, b].  If the
+        // encoder accidentally sorts, the round-trip output would
+        // be [a, b, c] and this assertion fails.
+        let records = vec![
+            FixtureRecord::new(b"c".to_vec(), vec![3]),
+            FixtureRecord::new(b"a".to_vec(), vec![1]),
+            FixtureRecord::new(b"b".to_vec(), vec![2]),
+        ];
+        let original = FixtureFile::from_records(FixtureKind::Hash, records);
+        let decoded = FixtureFile::from_bytes(&original.to_bytes()).expect("decode");
+        assert_eq!(decoded.records()[0].input, b"c");
+        assert_eq!(decoded.records()[1].input, b"a");
+        assert_eq!(decoded.records()[2].input, b"b");
+    }
+
+    /// The `LoaderError` type is `Send + Sync` so it can cross
+    /// thread boundaries (e.g. when reported up from a worker
+    /// pool's `JoinHandle::join` result).
+    #[test]
+    fn loader_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LoaderError>();
+    }
+
+    /// Magic-byte buffer is exactly 4 bytes — defends against a
+    /// silently-corrupted constant that would alias against random
+    /// 4-byte sequences.
+    #[test]
+    fn magic_is_four_bytes() {
+        assert_eq!(MAGIC.len(), 4);
     }
 }
