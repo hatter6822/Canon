@@ -308,6 +308,25 @@ def test_encodeSortedPairs_injective_api : TestCase := {
     pure ()
 }
 
+/-- Value-level: verify `encodeSortedPairs_injective` (universal
+    variant) is actually applicable on a carrier with unconditional
+    round-trip, namely `List (UInt64 × UInt64)`.  `uInt64_roundtrip`
+    is unconditional, so `ElemRoundtrip UInt64` is provable; this
+    witnesses that the universal variant can be invoked end-to-end. -/
+def test_encodeSortedPairs_injective_applicable : TestCase := {
+  name := "encodeSortedPairs_injective applies to UInt64-keyed pair lists"
+  body := do
+    let _proof :
+      ∀ (pairs₁ pairs₂ : List (UInt64 × UInt64)),
+        pairs₁.length < 256 ^ 8 → pairs₂.length < 256 ^ 8 →
+        encodeSortedPairs pairs₁ = encodeSortedPairs pairs₂ →
+        pairs₁ = pairs₂ :=
+      fun pairs₁ pairs₂ h_len₁ h_len₂ h =>
+        encodeSortedPairs_injective (K := UInt64) (V := UInt64)
+          uInt64_roundtrip uInt64_roundtrip pairs₁ pairs₂ h_len₁ h_len₂ h
+    pure ()
+}
+
 /-- Value-level: `encodeSortedPairs` is deterministic on the empty
     pair list (sanity smoke check before the contrapositive tests). -/
 def test_encodeSortedPairs_empty_deterministic : TestCase := {
@@ -662,6 +681,7 @@ def tests : List TestCase :=
   , test_encodeAsBytes_distinguishes
     -- EI.1.e — encodeSortedPairs_injective + _bounded variant.
   , test_encodeSortedPairs_injective_api
+  , test_encodeSortedPairs_injective_applicable
   , test_encodeSortedPairs_injective_bounded_api
   , test_encodeSortedPairs_injective_bounded_applicable
   , test_encodeSortedPairs_empty_deterministic

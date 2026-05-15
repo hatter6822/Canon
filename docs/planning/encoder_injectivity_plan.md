@@ -1623,9 +1623,10 @@ have no sub-state-specific scope.
 **Audit posture (at EI.1 closeout).**
 
   * `lake build` — green (zero warnings, zero errors).
-  * `lake test` — 1911 → 1938 cases (+27 EI.1 test cases across the
+  * `lake test` — 1911 → 1939 cases (+28 EI.1 test cases across the
     eight sub-sub-units, including the EI.1.e `_bounded` variant
-    coverage); `ALL TESTS PASSED`.
+    coverage and concrete applicability witnesses for both
+    `encodeSortedPairs_injective` variants); `ALL TESTS PASSED`.
   * `lake exe count_sorries` — green (0 sorries).
   * `lake exe tcb_audit` — green (no TCB-tier change; EI.1.a was
     dropped, so `RBMapLemmas.lean` is untouched and the §13.6
