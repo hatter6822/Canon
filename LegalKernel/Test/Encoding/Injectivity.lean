@@ -907,6 +907,65 @@ def test_state_Equiv_refl_holds : TestCase := {
     pure ()
 }
 
+/-- Value-level: `State.Equiv.symm` round-trips.  Applying `symm`
+    twice to a reflexive equivalence recovers a reflexive
+    equivalence; this verifies the `symm` corollary is invocable
+    end-to-end. -/
+def test_state_Equiv_symm_roundtrip : TestCase := {
+  name := "State.Equiv.symm applied twice elaborates to an Equiv"
+  body := do
+    let h₁ : State.Equiv genState genState := State.Equiv.refl genState
+    let h₂ : State.Equiv genState genState := State.Equiv.symm h₁
+    let _h₃ : State.Equiv genState genState := State.Equiv.symm h₂
+    pure ()
+}
+
+/-- Value-level: `State.Equiv.outer_isSome_eq` on a reflexive
+    equivalence gives `b = b` at every resource — sanity check on the
+    `Bool`-`Eq` form. -/
+def test_state_Equiv_outer_isSome_eq_refl : TestCase := {
+  name := "State.Equiv.outer_isSome_eq holds on a reflexive fixture"
+  body := do
+    let h_refl : State.Equiv genState genState := State.Equiv.refl genState
+    -- The `outer_isSome_eq` claim at every resource reduces to a
+    -- trivial `b = b` for `h_refl`.  Verify three concrete probes.
+    let _p1 : genState.balances[(1 : ResourceId)]?.isSome
+            = genState.balances[(1 : ResourceId)]?.isSome :=
+      h_refl.outer_isSome_eq (1 : ResourceId)
+    let _p2 : genState.balances[(2 : ResourceId)]?.isSome
+            = genState.balances[(2 : ResourceId)]?.isSome :=
+      h_refl.outer_isSome_eq (2 : ResourceId)
+    let _p3 : genState.balances[(99 : ResourceId)]?.isSome
+            = genState.balances[(99 : ResourceId)]?.isSome :=
+      h_refl.outer_isSome_eq (99 : ResourceId)
+    pure ()
+}
+
+/-- Value-level: `State.Equiv.getBalance_eq` on a reflexive
+    equivalence reduces to `getBalance s = getBalance s` at every
+    `(r, a)` query — sanity check that the corollary is invocable. -/
+def test_state_Equiv_getBalance_eq_refl : TestCase := {
+  name := "State.Equiv.getBalance_eq holds on a reflexive fixture"
+  body := do
+    let h_refl : State.Equiv genState genState := State.Equiv.refl genState
+    -- For every `(r, a)` query, the result must be the same on both sides.
+    -- Probe three combinations.
+    let v_11 := LegalKernel.getBalance genState (1 : ResourceId) (5 : ActorId)
+    let v_22 := LegalKernel.getBalance genState (2 : ResourceId) (7 : ActorId)
+    let v_99 := LegalKernel.getBalance genState (99 : ResourceId) (99 : ActorId)
+    -- Term-level: the corollary witnesses each equality.
+    let _e1 : LegalKernel.getBalance genState 1 5 = LegalKernel.getBalance genState 1 5 :=
+      h_refl.getBalance_eq 1 5
+    let _e2 : LegalKernel.getBalance genState 2 7 = LegalKernel.getBalance genState 2 7 :=
+      h_refl.getBalance_eq 2 7
+    let _e3 : LegalKernel.getBalance genState 99 99 = LegalKernel.getBalance genState 99 99 :=
+      h_refl.getBalance_eq 99 99
+    -- Also assert the actual values match the fixture's setBalance writes.
+    assertEq v_11 (100 : Amount) "genState's (1, 5) balance"
+    assertEq v_22 (1000 : Amount) "genState's (2, 7) balance"
+    assertEq v_99 (0 : Amount)    "genState's (99, 99) absent balance"
+}
+
 /-! ## Suite registration
 
 `tests` accumulates all EI sub-unit test cases.  The four
@@ -976,6 +1035,9 @@ def tests : List TestCase :=
   , test_state_encode_distinguishes_outerKey
   , test_state_encode_order_invariant
   , test_state_Equiv_refl_holds
+  , test_state_Equiv_symm_roundtrip
+  , test_state_Equiv_outer_isSome_eq_refl
+  , test_state_Equiv_getBalance_eq_refl
   ]
 
 end InjectivityTests

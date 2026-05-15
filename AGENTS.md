@@ -915,13 +915,15 @@ Highlights of the AR remediation pass:
         shape.  Helpers: `outer_keys_agree` (`Iff` form),
         `outer_isSome_eq` (`Bool` form), `inner_equiv`, `refl`,
         `symm`, and the flat `getBalance_eq` corollary.
-      - **EI.2.e** 14 new test cases in
+      - **EI.2.e** 17 new test cases in
         `LegalKernel/Test/Encoding/Injectivity.lean` covering
         term-level API stability, positive injectivity
-        (distinct inputs → distinct encodings), and negative
+        (distinct inputs → distinct encodings), negative
         determinism (structurally-distinct extensionally-equal
-        inputs → identical encodings).  Total
-        `encoding-injectivity` suite: 46 cases (was 32 pre-EI.2).
+        inputs → identical encodings), and value-level smoke
+        checks on the `State.Equiv` corollaries (`refl`, `symm`,
+        `outer_isSome_eq`, `getBalance_eq`).  Total
+        `encoding-injectivity` suite: 49 cases (was 32 pre-EI.2).
       - **EI.2.f** Retrospective recorded in
         `docs/planning/encoder_injectivity_plan.md` §4.2 closeout
         block: `Equiv`-as-target was a net win; EI.3 – EI.7

@@ -93,8 +93,10 @@ and `docs/planning/audit_remediation_plan.md` §4.4 / §15C.7.
         `State.Equiv.getBalance_eq` gives the flat
         `getBalance`-equality form most downstream consumers
         use.
-      - **EI.2.e** Test fixtures + term-level API (14 new test
-        cases in `LegalKernel/Test/Encoding/Injectivity.lean`).
+      - **EI.2.e** Test fixtures + term-level API (17 new test
+        cases in `LegalKernel/Test/Encoding/Injectivity.lean`,
+        bringing the `encoding-injectivity` suite from 32 to
+        49 cases).
       - **EI.2.f** Retrospective (this paragraph): the
         `Equiv`-as-target choice was a net win — the inner
         `BalanceMap`s genuinely cannot satisfy structural `Eq`
