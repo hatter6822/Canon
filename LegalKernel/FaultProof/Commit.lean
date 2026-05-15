@@ -41,6 +41,9 @@ import LegalKernel.Bridge.Eip712
 import LegalKernel.Bridge.HashAdaptor
 import LegalKernel.Bridge.State
 import LegalKernel.Encoding.State
+import LegalKernel.Encoding.StateInjective
+import LegalKernel.Encoding.LocalPolicyInjective
+import LegalKernel.Encoding.BridgeInjective
 import LegalKernel.Runtime.Hash
 
 namespace LegalKernel
@@ -409,6 +412,264 @@ theorem commitExtendedState_subcommits_bytes_eq_under_collision_free
          commitKeyRegistry_bytes_injective_under_collision_free _ _ h_cf h_kr,
          commitLocalPolicies_bytes_injective_under_collision_free _ _ h_cf h_lp,
          commitBridgeState_bytes_injective_under_collision_free _ _ h_cf h_bs⟩
+
+/-! ## EI.8 — Extensional-equality lift of the subcommits theorem
+
+The bytes-equality theorem
+`commitExtendedState_subcommits_bytes_eq_under_collision_free`
+establishes that under collision-freedom of `hashBytes`, equal
+top-level commits imply equal sub-state CBE encodings (modulo
+`ByteArray.mk ∘ .toArray` framing).  Workstream EI lifts this from
+*bytes-equality* to *extensional state equality*: equal commits
+imply that the underlying TreeMap-backed sub-states are
+`Std.TreeMap.Equiv`-equivalent (i.e. share the same logical
+`(key, value)` content, modulo RB-tree shape).
+
+This sub-section ships:
+
+  * **EI.8.a** `ExtendedState.extEq` — the per-sub-state `Equiv`
+    conjunction.  Custom relation because the nested `State.balances`
+    requires the EI.2 `State.Equiv` rather than a flat `Std.TreeMap.Equiv`.
+
+  * **EI.8.b**
+    `commitExtendedState_subcommits_extensional_eq_under_collision_free`
+    — the headline composition theorem.  Routes the five sub-state
+    bytes-equalities (from the existing theorem) through EI.2.d /
+    EI.3.a / EI.4.a / EI.5.d / EI.7.e to derive the per-sub-state
+    `Equiv` conjuncts.
+
+The bytes-equality theorem stays in source as a load-bearing
+primitive (used by sub-state-specific theorems and the runtime
+audit binary); EI.8 *adds* the extensional variant alongside.
+
+The composition theorem requires the deployment to bound every
+encoded sub-state's pair-list lengths and per-value sizes by the
+canonical CBE bound (`< 2^64`).  These bounds are deployment-level
+invariants enforced at the runtime boundary (Phase 5 + §8.5);
+operators that violate them open their deployment to bytes-collisions
+on the encoder side, which is independent of (and orthogonal to) the
+fault-proof game's correctness. -/
+
+/-- Per-sub-state extensional equality on `ExtendedState`.  This is
+    a `Prop`-valued relation that captures "two `ExtendedState`s
+    encode to the same canonical bytes" through the EI.2 – EI.7
+    `Equiv` conclusions.
+
+    The shape mirrors the byte-decomposition of `commitExtendedState`:
+    five conjuncts for the five sub-states (`base`, `nonces`,
+    `registry`, `localPolicies`, `bridge`-as-three-fields).
+
+    Workstream EI (`docs/planning/encoder_injectivity_plan.md` §4.8
+    EI.8.a). -/
+def ExtendedState.extEq (es₁ es₂ : ExtendedState) : Prop :=
+  State.Equiv es₁.base es₂.base ∧
+  es₁.nonces.next.Equiv es₂.nonces.next ∧
+  es₁.registry.Equiv es₂.registry ∧
+  es₁.localPolicies.Equiv es₂.localPolicies ∧
+  es₁.bridge.consumed.Equiv es₂.bridge.consumed ∧
+  es₁.bridge.pending.Equiv es₂.bridge.pending ∧
+  es₁.bridge.nextWdId = es₂.bridge.nextWdId
+
+/-- `ExtendedState.extEq` is reflexive.  Trivially derived from the
+    per-sub-state `Equiv.refl` lemmas. -/
+theorem ExtendedState.extEq.refl (es : ExtendedState) : ExtendedState.extEq es es := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · exact State.Equiv.refl es.base
+  · exact Std.TreeMap.Equiv.rfl
+  · exact Std.TreeMap.Equiv.rfl
+  · exact Std.TreeMap.Equiv.rfl
+  · exact Std.TreeMap.Equiv.rfl
+  · exact Std.TreeMap.Equiv.rfl
+  · rfl
+
+/-- The canonical-bounds bundle for an `ExtendedState`.  Each
+    deployment maintains these invariants at the runtime boundary;
+    they are the explicit version of "all encoded sub-state widths
+    fit in 64-bit fields".
+
+    Bundled into a single `structure` so the composition theorem's
+    signature stays tractable. -/
+structure ExtendedState.CanonicalBounds (es : ExtendedState) : Prop where
+  /-- The outer `balances` map's pair-list length fits. -/
+  base_outer_len : es.base.balances.toList.length < 256 ^ 8
+  /-- Each inner `BalanceMap` pair-list length fits. -/
+  base_inner_len : ∀ p ∈ es.base.balances.toList, p.2.toList.length < 256 ^ 8
+  /-- Each inner amount value fits. -/
+  base_amt : ∀ p ∈ es.base.balances.toList, ∀ q ∈ p.2.toList, q.2 < 256 ^ 8
+  /-- Each inner-map framed-bytes size fits. -/
+  base_inner_size : ∀ p ∈ es.base.balances.toList,
+                    (BalanceMap.encodeAsBytes p.2).size < 256 ^ 8
+  /-- The nonce-ledger pair-list length fits. -/
+  nonces_len : es.nonces.next.toList.length < 256 ^ 8
+  /-- Each per-actor nonce value fits. -/
+  nonces_val : ∀ p ∈ es.nonces.next.toList, p.2 < 256 ^ 8
+  /-- The key-registry pair-list length fits. -/
+  registry_len : es.registry.toList.length < 256 ^ 8
+  /-- Each per-actor public-key byte size fits. -/
+  registry_size : ∀ p ∈ es.registry.toList, p.2.size < 256 ^ 8
+  /-- The local-policies pair-list length fits. -/
+  lp_len : es.localPolicies.toList.length < 256 ^ 8
+  /-- Each per-actor policy framed-bytes size fits. -/
+  lp_size : ∀ p ∈ es.localPolicies.toList,
+            (LocalPolicy.encodeAsBytes p.2).size < 256 ^ 8
+  /-- Each per-actor policy satisfies `fieldsBounded`. -/
+  lp_pol : ∀ p ∈ es.localPolicies.toList, LocalPolicy.fieldsBounded p.2
+  /-- The bridge consumed-map pair-list length fits. -/
+  bs_cons_len : es.bridge.consumed.toList.length < 256 ^ 8
+  /-- Each per-deposit-id fits. -/
+  bs_cons_id : ∀ p ∈ es.bridge.consumed.toList, p.1 < 256 ^ 8
+  /-- Each per-record framed-bytes size fits. -/
+  bs_cons_size : ∀ p ∈ es.bridge.consumed.toList,
+                 (Bridge.DepositRecord.encodeAsBytes p.2).size < 256 ^ 8
+  /-- Each deposit record's fields fit. -/
+  bs_cons_rec : ∀ p ∈ es.bridge.consumed.toList,
+                p.2.resource.toNat < 256 ^ 8 ∧ p.2.amount < 256 ^ 8
+  /-- The bridge pending-map pair-list length fits. -/
+  bs_pend_len : es.bridge.pending.toList.length < 256 ^ 8
+  /-- Each per-withdrawal-id fits. -/
+  bs_pend_id : ∀ p ∈ es.bridge.pending.toList, p.1 < 256 ^ 8
+  /-- Each per-withdrawal framed-bytes size fits. -/
+  bs_pend_size : ∀ p ∈ es.bridge.pending.toList,
+                 (Bridge.PendingWithdrawal.encodeAsBytes p.2).size < 256 ^ 8
+  /-- Each pending withdrawal's fields fit. -/
+  bs_pend_wd : ∀ p ∈ es.bridge.pending.toList,
+               p.2.resource.toNat < 256 ^ 8 ∧
+               p.2.amount < 256 ^ 8 ∧
+               p.2.l2LogIndex < 256 ^ 8
+  /-- The bridge nextWdId fits. -/
+  bs_nxt : es.bridge.nextWdId < 256 ^ 8
+
+/-- EI.8.b — Composition theorem.  Under
+    `CollisionFree hashBytes` plus the canonical-bounds invariants
+    on both `ExtendedState`s, equal top-level commits imply
+    extensional state equality (the per-sub-state `Equiv`
+    conjunction packaged as `ExtendedState.extEq`).
+
+    **Proof.**  Compose the existing bytes-equality theorem
+    `commitExtendedState_subcommits_bytes_eq_under_collision_free`
+    with the per-sub-state EI lemmas:
+
+      * `State.encode_injective` (EI.2.d) for `base`.
+      * `NonceState.encode_injective` (EI.3.a) for `nonces`.
+      * `KeyRegistry.encodeMap_injective` (EI.4.a) for `registry`.
+      * `LocalPolicies.encodeMap_injective` (EI.5.d) for `localPolicies`.
+      * `Bridge.BridgeState.encode_injective` (EI.7.e) for `bridge`.
+
+    Each sub-state's bytes-equality is stripped of the
+    `ByteArray.mk ∘ .toArray` framing (via the existing helpers in
+    the bytes-eq theorem) and lifted to its `Equiv`/`Eq` conclusion
+    via the corresponding EI lemma.
+
+    Workstream EI (`docs/planning/encoder_injectivity_plan.md` §4.8
+    EI.8.b).  Retires CLAUDE.md footnote 1. -/
+theorem commitExtendedState_subcommits_extensional_eq_under_collision_free
+    (es₁ es₂ : ExtendedState)
+    (h_cf : Bridge.CollisionFree hashBytes)
+    (h_b₁ : ExtendedState.CanonicalBounds es₁)
+    (h_b₂ : ExtendedState.CanonicalBounds es₂)
+    (h : commitExtendedState es₁ = commitExtendedState es₂) :
+    ExtendedState.extEq es₁ es₂ := by
+  -- Step 1: Apply the existing bytes-equality theorem to extract the
+  -- five sub-state byte-array equalities.
+  obtain ⟨h_b, h_n, h_kr, h_lp, h_bs⟩ :=
+    commitExtendedState_subcommits_bytes_eq_under_collision_free es₁ es₂ h_cf h
+  -- Step 2: Strip the `ByteArray.mk ∘ .toArray` framing on each
+  -- sub-state byte-equality to recover the underlying `Stream` (List
+  -- UInt8) equality that the EI lemmas consume.
+  have h_base_stream : State.encode es₁.base = State.encode es₂.base := by
+    have h_arr : (State.encode es₁.base).toArray = (State.encode es₂.base).toArray := by
+      injection h_b
+    have h_list : (State.encode es₁.base).toArray.toList
+                = (State.encode es₂.base).toArray.toList := by rw [h_arr]
+    rw [List.toList_toArray, List.toList_toArray] at h_list
+    exact h_list
+  have h_nonces_stream : NonceState.encode es₁.nonces = NonceState.encode es₂.nonces := by
+    have h_arr : (NonceState.encode es₁.nonces).toArray
+               = (NonceState.encode es₂.nonces).toArray := by injection h_n
+    have h_list : (NonceState.encode es₁.nonces).toArray.toList
+                = (NonceState.encode es₂.nonces).toArray.toList := by rw [h_arr]
+    rw [List.toList_toArray, List.toList_toArray] at h_list
+    exact h_list
+  have h_registry_stream :
+      KeyRegistry.encodeMap es₁.registry = KeyRegistry.encodeMap es₂.registry := by
+    have h_arr : (KeyRegistry.encodeMap es₁.registry).toArray
+               = (KeyRegistry.encodeMap es₂.registry).toArray := by injection h_kr
+    have h_list : (KeyRegistry.encodeMap es₁.registry).toArray.toList
+                = (KeyRegistry.encodeMap es₂.registry).toArray.toList := by rw [h_arr]
+    rw [List.toList_toArray, List.toList_toArray] at h_list
+    exact h_list
+  have h_lp_stream :
+      Encodable.encode (T := LocalPolicies) es₁.localPolicies =
+      Encodable.encode (T := LocalPolicies) es₂.localPolicies := by
+    have h_arr : (Encodable.encode (T := LocalPolicies) es₁.localPolicies).toArray
+               = (Encodable.encode (T := LocalPolicies) es₂.localPolicies).toArray := by
+      injection h_lp
+    have h_list : (Encodable.encode (T := LocalPolicies) es₁.localPolicies).toArray.toList
+                = (Encodable.encode (T := LocalPolicies) es₂.localPolicies).toArray.toList := by
+      rw [h_arr]
+    rw [List.toList_toArray, List.toList_toArray] at h_list
+    exact h_list
+  have h_bridge_stream :
+      Encodable.encode (T := BridgeState) es₁.bridge =
+      Encodable.encode (T := BridgeState) es₂.bridge := by
+    have h_arr : (Encodable.encode (T := BridgeState) es₁.bridge).toArray
+               = (Encodable.encode (T := BridgeState) es₂.bridge).toArray := by
+      injection h_bs
+    have h_list : (Encodable.encode (T := BridgeState) es₁.bridge).toArray.toList
+                = (Encodable.encode (T := BridgeState) es₂.bridge).toArray.toList := by
+      rw [h_arr]
+    rw [List.toList_toArray, List.toList_toArray] at h_list
+    exact h_list
+  -- Step 3: Apply each EI lemma to derive the corresponding Equiv/Eq.
+  -- EI.2.d for base (nested map → State.Equiv).
+  have h_base : State.Equiv es₁.base es₂.base :=
+    State.encode_injective es₁.base es₂.base
+      h_b₁.base_outer_len h_b₂.base_outer_len
+      h_b₁.base_inner_len h_b₂.base_inner_len
+      h_b₁.base_amt h_b₂.base_amt
+      h_b₁.base_inner_size h_b₂.base_inner_size
+      h_base_stream
+  -- EI.3.a for nonces (flat map → Equiv on `.next`).
+  have h_nonces : es₁.nonces.next.Equiv es₂.nonces.next :=
+    NonceState.encode_injective es₁.nonces es₂.nonces
+      h_b₁.nonces_len h_b₂.nonces_len
+      h_b₁.nonces_val h_b₂.nonces_val
+      h_nonces_stream
+  -- EI.4.a for registry.
+  have h_registry : es₁.registry.Equiv es₂.registry :=
+    KeyRegistry.encodeMap_injective es₁.registry es₂.registry
+      h_b₁.registry_len h_b₂.registry_len
+      h_b₁.registry_size h_b₂.registry_size
+      h_registry_stream
+  -- EI.5.d for localPolicies.  Note: Encodable.encode (T := LocalPolicies)
+  -- unfolds definitionally to LocalPolicies.encodeMap via the instance.
+  have h_lp_stream' :
+      LocalPolicies.encodeMap es₁.localPolicies = LocalPolicies.encodeMap es₂.localPolicies :=
+    h_lp_stream
+  have h_lp_equiv : es₁.localPolicies.Equiv es₂.localPolicies :=
+    LocalPolicies.encodeMap_injective es₁.localPolicies es₂.localPolicies
+      h_b₁.lp_len h_b₂.lp_len
+      h_b₁.lp_size h_b₂.lp_size
+      h_b₁.lp_pol h_b₂.lp_pol
+      h_lp_stream'
+  -- EI.7.e for bridge (three-segment concatenation).
+  have h_bridge_stream' :
+      Bridge.BridgeState.encode es₁.bridge = Bridge.BridgeState.encode es₂.bridge :=
+    h_bridge_stream
+  have ⟨h_consumed, h_pending, h_nextWdId⟩ :=
+    Bridge.BridgeState.encode_injective es₁.bridge es₂.bridge
+      h_b₁.bs_cons_len h_b₂.bs_cons_len
+      h_b₁.bs_cons_id h_b₂.bs_cons_id
+      h_b₁.bs_cons_size h_b₂.bs_cons_size
+      h_b₁.bs_cons_rec h_b₂.bs_cons_rec
+      h_b₁.bs_pend_len h_b₂.bs_pend_len
+      h_b₁.bs_pend_id h_b₂.bs_pend_id
+      h_b₁.bs_pend_size h_b₂.bs_pend_size
+      h_b₁.bs_pend_wd h_b₂.bs_pend_wd
+      h_b₁.bs_nxt h_b₂.bs_nxt
+      h_bridge_stream'
+  -- Step 4: Assemble the per-sub-state conjuncts into ExtendedState.extEq.
+  exact ⟨h_base, h_nonces, h_registry, h_lp_equiv, h_consumed, h_pending, h_nextWdId⟩
 
 /-! ## Smoke checks -/
 

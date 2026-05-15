@@ -1688,6 +1688,18 @@ note + runbook update.
 
 ### AR.4 — Map-backed sub-state encoder injectivity (eight sub-units)
 
+**Status: Complete.**  Shipped under Workstream EI (Encoder
+Injectivity) on
+`claude/encoder-injectivity-implementation-UggQv` and the
+predecessor branches `claude/review-encoder-plan-0p5MI`
+(EI.0), `claude/atomic-injectivity-foundation-yHSwQ` (EI.1),
+and `claude/implement-state-encode-nested-nbXhh` (EI.2).  All
+EI.0 – EI.8 sub-units landed.  See
+`docs/planning/encoder_injectivity_plan.md` for the per-sub-unit
+catalogue and `LegalKernel/Encoding/{StateInjective,
+LocalPolicyInjective, BridgeInjective}.lean` plus
+`LegalKernel/FaultProof/Commit.lean` for the shipped theorems.
+
 **Finding map (group level):** M-3 (`*_encode_deterministic`
 only; no `*_encode_injective` for `State`, `ExtendedState`,
 `BridgeState`, `LocalPolicies`, `KeyRegistry`, `NonceState`);
@@ -5526,7 +5538,11 @@ hold simultaneously:
   3. The full CI gate set (§6.1) is green, including the
      new `mock_import_audit` binary (AR.9).
   4. The `kernelBuildTag` is bumped to
-     `"canon-audit-remediation"` (AR.22).
+     `"canon-audit-remediation"` (AR.22).  Superseded by the
+     subsequent Workstream EI bump to
+     `"canon-encoder-injectivity"` (EI.8.i); both are valid
+     completion-time tags for the AR + EI milestones, with EI's
+     being the current value.
   5. `LegalKernel/Test/Umbrella.lean` pins the new tag.
   6. `docs/audits/00-comprehensive-lean-audit-index.md` and
      `docs/audits/19-findings-and-followups.md` are
@@ -5535,7 +5551,10 @@ hold simultaneously:
   7. CLAUDE.md and AGENTS.md are byte-identical and reflect
      the post-AR test count / theorem catalogue (AR.22).
   8. CLAUDE.md footnote 1 (the encoder-injectivity Workstream-H
-     follow-up) is retired (coordinated AR.4.8 + AR.22).
+     follow-up) is retired by Workstream EI (EI.8.b ships
+     `commitExtendedState_subcommits_extensional_eq_under_collision_free`,
+     the lift from bytes-equality to extensional state equality
+     that the footnote pointed at).
   9. The Genesis Plan §15 status registry includes an "AR"
      entry naming Workstream AR as Complete.
   10. Every sub-WU's DoD checklist is fully ticked (the

@@ -8,7 +8,7 @@
 
 # Canon — A Societal Kernel
 
-**Version:** v0.1.0 &nbsp;·&nbsp; **Build tag:** `canon-fault-proof-migration`
+**Version:** v0.1.0 &nbsp;·&nbsp; **Build tag:** `canon-encoder-injectivity`
 &nbsp;·&nbsp; **Toolchain:** Lean 4 v4.29.1 &nbsp;·&nbsp; **License:** GPL-3.0
 
 Canon is a **proof-carrying state-transition system** built in Lean 4.
@@ -57,11 +57,11 @@ formal model, threat model, and phased roadmap.
 | Custom axioms                           | **0** — every kernel theorem `#print axioms` to the three Lean built-ins |
 | `sorry` in TCB                          | **0**, mechanically enforced (`lake exe count_sorries`)                |
 | External Lake dependencies              | **0** — Lean core only, no Mathlib, no batteries                       |
-| Lean tests                              | ~1 835 across ~100 suites (`lake test`)                                |
+| Lean tests                              | ~1 986 across ~100 suites (`lake test`)                                |
 | Solidity tests                          | ~340 across 24 forge suites (`forge test` in `solidity/`)              |
 | Solidity contracts / libraries          | **10 contracts, 5 libraries, 5 interfaces** (immutable, no proxies)    |
 | `lean_exe` declarations                 | **12** — 2 runtime CLIs, 9 audit/codegen/tooling binaries, 1 test driver |
-| Build tag (`LegalKernel.kernelBuildTag`)| `canon-fault-proof-migration`                                          |
+| Build tag (`LegalKernel.kernelBuildTag`)| `canon-encoder-injectivity`                                            |
 
 A green CI run on `lake build`, `lake test`, and the audit binaries
 below is the authoritative signal that all phase-acceptance criteria

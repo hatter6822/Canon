@@ -181,6 +181,8 @@ import LegalKernel.Encoding.Action
 import LegalKernel.Encoding.SignedAction
 import LegalKernel.Encoding.State
 import LegalKernel.Encoding.StateInjective
+import LegalKernel.Encoding.LocalPolicyInjective
+import LegalKernel.Encoding.BridgeInjective
 import LegalKernel.Encoding.SignInput
 import LegalKernel.DSL.Law
 import LegalKernel.DSL.LawSyntax
@@ -283,6 +285,6 @@ namespace LegalKernel
     contains only the §4.12 listing — the WU-1.11 TCB audit tool can
     therefore enumerate `Kernel.lean` without seeing convenience
     constants. -/
-def kernelBuildTag : String := "canon-audit-remediation"
+def kernelBuildTag : String := "canon-encoder-injectivity"
 
 end LegalKernel

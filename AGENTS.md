@@ -165,9 +165,16 @@ canon/
 │   │                             LocalPolicySemantics, SignedAction
 │   ├── Encoding/              -- CBE codec (CBOR, Encodable, Action, SignedAction,
 │   │                             State, SignInput, Disputes, LocalPolicy,
-│   │                             StateInjective).  StateInjective hosts the
-│   │                             EI.2 encoder-injectivity theorems for the
-│   │                             nested-map `State` / `BalanceMap` carrier.
+│   │                             StateInjective, LocalPolicyInjective,
+│   │                             BridgeInjective).  The `*Injective.lean`
+│   │                             siblings host the EI.2 – EI.7 encoder-
+│   │                             injectivity theorems: `StateInjective`
+│   │                             covers the nested-map `State` / `BalanceMap`
+│   │                             carrier plus the flat `NonceState` and
+│   │                             `KeyRegistry` maps; `LocalPolicyInjective`
+│   │                             covers `LocalPolicies`; `BridgeInjective`
+│   │                             covers the bridge consumed / pending maps
+│   │                             plus the concat-form `BridgeState.encode`.
 │   ├── DSL/                   -- Law.mk + `law` macro (base DSL).  The Lex
 │   │                             extension (`lexlaw`, `lex_*` clauses) lives
 │   │                             under the top-level `Lex/DSL/`.
@@ -234,7 +241,7 @@ canon/
         ├── chain_level_accounting_plan.md   -- §7.6.4 / §7.6.5 inductive promotion
         ├── cleanup_and_consolidation_plan.md -- documentation / visibility tidy-up
         ├── deferred_work_index.md           -- navigator across deferred-work plans
-        ├── encoder_injectivity_plan.md      -- EI proof-track plan (footnote 1)
+        ├── encoder_injectivity_plan.md      -- EI proof-track plan (complete)
         ├── ethereum_workstream_g_plan.md    -- E-G documentation amendment
         ├── lex_v2_v3_roadmap_plan.md        -- Lex v2 / v3 forward roadmap
         ├── open_questions.md                -- master design-decision registry
@@ -270,9 +277,14 @@ LegalKernel.Encoding.*         (non-TCB; CBOR / Encodable foundation, then
                                 Action → SignedAction → State → SignInput;
                                 Disputes / LocalPolicy add their own variants;
                                 Encoding.StateInjective extends State with
-                                the EI.2 encoder-injectivity theorems for
-                                BalanceMap / State plus the State.Equiv
-                                relation.)
+                                the EI.2 – EI.4 encoder-injectivity theorems
+                                for BalanceMap / State / NonceState /
+                                KeyRegistry plus the State.Equiv relation;
+                                Encoding.LocalPolicyInjective hosts EI.5
+                                (LocalPolicies map injectivity);
+                                Encoding.BridgeInjective hosts EI.6 + EI.7
+                                (consumed / pending map injectivity plus
+                                the concat-form BridgeState.encode).)
 
 LegalKernel.DSL.{Law, LawSyntax}              (non-TCB; base law DSL; depends
                                                on Kernel + Authority)
@@ -571,6 +583,13 @@ Selected headline theorems by tier:
 | Phase 4 | Domain-separated sign inputs          | `signInput_*` (cross-deployment)  | `Encoding/SignInput.lean` (§8.8.5)      |
 | EI.2    | Inner-map encoder injectivity         | `BalanceMap.encode_injective`     | `Encoding/StateInjective.lean`          |
 | EI.2    | Nested-state encoder injectivity      | `State.encode_injective`          | `Encoding/StateInjective.lean`          |
+| EI.3    | Nonce-ledger encoder injectivity      | `NonceState.encode_injective`     | `Encoding/StateInjective.lean`          |
+| EI.4    | Key-registry encoder injectivity      | `KeyRegistry.encodeMap_injective` | `Encoding/StateInjective.lean`          |
+| EI.5    | Local-policies map encoder injectivity | `LocalPolicies.encodeMap_injective` | `Encoding/LocalPolicyInjective.lean`  |
+| EI.6    | Bridge-consumed map encoder injectivity | `Bridge.BridgeState.encodeConsumed_injective` | `Encoding/BridgeInjective.lean` |
+| EI.7    | Bridge-pending map encoder injectivity | `Bridge.BridgeState.encodePending_injective` | `Encoding/BridgeInjective.lean`   |
+| EI.7    | Bridge full-state encoder injectivity | `Bridge.BridgeState.encode_injective` | `Encoding/BridgeInjective.lean`     |
+| EI.8    | State-commit sub-state extensional eq under CR | `commitExtendedState_subcommits_extensional_eq_under_collision_free` | `FaultProof/Commit.lean` (§15B.1) |
 | Phase 6 | Dispute filing rejects malformed inputs | `fileDispute_rejects_*`         | `Disputes/Filing.lean`                  |
 | Phase 6 | `disputeWithdraw` is idempotent       | `applyWithdraw_idempotent`        | `Disputes/Filing.lean`                  |
 | Phase 6 | Evidence verifiers are deterministic  | `checkEvidence_deterministic`     | `Disputes/Evidence.lean`                |
@@ -584,18 +603,16 @@ Selected headline theorems by tier:
 | E-D   | Finalisation is monotonic in L1 block | `isFinalised_monotonic_in_currentBlock` | `Bridge/Finalisation.lean`        |
 | LX    | Locality / freeze-preservation typeclass firewalls | `LocalTo`, `FreezePreserving`, `FreezePreservingLawSet` | `Conservation.lean` |
 | LX    | Registry-preservation classification  | `RegistryPreserving`              | `Authority/SignedAction.lean`           |
-| H     | State-commit sub-state byte equality under CR | `commitExtendedState_subcommits_bytes_eq_under_collision_free` | `FaultProof/Commit.lean` (§15B.1)¹ |
+| H     | State-commit sub-state byte equality under CR | `commitExtendedState_subcommits_bytes_eq_under_collision_free` | `FaultProof/Commit.lean` (§15B.1) |
 | H     | Kernel step coherent with kernelOnlyApply | `recomputeCommitment_coherent_with_kernelOnlyApply` | `FaultProof/Coherence.lean` (§15B.2) |
 | H     | Multi-step coherence with kernelOnlyReplay | `recomputeCommitment_chain_coherent_with_kernelOnlyReplay` | `FaultProof/Coherence.lean` (§15B.2) |
 | H     | Bisection narrows under any response  | `range_narrows_on_response_{agree,disagree}` | `FaultProof/Game.lean` (§15B.3) |
 | H     | Bisection converges after enough rounds | `bisection_converges_after_enough_rounds` | `FaultProof/Convergence.lean` (§15B.3) |
 | H     | Disagreement persists along honest trace | `disagreement_persists_along_trace` | `FaultProof/Honesty.lean` (§15B.4)     |
 | H     | Honest challenger wins at settlement  | `honest_challenger_wins_against_invalid_state_root` | `FaultProof/Settlement.lean` (§15B.4) |
-| H     | Witness implies state-root wrong       | `faultProof_challenger_won_implies_state_root_wrong` | `FaultProof/Witness.lean` (§15B.6)² |
+| H     | Witness implies state-root wrong       | `faultProof_challenger_won_implies_state_root_wrong` | `FaultProof/Witness.lean` (§15B.6)¹ |
 
-¹ The shipped theorem proves byte-equality of CBE-encoded sub-states under `CollisionFree hashBytes`.  Lifting bytes-equality to extensional state equality (`toList` equality) requires CBE encoder canonicality for `State` / `NonceState` / `KeyRegistry` / `LocalPolicies` / `BridgeState`, which is shipped at the structural level (`*_encode_deterministic` and round-trip lemmas) but not as a stand-alone `*_encode_injective` lemma for the map-backed sub-states; that's a Workstream-H follow-up.
-
-² The shipped theorem decomposes a `FaultProofChallengerWon` witness's L1 attestation against an explicit `L1AttestationSemantics` deployment assumption (the operational implication "L1 watcher confirms ⇒ sequencer's claim ≠ canonical commit").  The L1 contract enforces this operationally; cross-stack verification (WU H.10.1 corpus) ratifies it.
+¹ The shipped theorem decomposes a `FaultProofChallengerWon` witness's L1 attestation against an explicit `L1AttestationSemantics` deployment assumption (the operational implication "L1 watcher confirms ⇒ sequencer's claim ≠ canonical commit").  The L1 contract enforces this operationally; cross-stack verification (WU H.10.1 corpus) ratifies it.
 
 The full per-theorem catalogue lives in source — each module's
 `/-! ... -/` docstring names the Genesis-Plan section it
@@ -747,14 +764,19 @@ every match before submission.
 ## Current development status
 
 **Build tag** (`kernelBuildTag` in `LegalKernel.lean`):
-`"canon-audit-remediation"` (AR.22).  `Test/Umbrella.lean` pins
-this value in a regression test, so any phase / milestone bump
-must update both the constant and the test in the same PR.
+`"canon-encoder-injectivity"` (EI.8.i).  `Test/Umbrella.lean`,
+`Lex/Test/M2.lean`, and `Lex/Test/ExampleLex.lean` all pin this
+value in regression tests, so any phase / milestone bump must
+update the constant and every pinning test in the same PR.
 
-**Test count.**  ~1907 tests across ~100 suites at the time of
-the AR milestone (Workstream AR).  The exact number drifts with
-every PR; `lake test` is the canonical query.  Unlike the build
-tag, the test count is not pinned — only its monotonic growth is
+**Test count.**  ~1986 tests across ~100 suites at the time of
+the EI milestone (Workstream EI), up from 1907 at the AR
+milestone (+79 — 78 of which are the augmented
+`encoding-injectivity` suite; the rest are scattered API-
+stability checks alongside the new theorems).  The exact number
+drifts with every PR; `lake test` is the canonical query.
+Unlike the build tag, the test count is not pinned — only its
+monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
@@ -809,16 +831,16 @@ Highlights of the AR remediation pass:
   * AR.21: `withdraw.pre` strengthened with positivity (`0 <
     amount`).  Closes m-4.
 
-**Deferred from AR:**
+**Workstream EI (Encoder Injectivity).**  **Complete.**  The
+AR.4 deferral closed.  The fault-proof chain now lifts from
+bytes-equality to extensional state equality via
+`commitExtendedState_subcommits_extensional_eq_under_collision_free`
+(`FaultProof/Commit.lean`, EI.8.b).  All eight sub-units (EI.0 –
+EI.8) shipped under their respective branches; the engineering
+plan and per-sub-unit retrospectives live in
+`docs/planning/encoder_injectivity_plan.md`.
 
-  * **AR.4** (encoder injectivity quartet for the five map-backed
-    sub-states) is a 9–16 working-day proof track per the plan; the
-    workstream is in flight as Workstream **EI** (Encoder
-    Injectivity).  The load-bearing FaultProof chain still lifts
-    via the existing bytes-eq lemma
-    (`commitExtendedState_subcommits_bytes_eq_under_collision_free`)
-    and this file's footnote 1 stays in place until EI.8 ships the
-    extensional-eq variant.
+**Deferred from AR:**
 
     **EI.0 pre-flight + scaffolding complete** on
     `claude/review-encoder-plan-0p5MI`
@@ -935,9 +957,58 @@ Highlights of the AR remediation pass:
     Classical.choice, Quot.sound]` on every EI.2 theorem;
     `lake build` / `lake test` / every audit binary green.
 
-  * **EI.3 – EI.7 status (flat-map sub-states).**  Unshipped.
-    These follow the EI.2 template (conditional bounds, inline
-    framing).
+  * **EI.3 – EI.8 status (flat-map sub-states + composition).**
+    **Complete.**  All landed on
+    `claude/encoder-injectivity-implementation-UggQv`.
+
+      - **EI.3** `NonceState.encode_injective` +
+        `expectedNonce_eq_of_encode_eq` corollary
+        (`LegalKernel/Encoding/StateInjective.lean`).
+      - **EI.4** `KeyRegistry.encodeMap_injective`
+        (`LegalKernel/Encoding/StateInjective.lean`).
+      - **EI.5** `LocalPolicy.encodeAsBytes_injective` +
+        `LocalPolicies.encodeMap_injective` +
+        `LocalPolicies.lookup_eq_of_encode_eq` corollary
+        (`LegalKernel/Encoding/LocalPolicyInjective.lean`).
+        Inner-record injectivity (`localPolicy_encode_injective`,
+        `localPolicyClause_encode_injective`) was already shipped
+        in `Encoding/LocalPolicy.lean` and is reused as-is.
+      - **EI.6** `Bridge.DepositRecord.encode_injective` +
+        `Bridge.DepositRecord.encodeAsBytes_injective` +
+        `Bridge.BridgeState.encodeConsumed_injective`
+        (`LegalKernel/Encoding/BridgeInjective.lean`).
+      - **EI.7** `Bridge.EthAddress.toBytes_injective` +
+        `Bridge.PendingWithdrawal.encode_injective` +
+        `Bridge.PendingWithdrawal.encodeAsBytes_injective` +
+        `Bridge.BridgeState.encodePending_injective` +
+        `Bridge.BridgeState.encode_injective`
+        (`LegalKernel/Encoding/BridgeInjective.lean`).
+        Precursors `pendingWithdrawal_roundtrip` and
+        `encodeSortedPairs_self_delim_split` ship alongside in
+        `LegalKernel/Encoding/State.lean`.
+      - **EI.8.a/b** `ExtendedState.extEq` definition +
+        `ExtendedState.extEq.refl` + `ExtendedState.CanonicalBounds`
+        bundle + headline composition theorem
+        `commitExtendedState_subcommits_extensional_eq_under_collision_free`
+        (`LegalKernel/FaultProof/Commit.lean`).  Retires
+        CLAUDE.md footnote 1.
+      - **EI.8.i** `kernelBuildTag` bumped to
+        `"canon-encoder-injectivity"`; `Test/Umbrella.lean`,
+        `Lex/Test/M2.lean`, and `Lex/Test/ExampleLex.lean` all
+        updated to pin the new value.
+
+    Visibility note: `LocalPolicy.encodeAsBytes`,
+    `Bridge.DepositRecord.encodeAsBytes`, and
+    `Bridge.PendingWithdrawal.encodeAsBytes` were promoted from
+    `private` to non-private (per OQ-EI-2 option (a)) so the
+    per-sub-state framing-injectivity lemmas can co-locate with
+    their headline siblings in the `*Injective.lean` files rather
+    than being forced inside the encoder definitions.
+
+    Axiom posture: `#print axioms` ⊆ `[propext, Classical.choice,
+    Quot.sound]` on every EI.3 – EI.8 theorem; `lake build` /
+    `lake test` / every audit binary green.  29 new test cases
+    bring the `encoding-injectivity` suite from 49 to 78 cases.
 
   * **AR.18 mechanical visibility** (the `private`-modifier
     promotion for `applyVerdictUnchecked`) is documented in the

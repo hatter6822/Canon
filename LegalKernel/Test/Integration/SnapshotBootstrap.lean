@@ -113,10 +113,16 @@ def correctAnchorAcceptance : TestCase := {
     indistinguishable (by state-hash) from
     `bootstrap`-from-genesis.
 
-    A full final-state-equality regression for non-empty logs
-    requires the AR.4.8 extensional-equality lemma (deferred);
-    this baseline check exercises the empty-log path which is
-    the integration sanity. -/
+    Workstream EI (EI.8.b) shipped the extensional-equality
+    lemma `commitExtendedState_subcommits_extensional_eq_under_collision_free`
+    that lifts hash-equality to per-sub-state `Equiv` equality.
+    This baseline test continues to use the hash-equality check
+    because it covers the empty-log path where the two states
+    are structurally equal (and therefore both extensionally
+    equal); a non-empty-log variant exercising the full
+    `ExtendedState.extEq` chain would also rely on a deployment-
+    side `Bridge.CollisionFree hashBytes` assumption that is
+    out of scope for the integration suite. -/
 def finalStateEqualsGenesis : TestCase := {
   name := "AR.23.3: bootstrap from genesis snapshot matches bootstrap from-genesis"
   body := do

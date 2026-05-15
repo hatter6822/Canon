@@ -465,7 +465,17 @@ map's value slot. -/
 /-- Helper: encode a list of `(key, value)` pairs (already sorted) as
     a CBE map.  Mirrors `Encoding.encodeSortedPairs` from
     `Encoding/State.lean`, but kept private to this module so we
-    don't pull in the State encoder for LP.2's needs. -/
+    don't pull in the State encoder for LP.2's needs.
+
+    **INVARIANT (load-bearing for EI.5.d).**  This definition must
+    remain byte-identical to `Encoding.encodeSortedPairs` in
+    `LegalKernel/Encoding/State.lean`.  EI.5.d's headline theorem
+    `LocalPolicies.encodeMap_injective` relies on the
+    definitional `rfl`-equality between these two definitions
+    (via `localPolicies_encodeMap_eq_via_outerProj` in
+    `LegalKernel/Encoding/LocalPolicyInjective.lean`).  Any
+    optimisation or refactor here must mirror the public sibling
+    in lockstep, or EI.5.d's proof breaks silently. -/
 private def encodeSortedPairs {K V : Type} [Encodable K] [Encodable V]
     (pairs : List (K × V)) : Stream :=
   cborHeadEncode cbeTagMap pairs.length ++
@@ -473,8 +483,14 @@ private def encodeSortedPairs {K V : Type} [Encodable K] [Encodable V]
       Encodable.encode p.1 ++ Encodable.encode p.2 ++ acc) []
 
 /-- Wrap a policy payload as a length-prefixed CBE byte string for
-    placement in the outer `LocalPolicies` map's value slot. -/
-private def LocalPolicy.encodeAsBytes (p : LocalPolicy) : ByteArray :=
+    placement in the outer `LocalPolicies` map's value slot.
+
+    **Visibility note (EI.5 / OQ-EI-2 option (a)).**  Promoted from
+    `private` to non-private when EI.5 shipped, so the per-sub-state
+    framing-injectivity lemma `LocalPolicy.encodeAsBytes_injective`
+    can live in `LegalKernel/Encoding/LocalPolicyInjective.lean`
+    alongside the headline `LocalPolicies.encodeMap_injective`. -/
+def LocalPolicy.encodeAsBytes (p : LocalPolicy) : ByteArray :=
   ByteArray.mk (LocalPolicy.encode p).toArray
 
 /-- Encode a `LocalPolicies` table as a sorted-key CBE map of
