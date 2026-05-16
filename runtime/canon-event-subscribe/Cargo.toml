@@ -1,0 +1,36 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# `canon-event-subscribe` — RH-D skeleton.  The implementing work
+# unit (RH-D.{1..5}) lands the subscription service that tails the
+# Lean runtime's `log.jsonl` and streams ordered events to
+# subscribers.  See `docs/planning/rust_host_runtime_plan.md` §RH-D.
+
+[package]
+name = "canon-event-subscribe"
+description = "Canon event-subscription server (RH-D skeleton)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "canon-event-subscribe"
+path = "src/main.rs"
+
+[dependencies]
+canon-cli-common = { workspace = true }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"

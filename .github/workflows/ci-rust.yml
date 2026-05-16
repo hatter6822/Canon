@@ -1,0 +1,156 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# Rust host-runtime CI (RH-H).
+#
+# This workflow handles the `runtime/` Cargo workspace introduced by
+# the RH-H sub-workstream of the Rust host runtime engineering plan
+# (`docs/planning/rust_host_runtime_plan.md` §RH-H).  It runs in
+# parallel to (and is independent of) the Lean-side `ci.yml`
+# workflow.
+#
+# The acceptance criterion in the plan is:
+#
+#   * `cargo build --workspace --all-targets` succeeds.
+#   * `cargo clippy --workspace --all-targets -- -D warnings` is
+#     clean.
+#   * `cargo test --workspace` runs and passes.
+#   * `cargo fmt --all -- --check` is clean.
+#   * Cross-stack fixture loader (`canon-cross-stack`) is consumable
+#     as a dev-dep.
+#   * Lean-side CI is unaffected for `.lean`-only PRs.
+#
+# The last point is satisfied by `on.<event>.paths` workflow-level
+# filtering: this workflow only triggers when files under `runtime/`
+# or this workflow file itself change.  PRs that touch only
+# `LegalKernel/*` (or `solidity/`, `docs/`, etc.) will *not* trigger
+# this workflow at all, preserving CI minutes and PR status-check
+# noise.
+#
+# Conversely, `ci.yml` is unchanged by RH-H: it continues to run on
+# every PR regardless of whether the PR touches Rust files.  This is
+# intentional — the plan's acceptance criterion is "Lean-side CI
+# unaffected for `.lean`-only PRs", not "Lean CI skipped for Rust
+# PRs".  Rust-touching PRs that also touch Lean files will see both
+# workflows run, which is the correct behaviour.
+#
+# Third-party action pinning.  Per CLAUDE.md / Genesis Plan §13.6,
+# every third-party action is pinned to a full-length commit SHA.
+# The comment alongside each `uses:` line records the human-readable
+# tag the SHA corresponds to at pin time; bump the SHA and the
+# comment together.
+
+name: CI (Rust)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Workspace sources.
+      - 'runtime/**'
+      # CI definition itself.
+      - '.github/workflows/ci-rust.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/ci-rust.yml'
+
+# Cancel in-progress runs of the same workflow on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Workflow permissions.  `contents: read` is the read-only token used
+# by `actions/checkout` to fetch the tree.  `actions: write` is the
+# narrow extra scope `Swatinem/rust-cache` needs to save cache
+# entries via the GitHub Actions Cache service — this is *not* a
+# repo-write permission; it grants writes only to the per-repository
+# build-artifact cache.  No workflow step ever writes to the repo's
+# git contents.
+permissions:
+  contents: read
+  actions: write
+
+# Set the working directory for every `run:` step to the Rust
+# workspace root.  Sub-jobs can override but rarely need to.
+defaults:
+  run:
+    working-directory: runtime
+
+env:
+  # Make cargo output uncoloured so log grep filters work
+  # predictably; matches the lake-side CI's plain-text discipline.
+  CARGO_TERM_COLOR: never
+  # Fail fast on incremental-build artifact corruption.
+  CARGO_INCREMENTAL: '0'
+  # Surface backtrace info on test failure for quicker diagnosis.
+  RUST_BACKTRACE: '1'
+
+jobs:
+  rust-build:
+    name: cargo build + test + clippy + fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain (per rust-toolchain.toml)
+        # The pinned channel lives in `runtime/rust-toolchain.toml`
+        # and is auto-resolved by rustup; we invoke `rustup show`
+        # explicitly to make the toolchain install visible in the
+        # CI log and ensure the components requested by the
+        # toolchain file (`clippy`, `rustfmt`) are present.
+        shell: bash
+        run: |
+          rustup show active-toolchain || true
+          rustup show
+          rustup component add clippy rustfmt
+          cargo --version
+          rustc --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Cache cargo artifacts
+        # Swatinem/rust-cache v2.7.7 (current as of pin date).
+        # Caches the cargo registry, the git checkout cache, and
+        # the per-workspace `target/` directory.  Keyed on
+        # `Cargo.lock` so a dependency bump invalidates cleanly.
+        # SHA verified against the v2.7.7 release tag on GitHub.
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3
+        with:
+          workspaces: runtime
+          shared-key: rh-h-workspace
+
+      - name: cargo fmt --check (style gate)
+        # Run formatting check FIRST so a trivial style violation
+        # surfaces immediately, before the slower build / test
+        # steps consume CI time.
+        run: cargo fmt --all -- --check
+
+      - name: cargo build --workspace --all-targets (compile gate)
+        # `--all-targets` includes bins, examples, tests, and
+        # benches; ensures the workspace compiles in every
+        # configuration before we burn time on the test / clippy
+        # passes.
+        run: cargo build --workspace --all-targets --locked
+
+      - name: cargo test --workspace (correctness gate)
+        # The cross-stack fixture loader's round-trip / fuzz-style
+        # tests run here.  Future RH-A.* through RH-G work units
+        # extend this with their cross-stack equivalence corpora.
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy --workspace --all-targets -- -D warnings (lint gate)
+        # Promotes every clippy warning to a hard CI failure.  Each
+        # crate also declares `[lints.clippy]` in its
+        # `Cargo.toml`, so this command catches both the
+        # workspace-default lints and any per-crate elevations.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -87,6 +87,13 @@ cd solidity && forge build
 cd solidity && forge test
 cd solidity && make test-cross-stack          # F.1.x equivalence suite
 cd solidity && make testnet-acceptance-dryrun # F.3 local fork dry-run
+
+# Workstream RH (Rust host runtime) — see runtime/README.md.
+# Toolchain pin: runtime/rust-toolchain.toml (stable 1.83).
+cd runtime && cargo build --workspace --all-targets
+cd runtime && cargo test --workspace
+cd runtime && cargo clippy --workspace --all-targets -- -D warnings
+cd runtime && cargo fmt --all -- --check
 ```
 
 `lakefile.lean` is the source of truth for every build target,
@@ -215,8 +222,27 @@ canon/
 ├── solidity/                  -- Workstreams E + H: L1 mirror (10 contracts,
 │                                  5 libraries, 20+ forge test suites).
 │                                  See solidity/README.md.
+├── runtime/                   -- Workstream RH (Rust host runtime).
+│   ├── Cargo.toml             --   workspace manifest
+│   ├── rust-toolchain.toml    --   pinned Rust channel (stable 1.83)
+│   ├── canon-hash-fallback.c  --   AR.10 default fallback (lake-built)
+│   ├── canon-cli-common/      --   shared CLI / logging helpers (RH-H)
+│   ├── canon-cross-stack/     --   dev-dep fixture loader (RH-H)
+│   ├── canon-verify-secp256k1/ --  RH-A.1 skeleton (ECDSA adaptor)
+│   ├── canon-hash-keccak256/  --   RH-A.2 skeleton (keccak adaptor)
+│   ├── canon-host/            --   RH-C skeleton (network adaptor)
+│   ├── canon-l1-ingest/       --   RH-B skeleton (L1 watcher)
+│   ├── canon-event-subscribe/ --   RH-D skeleton (event server)
+│   ├── canon-storage/         --   RH-E.0 skeleton (DB layer)
+│   ├── canon-indexer/         --   RH-E.1 skeleton (SQLite indexer)
+│   ├── canon-faultproof-observer/ -- RH-G skeleton (off-chain observer)
+│   ├── canon-bench/           --   RH-F skeleton (10k tx/sec bench)
+│   └── tests/cross-stack/     --   shared fixture corpus (.cxsf files)
 ├── scripts/setup.sh           -- SHA-256-verified toolchain + Foundry installer
-├── .github/workflows/ci.yml   -- build + test + audits on PR / push
+├── .github/workflows/ci.yml   -- Lean build + test + audits on PR / push
+├── .github/workflows/ci-rust.yml -- Rust workspace build + test + clippy +
+│                                  fmt on PR / push (path-filtered to
+│                                  runtime/**)
 ├── README.md                  -- project entry point
 ├── CLAUDE.md                  -- this file
 └── docs/
@@ -679,6 +705,16 @@ work units.  Status:
 | LX-M2     | Lex: re-express 17 kernel laws     | Complete |
 | LX-M3     | Lex: deployment manifests + governance | Complete |
 | H         | Fault-proof migration              | Complete (Lean side; Rust off-chain observer deferred) |
+| RH-H      | Rust host: workspace + CI harness  | Complete |
+| RH-A.1    | Rust host: secp256k1 verify adaptor | Not started (skeleton landed under RH-H) |
+| RH-A.2    | Rust host: keccak256 hash adaptor  | Not started (skeleton landed under RH-H) |
+| RH-B      | Rust host: L1 event ingestor       | Not started (skeleton landed under RH-H) |
+| RH-C      | Rust host: network adaptor         | Not started (skeleton landed under RH-H) |
+| RH-D      | Rust host: event subscription      | Not started (skeleton landed under RH-H) |
+| RH-E.0    | Rust host: storage abstraction     | Not started (skeleton landed under RH-H) |
+| RH-E.1    | Rust host: SQLite indexer          | Not started (skeleton landed under RH-H) |
+| RH-F      | Rust host: 10k tx/sec benchmark    | Not started (skeleton landed under RH-H) |
+| RH-G      | Rust host: fault-proof observer    | Not started (skeleton landed under RH-H) |
 | E-G       | Ethereum: documentation + amendment | Not started |
 | 7         | Advanced capabilities              | Not started |
 
@@ -779,6 +815,65 @@ Unlike the build tag, the test count is not pinned — only its
 monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
+
+**Rust-side test count.**  44 tests across 8 non-empty suites at
+the RH-H landing.  `cargo test --workspace` from `runtime/` is
+the canonical query.  Most of the test mass lives in
+`canon-cross-stack` (29 unit tests + 2 integration tests covering
+round-trip, every typed-error variant, every per-field truncation
+path, byte-truncation sweep, single-bit-flip safety, record order
+preservation, huge-count rejection, and `Send + Sync` boundary
+checks); `canon-cli-common` contributes 8 (exit-code distinctness
++ stability, logging idempotency, deterministic error wrapping,
+path helpers); the remaining skeleton crates each contribute a
+1-test crate-name regression check.  The count will grow rapidly
+as RH-A onward materialises.
+
+**Workstream RH-H (Rust host workspace + CI harness).**
+**Complete.**  Lands the workspace under `runtime/` (11 member
+crates: 10 from the plan §2.2 layout plus `canon-cross-stack`
+hosting the fixture loader as a separate dev-dep, per the plan
+§4 RH-H step 4 "thin Rust helper that other crates import as a
+dev-dependency") per `docs/planning/rust_host_runtime_plan.md`
+§RH-H.
+Headlines:
+
+  * Two fully-implemented crates: `canon-cli-common` (shared
+    logging / exit-code / paths helpers) and `canon-cross-stack`
+    (cross-stack fixture loader + file-format spec; the
+    load-bearing RH-H deliverable that downstream crates dev-dep
+    on for byte-equivalence assertions).
+  * Eight skeleton crates (RH-A.1, RH-A.2, RH-B, RH-C, RH-D,
+    RH-E.0, RH-E.1, RH-F, RH-G — nine if you count RH-E.0 +
+    RH-E.1 separately) ready for the implementing work units to
+    fill in.  Skeleton binaries exit code `3 = NotImplemented`
+    with a deferral message; no C-ABI symbols exported (no
+    silently-incorrect fallback verifier / hash adaptor).
+  * `runtime/rust-toolchain.toml` pins stable 1.83;
+    `workspace.package.rust-version = "1.83"` documents the MSRV
+    at the package level.
+  * `.github/workflows/ci-rust.yml` runs four gates
+    (`cargo build --workspace --all-targets`, `cargo test
+    --workspace`, `cargo clippy --workspace --all-targets --
+    -D warnings`, `cargo fmt --all -- --check`) on every PR
+    that touches `runtime/**`; Lean-only PRs do not trigger the
+    Rust workflow.  Third-party action SHAs verified against
+    upstream release tags (actions/checkout v4.3.1,
+    Swatinem/rust-cache v2.7.7).
+  * `unsafe_code = "forbid"`, `missing_docs = "warn"`,
+    `clippy::pedantic` enabled workspace-wide.
+  * Cross-stack fixture format: 16-byte "CXSF" header (magic +
+    version + kind tag + count), per-record `(u32 BE input-len,
+    input, u32 BE expected-len, expected)`.  Self-describing,
+    bounded-length, byte-deterministic.  Parser is panic-free in
+    all non-trivial code paths: `read_u32_be_at` returns
+    `Option<u32>` rather than `expect`-on-precondition, and
+    every error path returns a typed [`LoaderError`] variant.
+  * `Cargo.lock` committed (workspace contains binaries; lockfile
+    is a reproducibility requirement).
+  * `tempfile` pinned at `~3.14` (newer versions transitively
+    require Rust 1.85+ for `edition2024`; pin coupled to
+    `rust-toolchain.toml`'s 1.83 channel).
 
 **Workstream AR (Audit Remediation, see
 `docs/planning/audit_remediation_plan.md`)** is the most recent landing.

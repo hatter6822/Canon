@@ -43,3 +43,16 @@
 Lex/Inputs/*.lock
 *.lex_codegen.tmp
 *.json.tmp
+
+# Rust host-runtime build artefacts (RH-H).  `Cargo.lock` IS
+# committed (binaries in this workspace need reproducible builds);
+# everything else under `target/` is generated.
+/runtime/target/
+runtime/**/target/
+
+# Editor noise from rust-analyzer / clippy invocations.
+**/*.rs.bk
+
+# A future operator-locally-generated `.cargo/config.toml` (e.g. for
+# vendoring) is host-specific and never committed.
+runtime/.cargo/config.toml

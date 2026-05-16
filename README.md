@@ -166,6 +166,21 @@ cd solidity && make test-cross-stack             # F.1.x equivalence suite
 cd solidity && make testnet-acceptance-dryrun    # F.3 local fork dry-run
 ```
 
+### Rust host runtime (Workstream RH)
+
+See [`runtime/README.md`](runtime/README.md) for the day-to-day
+developer guide.  At the RH-H landing the workspace ships a shared
+CLI-helpers crate, a cross-stack fixture loader, and skeleton
+crates for the eight downstream work units (RH-A through RH-G).
+
+```bash
+# Toolchain pinned in runtime/rust-toolchain.toml (stable 1.83).
+cd runtime && cargo build --workspace --all-targets
+cd runtime && cargo test --workspace
+cd runtime && cargo clippy --workspace --all-targets -- -D warnings
+cd runtime && cargo fmt --all -- --check
+```
+
 ## How correctness is enforced
 
 Canon's correctness story is *what the build will not accept*.
@@ -263,6 +278,8 @@ on every kernel theorem returns a subset of the three Lean built-ins.
 | LX-M2              | Lex: re-express 17 kernel laws       | Complete (byte-equivalent at `rfl`)                      |
 | LX-M3              | Lex: deployment manifests + governance| Complete (`lex_diff`, `lex_format`, autogen)            |
 | H                  | Fault-proof migration                | Complete (Lean side; Rust off-chain observer deferred)   |
+| RH-H               | Rust host: workspace + CI harness    | Complete                                                 |
+| RH-A.* … RH-G      | Rust host: per-sub-stream crates     | Not started (skeletons landed under RH-H)                |
 | E-G                | Ethereum: documentation + amendment  | Not started                                              |
 | 7                  | Advanced capabilities                | Not started                                              |
 
@@ -349,8 +366,21 @@ canon/
 │   ├── test/                    — 24 forge suites (13 unit + 11 CrossCheck)
 │   └── README.md                — day-to-day Solidity developer guide
 │
+├── runtime/                     — Workstream RH: Rust host-runtime workspace
+│   ├── Cargo.toml               —   workspace manifest (11 members)
+│   ├── rust-toolchain.toml      —   pinned Rust channel (stable 1.83)
+│   ├── canon-hash-fallback.c    —   AR.10 default fallback forwarder
+│   ├── canon-cli-common/        —   shared CLI helpers (implemented, RH-H)
+│   ├── canon-cross-stack/       —   fixture loader dev-dep (implemented, RH-H)
+│   ├── canon-{verify-secp256k1, hash-keccak256, host, l1-ingest, event-
+│   │   subscribe, storage, indexer, faultproof-observer, bench}/ — skeletons
+│   ├── tests/cross-stack/       —   .cxsf fixture corpus
+│   └── README.md                —   day-to-day Rust developer guide
+│
 ├── scripts/setup.sh             — SHA-256-verified toolchain installer
-├── .github/workflows/ci.yml     — CI gates (build, test, audits, warnings)
+├── .github/workflows/ci.yml     — Lean / Solidity CI gates
+├── .github/workflows/ci-rust.yml — Rust workspace CI gates (path-filtered to
+│                                   runtime/**)
 │
 ├── docs/                        — see Documentation map below
 ├── CLAUDE.md / AGENTS.md        — engineering conventions (byte-identical)

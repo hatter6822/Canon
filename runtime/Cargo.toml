@@ -1,0 +1,102 @@
+# Canon  - A Societal Kernel
+# Copyright (C) 2026  Adam Hall
+# This program comes with ABSOLUTELY NO WARRANTY.
+# This is free software, and you are welcome to redistribute it
+# under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+# RH-H workspace manifest.  Houses the Rust host-runtime stack
+# specified in `docs/planning/rust_host_runtime_plan.md` §2.2.  Each
+# member crate corresponds to one sub-workstream (RH-A through RH-G);
+# `canon-cross-stack` is a shared dev-only fixture loader (per §4
+# RH-H step 4); `canon-cli-common` is a shared runtime library.
+#
+# Member-crate maturity at landing (RH-H):
+#
+#   * `canon-cross-stack`        — fully implemented (the load-bearing
+#                                  RH-H deliverable: a CBE-style
+#                                  fixture loader other crates dev-dep
+#                                  on for cross-stack equivalence).
+#   * `canon-cli-common`         — fully implemented (shared CLI /
+#                                  logging helpers; small but
+#                                  consumable today).
+#   * All other crates           — skeleton-only.  Each has a minimal
+#                                  `lib.rs` / `main.rs` documenting the
+#                                  symbol surface its work unit must
+#                                  fill in (RH-A.1 → RH-G).  The
+#                                  skeletons compile clean, satisfy
+#                                  `cargo clippy -D warnings`, and pass
+#                                  `cargo fmt --check`, so RH-H
+#                                  delivers a green workspace from day
+#                                  one without prefiguring the
+#                                  implementation choices of the
+#                                  downstream WUs.
+
+[workspace]
+resolver = "2"
+members = [
+    "canon-cli-common",
+    "canon-cross-stack",
+    "canon-verify-secp256k1",
+    "canon-hash-keccak256",
+    "canon-host",
+    "canon-l1-ingest",
+    "canon-event-subscribe",
+    "canon-storage",
+    "canon-indexer",
+    "canon-faultproof-observer",
+    "canon-bench",
+]
+
+# Shared package metadata.  Per-crate manifests use
+# `package.<field>.workspace = true` to inherit.  Centralising the
+# version, edition, MSRV, license, and repository here lets RH-H
+# guarantee a uniform release surface without per-crate drift.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# `rust-version` documents the workspace's minimum-supported-Rust-
+# version (MSRV).  `rust-toolchain.toml` pins the build channel; this
+# field gates `cargo` itself before any compilation begins.  Bumping
+# the MSRV is a workspace-level PR, not a per-crate one.
+rust-version = "1.83"
+license = "GPL-3.0-only"
+repository = "https://github.com/hatter6822/Canon"
+publish = false
+
+# Centralised dependency versions.  Members reference these by
+# `dependency.workspace = true`.  Pin minor versions (per the RH plan
+# §7 risk register) so toolchain drift in any single sub-stream cannot
+# silently introduce a breaking dependency upgrade.
+#
+# The list is intentionally minimal: each entry is consumed by at
+# least one current member crate.  Future work units (RH-A onward)
+# add their own dependencies (e.g. `k256`, `sha3`, `tokio`, `ethers`)
+# to this table when they need them.
+[workspace.dependencies]
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+# Workspace-internal crates (other members depend on these via the
+# `workspace = true` shorthand).
+canon-cli-common = { path = "canon-cli-common" }
+canon-cross-stack = { path = "canon-cross-stack" }
+
+# CI / release profile.  `lto = "thin"` keeps release builds reasonably
+# fast while still hitting cross-crate optimisations.  `panic = "abort"`
+# in release ensures cryptographic adaptors (`canon-verify-secp256k1`,
+# `canon-hash-keccak256`) cannot unwind into Lean's runtime via the C
+# ABI — a panicking-into-FFI scenario is undefined behaviour and the
+# crates' contracts mandate "no panic" anyway.
+#
+# The `test` and `bench` profiles inherit from `dev`, which keeps
+# `panic = "unwind"` (required for `#[should_panic]` tests).  Cargo
+# rejects `panic` overrides on the `test` profile directly, so we do
+# not set it here.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+panic = "abort"
+strip = "debuginfo"
