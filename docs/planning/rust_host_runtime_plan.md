@@ -24,7 +24,8 @@ behind those interface contracts.
 
   * **Workstream prefix:** `RH` (Rust Host).  Sub-stream status:
     - **RH-A** Cryptographic adaptors (E-A Rust).
-      Skeleton crates landed under RH-H; implementation pending.
+      **Complete.**  See §RH-A.1 Closeout / §RH-A.2 Closeout
+      below.
     - **RH-B** L1 ingestor (E-B Rust).
       Skeleton crate landed under RH-H; implementation pending.
     - **RH-C** Network adaptor (Phase 5 WU 5.4).
@@ -597,6 +598,100 @@ foot-gun.
 
 ---
 
+### RH-A.1 — Closeout
+
+**Status.**  **Complete.**
+
+**Landed deliverables.**
+
+  * `runtime/canon-verify-secp256k1/Cargo.toml` — cdylib +
+    staticlib + rlib crate-type set; `k256 = "0.13"` with
+    `default-features = false` plus `ecdsa` + `arithmetic`
+    features; `subtle = "2.6"` for constant-time comparison;
+    `cc = "1.0"` build-dep.
+  * `runtime/canon-verify-secp256k1/build.rs` — Lean-include-dir
+    discovery (env var `LEAN_INCLUDE_DIR` → `LEAN_SYSROOT` →
+    `lean --print-prefix` → soft-skip).  The `lean-ffi` Cargo
+    feature promotes a missing `lean.h` from soft-skip to
+    hard-fail.
+  * `runtime/canon-verify-secp256k1/c/lean_shim.c` — non-inline
+    wrappers (`canon_lean_*`) around `lean.h`'s `static inline`
+    runtime API (`lean_sarray_size`, `lean_sarray_cptr`,
+    `lean_dec`, etc.) so the Rust side can call them via
+    `extern "C"`.
+  * `runtime/canon-verify-secp256k1/src/verify.rs`:
+    - `verify(pk, msg, sig) -> bool` — safe Rust API.
+    - `canon_verify_ecdsa_raw(...) -> u8` — C ABI surface with
+      raw-pointer slices; the testable layer.
+    - `canon_verify_ecdsa(pk, msg, sig) -> u8` — Lean ABI entry
+      point (cfg-gated on `canon_lean_ffi`); calls the C shim's
+      `canon_lean_*` wrappers to unpack `lean_object *`
+      ByteArrays, delegates to `canon_verify_ecdsa_raw`,
+      decrements the three owned references per Lean's
+      `@[extern]` owned-transfer ABI.
+  * `runtime/canon-verify-secp256k1/src/lib.rs` — crate root;
+    publishes `ADAPTOR_IDENTIFIER = "ecdsa-secp256k1-low-s/EVM-
+    compatible/v1"` (mirrors `LegalKernel/Bridge/VerifyAdaptor.
+    lean`'s `verifyAdaptorIdentifier` constant) plus the
+    `MESSAGE_LEN` / `PUBKEY_LEN` / `SIGNATURE_LEN` /
+    `SEC1_TAG_EVEN` / `SEC1_TAG_ODD` re-exports.
+  * `runtime/canon-verify-secp256k1/examples/gen_ecdsa_fixtures.rs`
+    — deterministic corpus generator.  Signs with 10 distinct
+    secret keys × 3 messages = 60 valid signatures using
+    `k256::SigningKey::sign_prehash` (RFC-6979 deterministic
+    nonce, so the corpus is bit-stable across regenerations);
+    derives 30 high-s mates by substituting `s' = n - s`;
+    derives 150 tampered variants by flipping bytes in `msg`,
+    `r`, `s`, and `pk`.  Total: 210 vectors, comfortably above
+    the plan's ≥ 50 floor.
+  * `runtime/tests/cross-stack/ecdsa_secp256k1.cxsf` — the
+    committed 30,256-byte fixture file (210 records).
+  * Tests:
+    - 19 unit tests in `src/verify.rs` (length / prefix /
+      bounds rejection; off-curve pubkey rejection).
+    - 3 unit tests in `src/lib.rs` (constant pins).
+    - 8 known-vector tests in `tests/known_vectors.rs` (fresh
+      sign-verify roundtrip, wrong-key rejection, message
+      tampering, zero r / zero s, high-s rejection,
+      bit-flip-breaks-verification batch test).
+    - 7 property tests in `tests/property.rs` via `proptest`:
+      random input never panics (5 properties × 256 cases),
+      fresh-sign roundtrip, high-s mate always rejected.
+    - 2 cross-stack tests in `tests/cross_stack.rs`: fixture
+      loads, every record's expected verdict matches the
+      verifier's actual output.
+
+**Audit posture.**
+
+  * `cargo build --workspace` — green.
+  * `cargo test --workspace` — 36 tests passing (19 unit + 3
+    crate-root + 8 known-vector + 7 property + 2 cross-stack +
+    1 example smoke), no failures.
+  * `cargo clippy --workspace --all-targets -- -D warnings` —
+    clean.
+  * `cargo fmt --all -- --check` — clean.
+  * `unsafe_code = "deny"` workspace lint; the `unsafe` blocks
+    are tightly scoped to the FFI shims in `verify.rs` with
+    documented `# Safety` contracts.
+  * Production cdylib verified via `nm -D` to export both
+    `canon_verify_ecdsa` (the Lean ABI surface) and
+    `canon_verify_ecdsa_raw` (the testable raw-bytes API).
+
+**Mathematical soundness check.**
+
+  * SEC1 §4.1.4 verification equation delegated to
+    `k256::ecdsa::VerifyingKey::verify_prehash`.
+  * Low-s gate (EIP-2 / BIP-62) enforced via `signature.s().
+    is_high().unwrap_u8() != 0`.  `k256::IsHigh` uses the BIP-62
+    threshold `s > n / 2`; since `n` is odd, no signature has
+    `s == n / 2` exactly, so the boundary case is empty.
+  * SEC1 prefix discipline (0x02 / 0x03) enforced via
+    constant-time `subtle::ConstantTimeEq` comparisons — defence
+    in depth against timing side channels even though the prefix
+    byte is not secret.
+
+---
+
 ### RH-A.2 — `canon-hash-keccak256`
 
 **Finding map.**  E-A Rust adaptor crate (deferred per
@@ -710,12 +805,125 @@ hashing large states without buffering.
 
 **Math / soundness.**
 
-Standard keccak256 over byte arrays.  No deviation from FIPS-202
-keccak permutation (256-bit output variant).
+Keccak-256 — the *original* Keccak with `0x01` byte-level
+padding — is the Ethereum-canonical hash; NOT the FIPS-202
+SHA3-256 (which uses `0x06` padding).  The two share the
+underlying Keccak-f[1600] permutation but produce different
+digests for the same input.  This crate uses
+`sha3::Keccak256` (the correct variant; the foot-gun is
+documented in `src/hash.rs`'s module docstring).
 
 **Acceptance criteria + test plan + risk + effort.**  As RH-A.1.
 
 **Effort.**  ~4 engineer-days (skeleton shared with RH-A.1).
+
+---
+
+### RH-A.2 — Closeout
+
+**Status.**  **Complete.**
+
+**Landed deliverables.**
+
+  * `runtime/canon-hash-keccak256/Cargo.toml` — cdylib +
+    staticlib + rlib crate-type set; `sha3 = "0.10"` with
+    `default-features = false`; `cc = "1.0"` build-dep.
+  * `runtime/canon-hash-keccak256/build.rs` — mirrors the
+    RH-A.1 build script: `lean.h` discovery via env vars or
+    `lean --print-prefix`; the `lean-ffi` Cargo feature
+    promotes a missing header from soft-skip to hard-fail.
+  * `runtime/canon-hash-keccak256/c/lean_shim.c` — non-inline
+    wrappers around `lean.h`'s `static inline` API.  Shares
+    the same wrapper surface as the RH-A.1 shim; both crates
+    use the `canon_lean_*` naming convention.
+  * `runtime/canon-hash-keccak256/src/hash.rs`:
+    - `keccak256(input) -> [u8; 32]` — safe Rust API.
+    - `canon_hash_keccak256_bytes_raw(...)` — one-shot C ABI.
+    - `canon_hash_keccak256_init() / _update_byte /
+      _update_bulk / _finalize` — streaming context C ABI
+      (init / update / finalize pattern, `Box`-allocated
+      `Keccak256` context, opaque `*mut c_void` handle).
+    - `canon_hash_bytes(bs) -> *mut lean_object` — Lean ABI
+      entry point (cfg-gated on `canon_lean_ffi`) for
+      one-shot ByteArray hashing.
+    - `canon_hash_stream(bs) -> *mut lean_object` — Lean ABI
+      entry point for streaming `List UInt8` hashing.  Walks
+      the cons-list one byte at a time using the standard
+      `inc(tail); dec(current)` pattern to manage reference
+      counts.
+    - `canon_hash_identifier(u) -> *mut lean_object` — Lean
+      ABI entry point returning the implementation
+      identifier string.
+  * `runtime/canon-hash-keccak256/src/lib.rs` — crate root;
+    publishes `IDENTIFIER = "keccak256/EVM-compatible/v1"`.
+  * `runtime/canon-hash-keccak256/examples/gen_keccak256_fixtures.rs`
+    — deterministic corpus generator across six structural
+    classes: boundary cases (0, 1, 2, 31, 32, 33, 64, 65
+    bytes), block-rate boundaries (135, 136, 137, 272, 273,
+    1000, 4096, 8192 bytes — exercising the multi-block
+    keccak path; rate is exactly 136 bytes), well-known test
+    vectors (`""`, `"abc"`, `"the quick brown fox..."`,
+    capital-T variant, NUL-byte sequences), repeated bytes,
+    xorshift64-seeded pseudo-random data, and a 1 MB input
+    for the bulk path.  Total: 51 records.
+  * `runtime/tests/cross-stack/keccak256.cxsf` — the
+    committed ~1 MB fixture file (51 records).
+  * Tests:
+    - 13 unit tests in `src/hash.rs` (empty / `"abc"`
+      canonical digests; raw matches safe; streaming
+      byte-by-byte matches one-shot; streaming bulk matches
+      one-shot; mixed byte + bulk; empty stream;
+      empty-bulk-update is no-op; determinism across sizes).
+    - 3 unit tests in `src/lib.rs` (constant pins).
+    - 10 known-vector tests in `tests/known_vectors.rs`
+      (empty, abc, fox lowercase / capital, zero32,
+      zero128, single null byte, 135 / 136 / 137-byte
+      streaming-vs-oneshot consistency).
+    - 5 property tests via `proptest` (never panics on
+      arbitrary input; streaming per-byte matches one-shot;
+      streaming bulk matches one-shot; determinism; random
+      chunking matches one-shot).
+    - 3 cross-stack tests (fixture loads; every record's
+      expected digest matches `keccak256(input)`; all
+      records are 32 bytes).
+    - 1 integration test (IDENTIFIER constant matches the
+      `IDENTIFIER_BYTES` slice in `hash.rs`).
+
+**Audit posture.**
+
+  * `cargo build --workspace` — green.
+  * `cargo test --workspace` — 32 tests passing (13 hash +
+    3 crate-root + 10 known-vector + 5 property + 3
+    cross-stack + 1 integration); together with RH-A.1's 36
+    tests, the workspace total is 110 (up from 44 at RH-H).
+  * `cargo clippy --workspace --all-targets -- -D warnings` —
+    clean.
+  * `cargo fmt --all -- --check` — clean.
+  * `unsafe_code = "deny"` workspace lint; the `unsafe`
+    blocks are tightly scoped to the FFI shim functions in
+    `hash.rs` with documented `# Safety` contracts.
+  * Production cdylib verified via `nm -D` to export the
+    three Lean ABI symbols (`canon_hash_bytes`,
+    `canon_hash_stream`, `canon_hash_identifier`) plus the
+    five `canon_hash_keccak256_*` raw-bytes APIs used by the
+    test suite.
+
+**Mathematical soundness check.**
+
+  * Keccak-256 implementation delegated to `sha3::Keccak256`
+    — the *original* Keccak (0x01 byte-level padding), NOT
+    the FIPS-202 SHA3-256 (0x06 padding).  The two share the
+    underlying Keccak-f[1600] permutation but produce
+    different digests for the same input; the foot-gun is
+    documented in `src/hash.rs`'s module docstring and
+    cross-referenced in `Cargo.toml`'s `sha3` dependency
+    comment.
+  * Output width: 32 bytes, matching Lean's `ContentHash`
+    width fixed by Audit-3.1 (`LegalKernel/Runtime/Hash.lean`).
+  * Streaming-vs-one-shot equivalence: every property test
+    and every known-vector test confirms that hashing the
+    same byte sequence via the streaming context produces
+    the same digest as the one-shot `keccak256` function.
 
 ---
 

@@ -51,8 +51,14 @@ members = [
 # `package.<field>.workspace = true` to inherit.  Centralising the
 # version, edition, MSRV, license, and repository here lets RH-H
 # guarantee a uniform release surface without per-crate drift.
+#
+# Version-bump discipline.  Per the workspace policy in CLAUDE.md
+# / AGENTS.md, each PR bumps the patch component unless the user
+# explicitly opts in to a minor or major bump.  Bumping the
+# version here propagates to every member crate via
+# `version.workspace = true`.
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # `rust-version` documents the workspace's minimum-supported-Rust-
 # version (MSRV).  `rust-toolchain.toml` pins the build channel; this
@@ -76,6 +82,33 @@ publish = false
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+# RH-A cryptographic adaptor dependencies.  Pinned to minor versions
+# per the plan §7 risk register: silent major-version bumps in audited
+# crypto crates require a fresh review pass.
+#
+#   * `k256` — secp256k1 / ECDSA primitives.  `default-features = false`
+#     disables `std` and `serde`, narrowing the surface.  `ecdsa` is
+#     the verification feature; `arithmetic` enables `Scalar` /
+#     `is_high` for the low-s canonicalisation predicate; `pkcs8` is
+#     deliberately omitted (we parse SEC1-compressed pubkeys only).
+#   * `sha3` — Keccak-256 hash primitive (Ethereum flavour, NOT the
+#     FIPS-202 SHA3-256 variant; common foot-gun documented in the
+#     plan §RH-A.2.a).  `default-features = false` disables `std`.
+#   * `subtle` — constant-time comparison primitives used by the
+#     verification adaptor's high-s bounds check.  No-std,
+#     audited.
+#   * `hex` — hex en/decoding for test fixtures.  Dev-only.
+#   * `proptest` — property-based testing.  Dev-only.
+#   * `cc` — C compiler driver for the Lean-ABI shim build.rs
+#     scripts.  Build-dependency only; not in the production
+#     binary.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+sha3 = { version = "0.10", default-features = false }
+subtle = { version = "2.6", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+proptest = { version = "1.5", default-features = false, features = ["std"] }
+cc = "1.0"
 
 # Workspace-internal crates (other members depend on these via the
 # `workspace = true` shorthand).
