@@ -261,6 +261,10 @@ pub mod mock {
 ///     after the body.  Production Ethereum RPC endpoints
 ///     (geth, erigon, infura, alchemy) all return
 ///     content-length-delimited responses for `eth_*` methods.
+///     If the server DOES declare `Transfer-Encoding: chunked`,
+///     the client surfaces a `Malformed` error with an
+///     actionable message rather than silently mis-parsing the
+///     chunk markers as JSON.
 ///   * **No redirect following**: an HTTP 301/302 surfaces as
 ///     `SourceError::Transport` with the HTTP status code.
 ///   * **10 MiB max response body** (`MAX_RESPONSE_BYTES`):
@@ -480,12 +484,46 @@ pub mod json_rpc {
             if !(200..300).contains(&status) {
                 return Err(RpcError::HttpStatus(status));
             }
-            // The body may be chunked-encoded or content-length
-            // delimited; both are handled identically here because
-            // we're consuming the entire stream and the response
-            // body follows the header separator.
+            // Reject chunked transfer-encoding loudly.  The
+            // hand-rolled client doesn't decode chunk markers;
+            // silently passing a chunked body to `serde_json`
+            // would produce a confusing "expected value" error
+            // hundreds of bytes into the body.  Better to fail
+            // upfront with an actionable message.  HTTP/1.1
+            // header lookup is case-insensitive per RFC 7230.
+            if header_has_chunked_encoding(header_str) {
+                return Err(RpcError::Malformed(
+                    "server returned Transfer-Encoding: chunked; \
+                     this client supports Content-Length / Connection: close only"
+                        .into(),
+                ));
+            }
+            // The body is either content-length-delimited or the
+            // server closed the connection after writing.  Both
+            // are handled by our "read until EOF" loop above.
             Ok(response[body_start + 4..].to_vec())
         }
+    }
+
+    /// Check whether the HTTP response headers declare
+    /// `Transfer-Encoding: chunked`.  Case-insensitive per RFC
+    /// 7230 §3.3.1.  A multi-value header like
+    /// `Transfer-Encoding: gzip, chunked` also matches.
+    fn header_has_chunked_encoding(header_str: &str) -> bool {
+        for line in header_str.lines() {
+            let mut split = line.splitn(2, ':');
+            let name = split.next().unwrap_or("").trim();
+            let value = split.next().unwrap_or("").trim();
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                // Split on `,` and check each token.
+                for token in value.split(',') {
+                    if token.trim().eq_ignore_ascii_case("chunked") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// HTTP URL parts: `host`, `port`, `path`.
@@ -866,6 +904,44 @@ pub mod json_rpc {
             assert_eq!(parse_http_status(""), None);
             assert_eq!(parse_http_status("garbage"), None);
             assert_eq!(parse_http_status("HTTP/1.1"), None);
+        }
+
+        #[test]
+        fn header_chunked_encoding_detected() {
+            use super::header_has_chunked_encoding;
+            assert!(header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+            ));
+            // Case-insensitive header name.
+            assert!(header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n"
+            ));
+            assert!(header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nTRANSFER-ENCODING: CHUNKED\r\n"
+            ));
+            // Multi-value (gzip + chunked).
+            assert!(header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n"
+            ));
+            assert!(header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n"
+            ));
+        }
+
+        #[test]
+        fn header_chunked_encoding_negative_cases() {
+            use super::header_has_chunked_encoding;
+            // Plain content-length response.
+            assert!(!header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n"
+            ));
+            // No headers.
+            assert!(!header_has_chunked_encoding("HTTP/1.1 200 OK\r\n"));
+            // "chunked" appearing in a different header value
+            // should NOT trigger.
+            assert!(!header_has_chunked_encoding(
+                "HTTP/1.1 200 OK\r\nX-Custom: chunked\r\n"
+            ));
         }
 
         #[test]

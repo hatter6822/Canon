@@ -171,3 +171,58 @@ fn l1_ingest_corpus_input_round_trips() {
         );
     }
 }
+
+/// `preview_ingest` + `commit_assignment` produce the same
+/// output as `ingest` for every corpus record.  This pins the
+/// equivalence between the eager-mutation API (used by the
+/// fixture generator) and the peek/commit API (used by the
+/// production watcher).
+#[test]
+fn l1_ingest_preview_and_ingest_agree() {
+    use canon_l1_ingest::translation::{commit_assignment, preview_ingest, Translated};
+    let path = format!(
+        "{}/../tests/cross-stack/l1_ingest.cxsf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = FixtureFile::load(&path).expect("load fixture file");
+    for (i, record) in fixture.records().iter().enumerate() {
+        let input = decode_input(&record.input)
+            .unwrap_or_else(|e| panic!("record {i}: decode input failed: {e:?}"));
+        // Eager-mutation flow.
+        let mut book_eager = AddressBook::new();
+        for (addr, _) in &input.address_book {
+            book_eager.assign(addr);
+        }
+        let eager_output = ingest(&mut book_eager, &input.event, input.current_nonce);
+        // Peek/commit flow.
+        let mut book_peek = AddressBook::new();
+        for (addr, _) in &input.address_book {
+            book_peek.assign(addr);
+        }
+        let peek_output = match preview_ingest(&book_peek, &input.event, input.current_nonce) {
+            Translated::NoAction => None,
+            Translated::Emit(u) => Some(u),
+            Translated::EmitWithAssignment {
+                action,
+                address,
+                new_actor_id,
+            } => {
+                commit_assignment(&mut book_peek, &address, new_actor_id).unwrap();
+                Some(action)
+            }
+        };
+        // Both flows produce the same UnsignedAction.
+        assert_eq!(
+            eager_output, peek_output,
+            "record {i}: preview/commit flow disagrees with ingest"
+        );
+        // And the resulting books should match.
+        for id in 1..book_eager.next_actor_id() {
+            assert_eq!(
+                book_eager.lookup_reverse(id),
+                book_peek.lookup_reverse(id),
+                "record {i}: address-book mismatch at id {id}"
+            );
+        }
+    }
+}

@@ -690,4 +690,76 @@ mod tests {
         let e2 = encode_action(&a).unwrap();
         assert_eq!(e1, e2);
     }
+
+    /// Known-vector test for `RegisterIdentity` —
+    /// byte-equivalent to Lean's `Encoding.Action.encode
+    /// (.registerIdentity 1 (PublicKey.mk #[0x02, 0xab]))`.
+    ///
+    /// Hand-calculated expected bytes:
+    ///
+    ///   * Tag 12 (uint): `[0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0]`
+    ///   * actor 1 (uint): `[0x00, 0x01, 0, 0, 0, 0, 0, 0, 0]`
+    ///   * pk (byte string of length 2): `[0x02, 0x02, 0, 0, 0,
+    ///     0, 0, 0, 0, 0x02, 0xab]`
+    ///
+    /// Total 29 bytes.
+    #[test]
+    fn encode_register_identity_known_vector() {
+        let a = Action::RegisterIdentity {
+            actor: 1,
+            pk: PublicKey::from_bytes(&[0x02, 0xab]),
+        };
+        let actual = encode_action(&a).unwrap();
+        let expected: Vec<u8> = vec![
+            // Tag 12 (CBE uint head)
+            0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // actor 1 (CBE uint head)
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // pk byte-string head (CBE bytes, length=2)
+            0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // pk payload
+            0x02, 0xab,
+        ];
+        assert_eq!(actual, expected);
+    }
+
+    /// Known-vector test for `signing_input` — verifies the
+    /// load-bearing 36-byte domain prefix bytes.
+    ///
+    /// The Lean reference (`Authority/SignedAction.lean::
+    /// signingInput`) produces a domain prefix of:
+    ///
+    ///   * CBE byte-string head with length=27.
+    ///   * 27 UTF-8 bytes of "legalkernel/v1/signedaction".
+    ///
+    /// Total prefix size: 36 bytes.
+    #[test]
+    fn signing_input_domain_prefix_known_vector() {
+        let a = Action::FreezeResource { r: 0 };
+        let bytes = signing_input(&a, 0, 0, &[]).unwrap();
+        let expected_prefix: Vec<u8> = {
+            let mut v = vec![
+                // CBE byte-string head (tag, length=27 LE)
+                0x02, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            v.extend_from_slice(b"legalkernel/v1/signedaction");
+            v
+        };
+        assert!(bytes.len() >= expected_prefix.len());
+        assert_eq!(&bytes[..expected_prefix.len()], expected_prefix.as_slice());
+    }
+
+    /// Known-vector test: empty CBE byte-string is `[0x02,
+    /// 0, 0, 0, 0, 0, 0, 0, 0]` (head only, no payload).
+    #[test]
+    fn encode_bytes_checked_empty_known_vector() {
+        let encoded = encode_bytes_checked(&[]).unwrap();
+        assert_eq!(encoded, vec![0x02, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// Known-vector test: empty CBE uint is `[0x00,
+    /// 0, 0, 0, 0, 0, 0, 0, 0]` (head only, value=0).
+    #[test]
+    fn encode_u64_zero_known_vector() {
+        assert_eq!(encode_u64(0), vec![0x00, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
 }

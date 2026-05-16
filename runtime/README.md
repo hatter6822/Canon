@@ -163,10 +163,10 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (317 tests post-RH-B-audit —
-# 183 in the new `canon-l1-ingest` lib + 3 cross-stack + 4
-# integration + 11 property tests, including 20 regression tests
-# from the audit pass that surfaced and fixed seven correctness /
+# Run every member crate's tests (334 tests post-RH-B-double-audit —
+# 198 in the new `canon-l1-ingest` lib + 4 cross-stack + 5
+# integration + 11 property tests, including 37 regression tests
+# from two audit passes that surfaced and fixed 15 correctness /
 # security issues; up from 116 at the RH-A landing and 44 at the
 # RH-H baseline).
 cargo test --workspace

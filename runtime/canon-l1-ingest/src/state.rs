@@ -33,18 +33,49 @@
 //!   * Human-inspectable.
 //!   * No DB dependency until RH-E.0 lands.
 //!
-//! Each line is one [`StateRecord`]:
+//! Each line is one [`StateRecord`].  Current production writes
+//! use TWO record kinds:
+//!
+//!   * `submitted` — the atomic post-submit record carrying the
+//!     forwarded-key, new `next_nonce`, and (optional) address
+//!     assignment in a single line write.  Replaces the
+//!     pre-audit-pass three-record sequence
+//!     (`address_assigned` + `nonce_progressed` + `forwarded`).
+//!   * `forwarded` — used ONLY for `NoAction` events (`Revoked`,
+//!     `DepositInitiated`) that don't bump the nonce.  Just
+//!     records the dedup-key.
+//!   * `confirmed` — block-number progress marker, appended
+//!     after every successful `process_block`.
+//!
+//! Legacy record kinds (`address_assigned`, `nonce_progressed`)
+//! remain in the [`StateRecord`] enum for replay-compatibility
+//! with state files written by older daemons.  The watcher
+//! NEVER writes these for new records.
 //!
 //! ```jsonc
+//! {"event": "submitted", "block_hash": "0x...", "tx_hash": "0x...", "log_index": N,
+//!  "next_nonce": "N", "assigned": {"address": "0x...", "actor_id": N}}
 //! {"event": "forwarded", "block_hash": "0x...", "tx_hash": "0x...", "log_index": N}
 //! {"event": "confirmed", "block_number": N}
-//! {"event": "address_assigned", "address": "0x...", "actor_id": N}
 //! ```
 //!
 //! Rebuilding state on startup walks the file and replays each
 //! record into in-memory data structures.  Compaction (when the
 //! file grows large) is out of scope for the RH-B landing; the
 //! planned RH-E.0 SQLite layer will replace this entirely.
+//!
+//! ## Replay-time integrity checks
+//!
+//! Replay enforces several invariants and rejects corrupted
+//! state files with [`StateError::Malformed`]:
+//!
+//!   * Hex-byte fields decode to the expected length
+//!     (`block_hash` / `tx_hash` → 32 bytes; `address` → 20 bytes).
+//!   * Duplicate `actor_id` records with conflicting addresses
+//!     are rejected (would silently overwrite the BTreeMap).
+//!   * The reconstructed address book's id sequence matches
+//!     the persisted ids (catches gaps and out-of-order
+//!     assignments).
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -409,6 +440,21 @@ impl StateStore {
                             message: "address must be 20 bytes".into(),
                         })?;
                     let addr = EthAddress(bytes);
+                    // Reject duplicate actor-id entries.  The
+                    // `BTreeMap::insert` would silently overwrite,
+                    // hiding a corrupted state file.  Using
+                    // `try_insert`-style logic catches it.
+                    if let Some(prior) = pending_assignments.get(&actor_id) {
+                        if *prior != addr {
+                            return Err(StateError::Malformed {
+                                line_number,
+                                message: format!(
+                                    "duplicate actor_id {actor_id} with conflicting \
+                                     addresses {prior:?} and {addr:?}"
+                                ),
+                            });
+                        }
+                    }
                     pending_assignments.insert(actor_id, addr);
                 }
                 StateRecord::NonceProgressed { next_nonce } => {
@@ -457,6 +503,21 @@ impl StateStore {
                                     message: "submitted.assigned.address must be 20 bytes".into(),
                                 })?;
                         let addr = EthAddress(bytes);
+                        // Reject duplicate actor-id entries (see
+                        // the analogous check in the legacy
+                        // `AddressAssigned` arm above).
+                        if let Some(prior) = pending_assignments.get(&assignment.actor_id) {
+                            if *prior != addr {
+                                return Err(StateError::Malformed {
+                                    line_number,
+                                    message: format!(
+                                        "duplicate actor_id {} with conflicting addresses \
+                                         {prior:?} and {addr:?}",
+                                        assignment.actor_id
+                                    ),
+                                });
+                            }
+                        }
                         pending_assignments.insert(assignment.actor_id, addr);
                     }
                 }
@@ -468,8 +529,21 @@ impl StateStore {
         // the same mapping.  We also verify the replayed ids
         // match the persisted values — any mismatch indicates a
         // corrupted state file (e.g. gaps or duplicates).
+        //
+        // Uses `try_assign` (the fallible variant) so an
+        // overflowing counter surfaces as a typed Malformed
+        // error rather than a panic.  Overflow is unreachable
+        // on any realistic workload but the typed-error path
+        // is the operator-friendly failure mode.
         for (&id, addr) in &pending_assignments {
-            let (assigned_id, _is_new) = state.address_book.assign(addr);
+            let (assigned_id, _is_new) =
+                state
+                    .address_book
+                    .try_assign(addr)
+                    .map_err(|e| StateError::Malformed {
+                        line_number: 0,
+                        message: format!("address_book replay overflow at id {id}: {e}"),
+                    })?;
             if assigned_id != id {
                 return Err(StateError::Malformed {
                     line_number: 0,
@@ -1010,6 +1084,101 @@ mod tests {
             Err(StateError::Malformed { message, .. }) => {
                 assert!(
                     message.contains("address_book replay"),
+                    "unexpected error: {message}"
+                );
+            }
+            other => panic!("expected Malformed error, got {other:?}"),
+        }
+    }
+
+    /// Replay rejects state files with the same `actor_id`
+    /// assigned to different addresses (duplicate-key
+    /// corruption that would previously have silently
+    /// overwritten in the `BTreeMap`).
+    #[test]
+    fn replay_rejects_duplicate_actor_id_with_different_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.jsonl");
+        let line1 = serde_json::to_string(&StateRecord::AddressAssigned {
+            address: HexBytes(vec![0x01; 20]),
+            actor_id: 1,
+        })
+        .unwrap();
+        let line2 = serde_json::to_string(&StateRecord::AddressAssigned {
+            address: HexBytes(vec![0x02; 20]), // different address
+            actor_id: 1,                       // same id
+        })
+        .unwrap();
+        std::fs::write(&path, format!("{line1}\n{line2}\n")).unwrap();
+        let result = StateStore::open(&path);
+        match result {
+            Err(StateError::Malformed { message, .. }) => {
+                assert!(
+                    message.contains("duplicate actor_id"),
+                    "unexpected error: {message}"
+                );
+            }
+            other => panic!("expected Malformed error, got {other:?}"),
+        }
+    }
+
+    /// Replay TOLERATES a duplicate `actor_id` with the SAME
+    /// address (idempotent re-assertion, possibly from operator
+    /// recovery procedures).
+    #[test]
+    fn replay_tolerates_duplicate_actor_id_with_same_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.jsonl");
+        let line1 = serde_json::to_string(&StateRecord::AddressAssigned {
+            address: HexBytes(vec![0x01; 20]),
+            actor_id: 1,
+        })
+        .unwrap();
+        // Same address + id as line1.  This is benign repetition.
+        let line2 = line1.clone();
+        std::fs::write(&path, format!("{line1}\n{line2}\n")).unwrap();
+        let (_, state) = StateStore::open(&path).unwrap();
+        assert_eq!(state.address_book.len(), 1);
+    }
+
+    /// Submitted records with conflicting actor_ids are also
+    /// rejected.
+    #[test]
+    fn replay_rejects_submitted_records_with_duplicate_actor_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.jsonl");
+        {
+            let (mut store, _) = StateStore::open(&path).unwrap();
+            store
+                .append(&StateRecord::Submitted {
+                    block_hash: HexBytes(vec![0x11; 32]),
+                    tx_hash: HexBytes(vec![0x22; 32]),
+                    log_index: 0,
+                    next_nonce: 1,
+                    assigned: Some(AddressAssignment {
+                        address: HexBytes(vec![0xaa; 20]),
+                        actor_id: 1,
+                    }),
+                })
+                .unwrap();
+            store
+                .append(&StateRecord::Submitted {
+                    block_hash: HexBytes(vec![0x33; 32]),
+                    tx_hash: HexBytes(vec![0x44; 32]),
+                    log_index: 0,
+                    next_nonce: 2,
+                    assigned: Some(AddressAssignment {
+                        address: HexBytes(vec![0xbb; 20]), // DIFFERENT address
+                        actor_id: 1,                       // SAME id
+                    }),
+                })
+                .unwrap();
+        }
+        let result = StateStore::open(&path);
+        match result {
+            Err(StateError::Malformed { message, .. }) => {
+                assert!(
+                    message.contains("duplicate actor_id"),
                     "unexpected error: {message}"
                 );
             }

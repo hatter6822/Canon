@@ -84,6 +84,17 @@ pub const BRIDGE_ACTOR_ID: ActorId = 0;
 /// `1` is the first non-reserved id; `0` is the bridge actor's.
 pub const INITIAL_NEXT_ACTOR_ID: ActorId = 1;
 
+/// Errors surfaced by [`AddressBook::try_assign`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AssignError {
+    /// The monotone counter has reached `u64::MAX`.  This is
+    /// unreachable on any realistic workload (2⁶⁴ unique
+    /// addresses) but the explicit error variant prevents
+    /// silent ID-collision corruption.
+    #[error("address-book counter overflow: next_actor_id reached u64::MAX")]
+    Overflow,
+}
+
 impl AddressBook {
     /// Construct an empty AddressBook with `next_actor_id = 1`.
     /// Mirrors Lean's `Bridge.AddressBook.empty`.
@@ -112,23 +123,47 @@ impl AddressBook {
         self.reverse.get(&id).copied()
     }
 
-    /// Assign a fresh `ActorId` to `addr` (or return the existing
-    /// id if `addr` is already known).  Returns the resulting
-    /// `ActorId` plus a `bool` flag — `true` iff a new assignment
-    /// occurred.  Mirrors Lean's `AddressBook.assign` (modulo the
-    /// `(book, id)` return shape — here we mutate in place and
-    /// return `(id, is_new)`).
-    pub fn assign(&mut self, addr: &EthAddress) -> (ActorId, bool) {
+    /// Errors surfaced by [`AddressBook::assign`].
+    ///
+    /// `Overflow` fires if the book's monotone counter has
+    /// reached `u64::MAX` and another fresh assignment is
+    /// requested.  This is unreachable on any realistic
+    /// deployment (2⁶⁴ unique addresses), but is enforced here
+    /// rather than silently producing duplicate `ActorId`s.
+    ///
+    /// Re-using [`AssignError`] via `Result` lets the
+    /// production caller (the watcher) surface the failure as
+    /// `WatcherError::Config` rather than crashing.
+    pub fn try_assign(&mut self, addr: &EthAddress) -> Result<(ActorId, bool), AssignError> {
         if let Some(existing) = self.forward.get(addr).copied() {
-            return (existing, false);
+            return Ok((existing, false));
         }
         let fresh = self.next_actor_id;
+        // Compute the next counter BEFORE inserting so we can
+        // reject overflow without leaving the book in a
+        // half-mutated state.
+        let next = fresh.checked_add(1).ok_or(AssignError::Overflow)?;
         self.forward.insert(*addr, fresh);
         self.reverse.insert(fresh, *addr);
-        // Monotone bump; overflow on `u64::MAX` is unreachable on
-        // any realistic workload (2^64 addresses).
-        self.next_actor_id = self.next_actor_id.checked_add(1).unwrap_or(ActorId::MAX);
-        (fresh, true)
+        self.next_actor_id = next;
+        Ok((fresh, true))
+    }
+
+    /// Convenience wrapper for [`Self::try_assign`] that panics
+    /// on overflow.  Preserved for code paths that prove
+    /// (statically or by precondition) that overflow cannot
+    /// occur — typically the cross-stack fixture generator and
+    /// replay code.
+    ///
+    /// Production callers (the watcher) MUST use `try_assign`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the book's monotone counter has reached
+    /// `u64::MAX`.
+    pub fn assign(&mut self, addr: &EthAddress) -> (ActorId, bool) {
+        self.try_assign(addr)
+            .expect("AddressBook::assign: monotone counter exhausted (next_actor_id == u64::MAX)")
     }
 
     /// The next actor id this book will issue.  Diagnostic only.
@@ -153,7 +188,7 @@ impl AddressBook {
 #[cfg(test)]
 mod tests {
     use super::{AddressBook, BRIDGE_ACTOR_ID, INITIAL_NEXT_ACTOR_ID};
-    use crate::action::EthAddress;
+    use crate::action::{ActorId, EthAddress};
 
     /// Fresh AddressBook is empty and starts at `next = 1`.
     #[test]
@@ -265,5 +300,85 @@ mod tests {
         assert_eq!(book.lookup(&a), Some(id_a));
         // `b`'s id is fresh.
         assert_ne!(id_a, id_b);
+    }
+
+    /// `try_assign` returns `Err(AssignError::Overflow)` when
+    /// the monotone counter has reached `u64::MAX`.  This is
+    /// the load-bearing safeguard against silent ID reuse: the
+    /// previous `saturating_add` returned the same id for
+    /// successive assignments past `u64::MAX`, violating the
+    /// `forward[a] = id ↔ reverse[id] = a` invariant.
+    #[test]
+    fn try_assign_rejects_overflow() {
+        use super::AssignError;
+        let mut book = AddressBook::new();
+        // Forcibly set the counter to `u64::MAX`.  This is a
+        // test-only manoeuvre — production code only ever
+        // monotonically bumps via `assign`.
+        unsafe_inject_counter(&mut book, ActorId::MAX);
+        let addr = EthAddress::from_bytes(&[0xaa; 20]).unwrap();
+        // First try_assign should succeed (counter = MAX, the
+        // would-be next is MAX+1 which would overflow — but we
+        // bump POST-insert, so the check would be on next call).
+        // Actually with the new logic, the bump happens BEFORE
+        // the insert: we compute `next = fresh.checked_add(1)`.
+        // For fresh = MAX, next = None → return Err.
+        match book.try_assign(&addr) {
+            Err(AssignError::Overflow) => {}
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+        // Book is unchanged (we rejected before inserting).
+        assert!(book.is_empty());
+        assert!(book.lookup(&addr).is_none());
+    }
+
+    /// `assign` (the panic-on-overflow shim) panics rather than
+    /// silently corrupting the book.
+    #[test]
+    #[should_panic(expected = "monotone counter exhausted")]
+    fn assign_panics_on_overflow() {
+        let mut book = AddressBook::new();
+        unsafe_inject_counter(&mut book, ActorId::MAX);
+        let addr = EthAddress::from_bytes(&[0xaa; 20]).unwrap();
+        let _ = book.assign(&addr);
+    }
+
+    /// `try_assign` returning Err leaves the book unmutated —
+    /// the post-rejection book passes the same invariant checks
+    /// as a fresh book.
+    #[test]
+    fn try_assign_failure_does_not_corrupt_book() {
+        let mut book = AddressBook::new();
+        // Pre-load with some valid assignments.
+        let a = EthAddress::from_bytes(&[1u8; 20]).unwrap();
+        let b = EthAddress::from_bytes(&[2u8; 20]).unwrap();
+        let (id_a, _) = book.assign(&a);
+        let (id_b, _) = book.assign(&b);
+        assert_eq!(id_a, 1);
+        assert_eq!(id_b, 2);
+        // Now corrupt the counter.
+        unsafe_inject_counter(&mut book, ActorId::MAX);
+        let c = EthAddress::from_bytes(&[3u8; 20]).unwrap();
+        let result = book.try_assign(&c);
+        assert!(result.is_err());
+        // Prior assignments still hold.
+        assert_eq!(book.lookup(&a), Some(1));
+        assert_eq!(book.lookup(&b), Some(2));
+        assert!(book.lookup(&c).is_none());
+        assert_eq!(book.next_actor_id(), ActorId::MAX);
+    }
+
+    /// Test-only helper: inject a specific counter value into a
+    /// book's `next_actor_id`.  Used to drive overflow tests
+    /// without performing 2⁶⁴ real assignments.
+    ///
+    /// Despite the name, this function is `safe` — there is no
+    /// UB; just an invariant violation if the caller misuses
+    /// it (e.g. setting the counter to a value lower than the
+    /// already-issued ids).  The `unsafe_` prefix is a comment
+    /// in the function name that the caller is bypassing the
+    /// monotone-bump invariant.
+    fn unsafe_inject_counter(book: &mut AddressBook, new_value: ActorId) {
+        book.next_actor_id = new_value;
     }
 }

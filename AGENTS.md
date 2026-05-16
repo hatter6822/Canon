@@ -870,12 +870,12 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  317 tests across 21 non-empty test
+**Rust-side test count.**  334 tests across 21 non-empty test
 binaries at the RH-B landing (up from 116 at the RH-A landing —
-+201 tests in the new `canon-l1-ingest` crate, including the
-20 regression tests that landed via the post-RH-B audit pass).
-`cargo test --workspace` from `runtime/` is the canonical query.
-Test mass breakdown:
++218 tests in the new `canon-l1-ingest` crate, including the
+20 regression tests from the first audit pass and 17 more from
+the second).  `cargo test --workspace` from `runtime/` is the
+canonical query.  Test mass breakdown:
 
   * `canon-cross-stack` — 31 tests (29 unit + 2 integration);
     unchanged since RH-H.
@@ -888,27 +888,38 @@ Test mass breakdown:
     zero-r / zero-s / r=n / s=n rejection, x=0 off-curve rejection.
   * `canon-hash-keccak256` — 32 tests (13 unit + 10 known-vector
     + 5 property + 3 cross-stack + 1 integration).
-  * `canon-l1-ingest` — 201 tests (183 lib + 3 cross-stack + 4
+  * `canon-l1-ingest` — 218 tests (198 lib + 4 cross-stack + 5
     integration + 11 property).  Lib tests cover: action tag
     table (16 frozen indices), CBE encoder layout per Action
-    variant, address-book monotonicity / locality / idempotency,
-    L1 ABI decoder (every event variant + every malformed-input
-    error path), bridge-actor key zeroization / low-s signature
-    enforcement / file loading, re-org window linear advance /
-    shallow re-org absorption / deep re-org rejection (at-floor
-    AND below-floor), `OrphanedParent` vs `DeepReorg`
-    distinction, mock and JSON-RPC L1 sources (`logs_in_block_by_hash`
-    with defence-in-depth filters), JSONL state store
-    round-trip / malformed-line rejection / legacy + new
-    `Submitted` mixed replay / address-book gap rejection,
-    buffering and HTTP submitters / verdict byte-table /
-    backpressure cycling, translation byte-equivalence to Lean
-    reference (`ingest` + new `preview_ingest` + `commit_assignment`),
-    watcher confirmation-depth gating / idempotency /
-    NotAdmissible halt / Busy retry, fixture format round-trip.
-    Regression tests for the post-RH-B audit pass: address-book
-    not corrupted by failed submit, nonce not bumped by
-    None-translating events, atomic `Submitted` record format.
+    variant + known-vector tests against hand-calculated Lean
+    byte streams, address-book monotonicity / locality /
+    idempotency / overflow rejection (`try_assign` returns
+    `AssignError::Overflow` rather than silently producing
+    duplicate ids), L1 ABI decoder (every event variant + every
+    malformed-input error path), bridge-actor key zeroization /
+    low-s signature enforcement / file loading, re-org window
+    linear advance / shallow re-org absorption / deep re-org
+    rejection (at-floor AND below-floor), `OrphanedParent` vs
+    `DeepReorg` distinction, mock and JSON-RPC L1 sources
+    (`logs_in_block_by_hash` with defence-in-depth filters, HTTP
+    chunked-encoding rejection), JSONL state store round-trip /
+    malformed-line rejection / legacy + new `Submitted` mixed
+    replay / address-book gap rejection / duplicate-actor-id
+    rejection, buffering and HTTP submitters / verdict
+    byte-table / backpressure cycling, translation
+    byte-equivalence to Lean reference (`ingest` + new
+    `preview_ingest` + `commit_assignment` with explicit
+    `CommitError`), watcher confirmation-depth gating /
+    idempotency / NotAdmissible halt / Busy retry /
+    `blocks_per_iteration == 0` rejection /
+    `last_confirmed_block == u64::MAX` saturation / verdict
+    Ok-NotAdmissible mapping, fixture format round-trip.
+    Regression tests for the audit passes: address-book not
+    corrupted by failed submit, nonce not bumped by
+    None-translating events, atomic `Submitted` record format,
+    arithmetic overflow guards, address-book ID overflow guard,
+    duplicate-state-file-record detection, chunked-encoding
+    rejection, EIP-1271 end-to-end integration.
   * Three skeleton crates (`canon-bench`,
     `canon-faultproof-observer`, `canon-storage`) contribute one
     crate-name regression test each (3 total).  The remaining
@@ -1053,16 +1064,19 @@ deployment links against to wire the kernel's crypto opaques:
       `canon_hash_stream`, `canon_hash_identifier`) via `nm -D`.
 
 **Workstream RH-B (L1 event ingestor).**
-**Complete (post-audit).**  Materialises the long-running daemon
-that watches Ethereum L1, translates `CanonBridge` /
-`CanonIdentityRegistry` event logs to Canon `Action`s via the
-byte-equivalent Rust mirror of `LegalKernel.Bridge.Ingest.ingest`,
-signs with a `zeroize`-protected bridge-actor key, and forwards
-CBE-encoded `SignedAction`s to the downstream consumer (planned:
-`canon-host`).  See `docs/planning/rust_host_runtime_plan.md`
-§RH-B Closeout for the full per-sub-unit breakdown plus the
-audit-pass remediation history (seven correctness / security
-issues found and fixed in the same workstream PR).  Headlines:
+**Complete (post-audit, two passes).**  Materialises the
+long-running daemon that watches Ethereum L1, translates
+`CanonBridge` / `CanonIdentityRegistry` event logs to Canon
+`Action`s via the byte-equivalent Rust mirror of
+`LegalKernel.Bridge.Ingest.ingest`, signs with a
+`zeroize`-protected bridge-actor key, and forwards CBE-encoded
+`SignedAction`s to the downstream consumer (planned: `canon-
+host`).  See `docs/planning/rust_host_runtime_plan.md` §RH-B
+Closeout for the full per-sub-unit breakdown plus the
+audit-pass remediation history (15 correctness / security
+issues found and fixed across two audit passes in the same
+workstream PR — seven from pass 1, eight from pass 2).
+Headlines:
 
   * **Library + binary surface.**  `canon-l1-ingest` is now a
     library (`lib.rs` exporting 13 sub-modules) plus a binary

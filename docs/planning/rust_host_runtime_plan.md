@@ -1508,9 +1508,12 @@ weaken any security or correctness property:
 
 #### Audit pass (post-landing review)
 
-After the initial RH-B landing, a deep audit surfaced seven
-issues that have all been remediated in the same workstream
-PR.  Each is regression-tested.
+After the initial RH-B landing, two deep audit passes surfaced
+fifteen issues in total — all remediated in the same workstream
+PR.  Each is regression-tested.  The first-pass audit found
+seven correctness / security issues (state corruption, nonce
+desync, etc.); the second-pass audit (this section) found eight
+additional issues:
 
   1. **State corruption on submission failure (CRITICAL).**
      The previous code eagerly mutated the address book inside
@@ -1594,9 +1597,93 @@ PR.  Each is regression-tested.
     the new atomic `Submitted` record (backwards compatibility:
     replay tolerates either form).
 
-  Audit posture after the pass: 317 tests passing across the
-  workspace (+20 over the initial landing), all four CI gates
-  clean, `unsafe_code = "forbid"` workspace-wide.
+  Audit posture after the first pass: 317 tests passing across
+  the workspace (+20 over the initial landing).
+
+  **Second-pass audit issues** (found and fixed in the same PR):
+
+  8. **AddressBook silent ID reuse (HIGH).**  `AddressBook::assign`
+     saturated `next_actor_id` at `u64::MAX` on overflow, then
+     kept returning the same `MAX` value for subsequent
+     assignments — silently producing duplicate `ActorId`s and
+     violating the `forward[a] = id ↔ reverse[id] = a` invariant.
+     **Fix**: introduced `try_assign` returning
+     `Result<(ActorId, bool), AssignError>`; the `assign` wrapper
+     panics on overflow rather than silently corrupting.
+     Production code (the watcher, state replay) uses
+     `try_assign`.  Regression tests:
+     `address_book::tests::try_assign_rejects_overflow`,
+     `assign_panics_on_overflow`,
+     `try_assign_failure_does_not_corrupt_book`.
+
+  9. **Watcher arithmetic overflow / underflow (HIGH).**  Three
+     arithmetic paths could panic in debug builds and wrap in
+     release builds: `start_block = last_confirmed_block + 1`
+     (with `Some(u64::MAX)`), `end_block = start_block +
+     blocks_to_process - 1` (with `blocks_to_process == 0`), and
+     `total += processed` in `run_until`.  The
+     `last_confirmed_block` wrap was especially serious: it would
+     restart processing from genesis in release.  **Fix**: use
+     `saturating_add` everywhere and reject
+     `blocks_per_iteration == 0` with a warning + `Ok(0)`.
+     Regression tests:
+     `watcher::tests::blocks_per_iteration_zero_does_not_underflow`,
+     `last_confirmed_block_at_u64_max_does_not_wrap`.
+
+  10. **Verdict mapping (MEDIUM).**  The submit loop's
+      "impossible" arm for `Ok(Verdict::NotAdmissible)` /
+      `Ok(Verdict::ParseError)` returned a generic
+      `SubmitError::Transport("impossible verdict path")` —
+      misleading for custom `Submitter` impls that legitimately
+      return these as `Ok` (trait-allowed).  **Fix**: map to
+      the semantically-correct `Submit(NotAdmissible)` /
+      `Submit(ParseError)` errors.  Regression test:
+      `watcher::tests::ok_not_admissible_verdict_maps_to_submit_error`.
+
+  11. **State-file duplicate `actor_id` silent overwrite (MEDIUM).**
+      Replay used `BTreeMap::insert` which silently overwrites
+      on duplicate keys.  A corrupted state file with two
+      records assigning different addresses to the same
+      `actor_id` would silently retain the second.  **Fix**:
+      check `pending_assignments.get(&id)` before insert and
+      reject conflicting values.  Same-value duplicates are
+      tolerated (idempotent re-assertion).  Regression tests:
+      `state::tests::replay_rejects_duplicate_actor_id_with_different_addresses`,
+      `replay_tolerates_duplicate_actor_id_with_same_address`,
+      `replay_rejects_submitted_records_with_duplicate_actor_id`.
+
+  12. **Chunked transfer-encoding silent failure (LOW).**  The
+      HTTP client read until EOF without checking
+      `Transfer-Encoding: chunked`.  A server using chunked
+      encoding would return chunk markers in the body, which
+      `serde_json` would silently fail to parse with a misleading
+      error.  **Fix**: explicit detection and rejection with an
+      actionable error message.  Case-insensitive per RFC 7230;
+      multi-value headers (`gzip, chunked`) handled.  Regression
+      tests:
+      `source::tests::header_chunked_encoding_detected`,
+      `header_chunked_encoding_negative_cases`.
+
+  13. **`commit_assignment` `debug_assert` (LOW).**  The expected-
+      id check in `commit_assignment` was a `debug_assert_eq!`,
+      so production builds silently accepted divergence.  **Fix**:
+      promote to an explicit `CommitError::ExpectedIdMismatch`
+      variant.  The watcher maps to `WatcherError::Config`.
+
+  14. **Stale state.rs docstring.**  The module docstring still
+      claimed the three-record sequence was the current write
+      format.  **Fix**: updated to document the new atomic
+      `Submitted` record + the replay-time integrity checks.
+
+  15. **Unaudited RegisteredEIP1271 watcher integration (LOW).**
+      The unit translation test covered EIP-1271, but no
+      end-to-end watcher integration test exercised it.  **Fix**:
+      added `tests/integration.rs::end_to_end_eip1271_registration`.
+
+  Audit posture after the second pass: 334 tests passing across
+  the workspace (+37 over the initial landing, +17 over the
+  first-audit-pass landing), all four CI gates clean,
+  `unsafe_code = "forbid"` workspace-wide.
 
 ---
 

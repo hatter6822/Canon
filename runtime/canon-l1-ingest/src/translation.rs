@@ -163,6 +163,41 @@ pub fn preview_ingest(
     }
 }
 
+/// Errors surfaced by [`commit_assignment`].
+#[derive(Debug, thiserror::Error)]
+pub enum CommitError {
+    /// The book's monotone counter is exhausted.  Unreachable
+    /// on any realistic workload (2⁶⁴ unique addresses).
+    #[error("address-book counter overflow")]
+    Overflow,
+    /// The committed id does not match the previewed id.  This
+    /// indicates the book mutated between `preview_ingest` and
+    /// `commit_assignment` — a programmer error or concurrent-
+    /// modification bug.  Surfaces as a hard error in production
+    /// (not just a debug-only assertion), because silent
+    /// divergence between the on-disk state and the in-memory
+    /// book would corrupt the L2's identity stream.
+    #[error(
+        "commit_assignment: book changed between preview and commit \
+         (expected actor_id {expected}, got {actual})"
+    )]
+    ExpectedIdMismatch {
+        /// The id the caller expected (from the previously-
+        /// emitted `Translated::EmitWithAssignment`).
+        expected: ActorId,
+        /// The id the book actually assigned at commit time.
+        actual: ActorId,
+    },
+}
+
+impl From<crate::address_book::AssignError> for CommitError {
+    fn from(e: crate::address_book::AssignError) -> Self {
+        match e {
+            crate::address_book::AssignError::Overflow => Self::Overflow,
+        }
+    }
+}
+
 /// Commit a previously-previewed `(address, id)` assignment to
 /// the book.  Caller is the watcher; this is invoked AFTER
 /// successful submission so the book never goes out of sync with
@@ -170,18 +205,29 @@ pub fn preview_ingest(
 ///
 /// Returns the actually-assigned id; this is `expected_id` if
 /// `address` was not previously in the book, or the existing id
-/// otherwise (a benign race).
+/// otherwise.  Returns [`CommitError::Overflow`] if the book's
+/// monotone counter has reached `u64::MAX`.  Returns
+/// [`CommitError::ExpectedIdMismatch`] if the assigned id
+/// differs from `expected_id` (indicates concurrent modification
+/// or a programming bug — production-fatal because the on-disk
+/// state has been written with `expected_id` already).
+///
+/// # Errors
+///
+/// See [`CommitError`].
 pub fn commit_assignment(
     book: &mut AddressBook,
     address: &EthAddress,
     expected_id: ActorId,
-) -> ActorId {
-    let (assigned, _was_new) = book.assign(address);
-    debug_assert_eq!(
-        assigned, expected_id,
-        "commit_assignment: book changed between preview and commit (expected {expected_id}, got {assigned})"
-    );
-    assigned
+) -> Result<ActorId, CommitError> {
+    let (assigned, _was_new) = book.try_assign(address)?;
+    if assigned != expected_id {
+        return Err(CommitError::ExpectedIdMismatch {
+            expected: expected_id,
+            actual: assigned,
+        });
+    }
+    Ok(assigned)
 }
 
 /// **Deprecated** eager-mutation translation, retained for the
@@ -577,7 +623,7 @@ mod tests {
             ..
         } = preview_ingest(&book, &event, 0)
         {
-            let committed = commit_assignment(&mut book, &address, new_actor_id);
+            let committed = commit_assignment(&mut book, &address, new_actor_id).unwrap();
             assert_eq!(committed, new_actor_id);
             assert_eq!(book.lookup(&actor), Some(new_actor_id));
         } else {
@@ -632,7 +678,7 @@ mod tests {
             ..
         } = preview_ingest(&book, &event, 0)
         {
-            super::commit_assignment(&mut book, &address, new_actor_id);
+            super::commit_assignment(&mut book, &address, new_actor_id).unwrap();
         }
         // A subsequent preview (with the book now mutated)
         // emits ReplaceKey.
@@ -666,7 +712,7 @@ mod tests {
             ..
         } = preview_ingest(&book, &event1, 0)
         {
-            commit_assignment(&mut book, &address, new_actor_id);
+            commit_assignment(&mut book, &address, new_actor_id).unwrap();
         }
         // Now retry the same address with a different pubkey.
         let event2 = IngestedEvent::RegisteredEcdsa {

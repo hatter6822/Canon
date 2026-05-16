@@ -226,3 +226,54 @@ fn run_until_target_block() {
     // `last_confirmed_block` is `Some(_)` after processing.
     assert!(watcher.last_confirmed_block().is_some());
 }
+
+/// End-to-end with a `RegisteredEIP1271` event: contract-signer
+/// registration translates to `RegisterIdentity` with the
+/// 20-byte contract address as the pubkey payload (matching the
+/// translator's documented behaviour).
+#[test]
+fn end_to_end_eip1271_registration() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("state.jsonl");
+    let mut source = InMemoryL1Source::new();
+    // Build a RegisteredEIP1271 log: actor topic + 32-byte
+    // padded contract-signer address in data.
+    let actor: [u8; 20] = [0x66; 20];
+    let contract_signer: [u8; 20] = [0x77; 20];
+    let mut actor_topic = [0u8; 32];
+    actor_topic[12..32].copy_from_slice(&actor);
+    let mut data = [0u8; 32];
+    data[12..32].copy_from_slice(&contract_signer);
+    let log = canon_l1_ingest::events::RawLog {
+        address: identity_addr(),
+        topics: vec![
+            canon_l1_ingest::events::EventTopic::RegisteredEip1271.hash(),
+            actor_topic,
+        ],
+        data: data.to_vec(),
+        block_number: 0,
+        tx_hash: [0x88; 32],
+        log_index: 0,
+    };
+    push_chain_with_log(&mut source, 13, 0, log);
+    let submitter = BufferingSubmitter::new();
+    let mut config = WatcherConfig::new(bridge_addr(), identity_addr(), vec![]);
+    config.confirmation_depth = 12;
+    let mut watcher = WatcherLoop::new(config, source, submitter, test_key(), &state_path).unwrap();
+    let processed = watcher.run_iteration().unwrap();
+    assert_eq!(processed, 1);
+    let recorded = watcher.submitter().recorded();
+    assert_eq!(recorded.len(), 1);
+    match &recorded[0].unsigned.action {
+        canon_l1_ingest::action::Action::RegisterIdentity { actor: id, pk } => {
+            assert_eq!(*id, 1);
+            // The pubkey payload is the 20-byte contract signer
+            // address (per the translator's EIP-1271 mapping).
+            assert_eq!(pk.as_bytes(), &contract_signer);
+        }
+        other => panic!("expected RegisterIdentity, got {other:?}"),
+    }
+    // Address book has the (actor, 1) mapping.
+    let addr = canon_l1_ingest::action::EthAddress::from_bytes(&actor).unwrap();
+    assert_eq!(watcher.address_book().lookup(&addr), Some(1));
+}

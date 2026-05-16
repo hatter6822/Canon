@@ -267,6 +267,16 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
         self.next_nonce
     }
 
+    /// Read accessor for the underlying submitter.  Useful for
+    /// integration tests that inject a `BufferingSubmitter` to
+    /// observe submitted actions.  Production code SHOULD NOT
+    /// rely on this — the watcher is the only authorised
+    /// caller of `submitter.submit`.
+    #[must_use]
+    pub fn submitter(&self) -> &B {
+        &self.submitter
+    }
+
     /// Run a single watcher iteration.  Returns the number of
     /// blocks processed.
     ///
@@ -288,19 +298,40 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
             return Ok(0);
         }
         let confirmed_head = head - confirmation_depth;
+        // Saturating add: if `last_confirmed_block == Some(u64::MAX)`
+        // we'd otherwise overflow.  Saturating to `u64::MAX`
+        // makes the subsequent `start_block > confirmed_head`
+        // gate fire and we return early — preventing both a
+        // debug-mode panic and a release-mode wrap that would
+        // catastrophically restart from genesis.
         let start_block = match self.last_confirmed_block {
             None => 0,
-            Some(b) => b + 1,
+            Some(b) => b.saturating_add(1),
         };
         if start_block > confirmed_head {
             // Already up to date.
             return Ok(0);
         }
-        let blocks_to_process = std::cmp::min(
-            confirmed_head - start_block + 1,
-            u64::from(self.config.blocks_per_iteration),
-        );
-        let end_block = start_block + blocks_to_process - 1;
+        // `confirmed_head >= start_block` was just established,
+        // so `confirmed_head - start_block` is non-negative.
+        // The `+ 1` could in principle overflow if
+        // `confirmed_head == u64::MAX` and `start_block == 0`
+        // (i.e. the entire u64 range to process in one iteration).
+        // Saturate at `u64::MAX`.
+        let available_blocks = (confirmed_head - start_block).saturating_add(1);
+        let configured_batch = u64::from(self.config.blocks_per_iteration);
+        // Reject the degenerate `blocks_per_iteration == 0`
+        // configuration: with zero blocks per iteration the
+        // watcher would loop forever without making progress.
+        // Return early; the operator's logs will show no
+        // forward motion.
+        if configured_batch == 0 {
+            warn!("blocks_per_iteration is 0; watcher cannot make progress");
+            return Ok(0);
+        }
+        let blocks_to_process = std::cmp::min(available_blocks, configured_batch);
+        // `blocks_to_process >= 1` here, so `- 1` is safe.
+        let end_block = start_block + (blocks_to_process - 1);
         let mut processed = 0u64;
         for block_number in start_block..=end_block {
             self.process_block(block_number)?;
@@ -362,7 +393,10 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
                 }
                 Err(e) => return Err(e),
             };
-            total += processed;
+            // Saturate at `u64::MAX` to avoid an arithmetic
+            // overflow if the watcher runs long enough to process
+            // u64::MAX blocks (unrealistic but the bound is free).
+            total = total.saturating_add(processed);
             if processed == 0 {
                 sleep(self.config.poll_interval);
             }
@@ -444,21 +478,29 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
     ///   1. Idempotency check via the forwarded-key set.
     ///   2. **Peek-only** translation via `preview_ingest`
     ///      (does NOT mutate the address book).
-    ///   3. For `NoAction` events: persist `Forwarded` and
+    ///   3. For `NoAction` events: insert the dedup key
+    ///      in-memory, persist a legacy `Forwarded` record,
     ///      return.
     ///   4. Sign and submit.
-    ///   5. On submit success: persist `AddressAssigned` (if the
-    ///      translation produced one), commit the in-memory book
-    ///      mutation, persist `NonceProgressed`, persist
-    ///      `Forwarded`, bump in-memory nonce.
+    ///   5. On submit success:
+    ///      a. Persist the ATOMIC `Submitted` JSONL record
+    ///         carrying the new nonce + optional address
+    ///         assignment + dedup key in a single line write.
+    ///      b. Commit the in-memory address-book mutation (if
+    ///         the translation produced one).  Overflow here is
+    ///         operator-actionable.
+    ///      c. Bump the in-memory `next_nonce`.
+    ///      d. Insert the dedup key into the in-memory
+    ///         `forwarded` set.
     ///
-    /// Steps 5's writes are ordered so that a partial crash
-    /// leaves recoverable state: even if the `Forwarded` record
-    /// isn't persisted, the idempotency check on retry skips
-    /// the event because the in-memory `forwarded` set was
-    /// updated.  More importantly, the BOOK is only mutated
-    /// AFTER submit succeeds — so a failed submit doesn't
-    /// poison the next retry's translation.
+    /// Step 5a's atomic single-line write is the load-bearing
+    /// integrity boundary.  A crash between 5a and 5d leaves
+    /// the disk consistent: replay re-applies all of 5b/c/d
+    /// from the persisted Submitted record.  A crash BEFORE 5a
+    /// leaves the disk untouched; the event is re-processed
+    /// on restart.  The BOOK is only mutated AFTER submit
+    /// succeeds — so a failed submit doesn't poison the next
+    /// retry's translation.
     fn process_event(
         &mut self,
         event: IngestedEvent,
@@ -534,13 +576,17 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
                     backoff_ms = backoff_ms.saturating_mul(2).min(60_000);
                     retries += 1;
                 }
-                Ok(Verdict::NotAdmissible) | Ok(Verdict::ParseError) => {
-                    // Unreachable via `match` on `Result::Ok`: the
-                    // submitter returns `Err(SubmitError::*)` for
-                    // these verdicts.
-                    return Err(WatcherError::Submit(SubmitError::Transport(
-                        "impossible verdict path".into(),
-                    )));
+                Ok(Verdict::NotAdmissible) => {
+                    // The built-in submitters (`BufferingSubmitter`,
+                    // `HttpSubmitter`) wrap NotAdmissible as
+                    // `Err(SubmitError::NotAdmissible)`, but a
+                    // custom `Submitter` impl is free to return
+                    // it as `Ok` (the trait contract allows it).
+                    // Map to the semantically-correct error.
+                    return Err(WatcherError::Submit(SubmitError::NotAdmissible));
+                }
+                Ok(Verdict::ParseError) => {
+                    return Err(WatcherError::Submit(SubmitError::ParseError));
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -565,8 +611,27 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
             assigned: assigned.clone(),
         })?;
         // 2. Apply in-memory mutations after the durable write.
+        //    If commit_assignment fails (overflow OR expected-id
+        //    mismatch), the on-disk `Submitted` record has
+        //    already been persisted with the previewed id, but
+        //    the in-memory book wasn't updated to match.  On
+        //    restart, replay re-runs the assignment from the
+        //    state file (via `try_assign`, which returns the
+        //    same overflow error path).  The realistic-workload
+        //    assumption is that overflow never happens; the
+        //    typed error is defence-in-depth.
+        //
+        //    The expected-id-mismatch case indicates either a
+        //    concurrent modification of the watcher's address
+        //    book (the watcher is single-threaded, so this is a
+        //    programming bug) or a `preview`-without-`commit`
+        //    sequence that left the book unmutated and the
+        //    monotone counter pointed at a different id than
+        //    the preview expected.  Either way, surface as an
+        //    operator-action error.
         if let Some((address, new_actor_id)) = pending_assignment {
-            commit_assignment(&mut self.address_book, &address, new_actor_id);
+            commit_assignment(&mut self.address_book, &address, new_actor_id)
+                .map_err(|e| WatcherError::Config(format!("address-book commit failed: {e}")))?;
         }
         self.next_nonce = new_next_nonce;
         self.forwarded.insert(key);
@@ -854,6 +919,14 @@ mod tests {
         assert_eq!(processed, 0);
         assert_eq!(submitter_inner.len(), 1, "no duplicate submission");
         assert_eq!(watcher2.last_confirmed_block(), Some(0));
+        // Address-book state survived the restart.  The
+        // `Submitted` record persisted the (addr, id=1)
+        // assignment; replay rebuilt it.
+        let addr = EthAddress::from_bytes(&[0xaa; 20]).unwrap();
+        assert_eq!(watcher2.address_book().lookup(&addr), Some(1));
+        // Nonce was bumped (the `RegisterIdentity` submission
+        // bumped nonce from 0 to 1).
+        assert_eq!(watcher2.next_nonce(), 1);
     }
 
     /// Backpressure: submitter returns Busy then Ok; the watcher
@@ -1199,5 +1272,130 @@ mod tests {
             submitted_line.contains("\"assigned\""),
             "Submitted record must include assigned field for RegisterIdentity"
         );
+    }
+
+    /// REGRESSION: `blocks_per_iteration == 0` would previously
+    /// cause `end_block = start_block - 1` (underflow / panic
+    /// in debug, wrap in release).  The fix returns Ok(0) with
+    /// a warning.
+    #[test]
+    fn blocks_per_iteration_zero_does_not_underflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("state.jsonl");
+        let mut source = InMemoryL1Source::new();
+        for n in 0..=12u64 {
+            source.push_block(
+                BlockHeader {
+                    number: n,
+                    hash: [n as u8; 32],
+                    parent_hash: if n == 0 { [0; 32] } else { [(n - 1) as u8; 32] },
+                },
+                HashMap::new(),
+            );
+        }
+        let submitter = BufferingSubmitter::new();
+        let mut config = WatcherConfig::new(bridge_addr(), identity_addr(), vec![]);
+        config.confirmation_depth = 12;
+        config.blocks_per_iteration = 0; // pathological config
+        let mut watcher =
+            WatcherLoop::new(config, source, submitter, test_key(), &state_path).unwrap();
+        // Must NOT panic.  Should return 0 (no progress).
+        let processed = watcher.run_iteration().unwrap();
+        assert_eq!(processed, 0);
+    }
+
+    /// REGRESSION: `last_confirmed_block == Some(u64::MAX)`
+    /// would previously cause `start_block = MAX + 1` (panic
+    /// in debug, wrap to 0 → catastrophic re-processing from
+    /// genesis in release).  The saturating add prevents both
+    /// and the early-return gate keeps the watcher quiet.
+    #[test]
+    fn last_confirmed_block_at_u64_max_does_not_wrap() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("state.jsonl");
+        let source = InMemoryL1Source::new();
+        let submitter = BufferingSubmitter::new();
+        let mut config = WatcherConfig::new(bridge_addr(), identity_addr(), vec![]);
+        config.confirmation_depth = 12;
+        let watcher = WatcherLoop::new(config, source, submitter, test_key(), &state_path).unwrap();
+        // Force last_confirmed_block to u64::MAX.  This is a
+        // test-only manipulation simulating an extreme
+        // resume-from-state scenario.  We don't expose a
+        // setter, so we use the state-file path: write a
+        // `Confirmed { block_number: u64::MAX }` record.
+        // Actually that's even more direct.
+        let confirmed_path = &state_path;
+        let line = serde_json::to_string(&crate::state::StateRecord::Confirmed {
+            block_number: u64::MAX,
+        })
+        .unwrap();
+        std::fs::write(confirmed_path, format!("{line}\n")).unwrap();
+        // Re-open the watcher.
+        let source2 = InMemoryL1Source::new();
+        let submitter2 = BufferingSubmitter::new();
+        let mut config2 = WatcherConfig::new(bridge_addr(), identity_addr(), vec![]);
+        config2.confirmation_depth = 12;
+        let mut watcher2 =
+            WatcherLoop::new(config2, source2, submitter2, test_key(), &state_path).unwrap();
+        assert_eq!(watcher2.last_confirmed_block(), Some(u64::MAX));
+        // Run iteration: must NOT panic, must NOT wrap.
+        let processed = watcher2.run_iteration().unwrap();
+        assert_eq!(processed, 0);
+        // last_confirmed_block unchanged.
+        assert_eq!(watcher2.last_confirmed_block(), Some(u64::MAX));
+        let _ = watcher; // silence unused
+    }
+
+    /// REGRESSION: a `Submitter` that returns
+    /// `Ok(Verdict::NotAdmissible)` (rather than the
+    /// trait-canonical `Err(SubmitError::NotAdmissible)`) is
+    /// correctly translated to `WatcherError::Submit(NotAdmissible)`.
+    #[test]
+    fn ok_not_admissible_verdict_maps_to_submit_error() {
+        struct OkNotAdmissibleSubmitter;
+        impl crate::submitter::Submitter for OkNotAdmissibleSubmitter {
+            fn submit(
+                &self,
+                _signed: &crate::submitter::SignedActionForSubmit,
+            ) -> Result<crate::submitter::Verdict, crate::submitter::SubmitError> {
+                // Trait-legal: return NotAdmissible as Ok.
+                Ok(crate::submitter::Verdict::NotAdmissible)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("state.jsonl");
+        let mut source = InMemoryL1Source::new();
+        let log = build_registered_ecdsa_log([0x55; 20], &[0x02, 0xab], 0, 0, [0x77; 32]);
+        for n in 0..=12u64 {
+            let mut logs_map = HashMap::new();
+            if n == 0 {
+                logs_map.insert(identity_addr(), vec![log.clone()]);
+            }
+            source.push_block(
+                BlockHeader {
+                    number: n,
+                    hash: [n as u8; 32],
+                    parent_hash: if n == 0 { [0; 32] } else { [(n - 1) as u8; 32] },
+                },
+                logs_map,
+            );
+        }
+        let mut config = WatcherConfig::new(bridge_addr(), identity_addr(), vec![]);
+        config.confirmation_depth = 12;
+        let mut watcher = WatcherLoop::new(
+            config,
+            source,
+            OkNotAdmissibleSubmitter,
+            test_key(),
+            &state_path,
+        )
+        .unwrap();
+        let result = watcher.run_iteration();
+        match result {
+            Err(crate::watcher::WatcherError::Submit(
+                crate::submitter::SubmitError::NotAdmissible,
+            )) => {} // expected
+            other => panic!("expected Submit(NotAdmissible), got {other:?}"),
+        }
     }
 }
