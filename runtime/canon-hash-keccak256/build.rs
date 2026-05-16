@@ -66,10 +66,23 @@ fn main() {
     }
 }
 
+/// Locate Lean's C header include directory.  See
+/// `canon-verify-secp256k1/build.rs::locate_lean_include` for the
+/// full rationale; this mirror is kept identical so the two
+/// adaptor crates discover `lean.h` identically.
 fn locate_lean_include() -> Option<PathBuf> {
+    fn validate(p: PathBuf) -> Option<PathBuf> {
+        if p.join("lean").join("lean.h").is_file() {
+            return Some(p);
+        }
+        if p.join("lean.h").is_file() {
+            return p.parent().map(PathBuf::from);
+        }
+        None
+    }
+
     if let Ok(dir) = env::var("LEAN_INCLUDE_DIR") {
-        let p = PathBuf::from(dir);
-        if p.join("lean").join("lean.h").is_file() || p.join("lean.h").is_file() {
+        if let Some(p) = validate(PathBuf::from(dir)) {
             return Some(p);
         }
     }

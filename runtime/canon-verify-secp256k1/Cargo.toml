@@ -60,14 +60,14 @@ subtle = { workspace = true }
 
 [dev-dependencies]
 canon-cross-stack = { workspace = true }
-# `k256` with signing features is needed by the fixture-generator
-# binary AND by some tests that produce known-good signatures
-# on the fly.  The signing surface is gated behind an explicit
-# feature so the production cdylib doesn't pull in signing code.
+# `k256` with `std` adds signing helpers (`SigningKey::sign_prehash`)
+# the fixture generator and known-vector tests need.  Production
+# code paths do not depend on these; the cdylib's compile path
+# uses the workspace-default `default-features = false` k256
+# (verify-only, no_std).
 k256 = { workspace = true, features = ["ecdsa", "arithmetic", "std"] }
 hex = { workspace = true }
 proptest = { workspace = true }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
 [build-dependencies]
 # `cc` compiles the C shim that bridges Lean's `lean_object *`
@@ -102,9 +102,14 @@ module_name_repetitions = "allow"
 [lints.rust]
 missing_docs = "warn"
 unreachable_pub = "warn"
-# `deny` (rather than `forbid`) so the small, tightly-scoped
-# `unsafe` block in the FFI shim's Rust prelude (if any is needed
-# in the future) can opt in via `#[allow(unsafe_code)]`.  At the
-# RH-A.1 landing all FFI work happens in `c/lean_shim.c` and the
-# Rust side stays `unsafe`-free.
+# `deny` (rather than `forbid`) so the tightly-scoped `unsafe`
+# annotations the FFI shim layer needs can opt in via
+# `#[allow(unsafe_code)]`.  At the RH-A.1 landing every `unsafe`
+# in this crate lives in `src/verify.rs`:
+#   * the `extern "C"` block declaring the C shim wrappers
+#     (cfg-gated on `canon_lean_ffi`),
+#   * the three Rust C ABI entry points (`canon_verify_ecdsa_raw`,
+#     `canon_verify_ecdsa`),
+#   * the `make_slice` slice-construction helper.
+# Each carries a documented `# Safety` contract.
 unsafe_code = "deny"

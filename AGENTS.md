@@ -870,10 +870,11 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  115 tests across 11 non-empty suites at
-the RH-A landing (up from 44 at the RH-H baseline — +71 tests
-across the two new crypto crates).  `cargo test --workspace` from
-`runtime/` is the canonical query.  Test mass breakdown:
+**Rust-side test count.**  115 tests across 15 non-empty test
+binaries at the RH-A landing (up from 44 at the RH-H baseline —
++71 tests across the two new crypto crates).  `cargo test
+--workspace` from `runtime/` is the canonical query.  Test mass
+breakdown:
 
   * `canon-cross-stack` — 31 tests (29 unit + 2 integration);
     unchanged since RH-H.
@@ -885,8 +886,12 @@ across the two new crypto crates).  `cargo test --workspace` from
     zero-s / r=n / s=n rejection, x=0 off-curve rejection.
   * `canon-hash-keccak256` — 32 tests (13 unit + 10 known-vector
     + 5 property + 3 cross-stack + 1 integration).
-  * Remaining skeleton crates contribute one crate-name
-    regression test each (5 total).
+  * Three skeleton crates (`canon-bench`,
+    `canon-faultproof-observer`, `canon-storage`) contribute one
+    crate-name regression test each (3 total).  The remaining
+    binary-only skeleton crates (`canon-host`, `canon-l1-ingest`,
+    `canon-event-subscribe`, `canon-indexer`) have no library
+    tests yet.
 
 The count will continue growing as RH-B onward materialises.
 

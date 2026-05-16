@@ -4,32 +4,37 @@
 # This is free software, and you are welcome to redistribute it
 # under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
 
-# RH-H workspace manifest.  Houses the Rust host-runtime stack
-# specified in `docs/planning/rust_host_runtime_plan.md` §2.2.  Each
-# member crate corresponds to one sub-workstream (RH-A through RH-G);
+# Rust host-runtime workspace manifest.  Houses the stack specified
+# in `docs/planning/rust_host_runtime_plan.md` §2.2.  Each member
+# crate corresponds to one sub-workstream (RH-A through RH-G);
 # `canon-cross-stack` is a shared dev-only fixture loader (per §4
 # RH-H step 4); `canon-cli-common` is a shared runtime library.
 #
-# Member-crate maturity at landing (RH-H):
+# Member-crate maturity (current landing — RH-A):
 #
-#   * `canon-cross-stack`        — fully implemented (the load-bearing
-#                                  RH-H deliverable: a CBE-style
-#                                  fixture loader other crates dev-dep
-#                                  on for cross-stack equivalence).
+#   * `canon-cross-stack`        — fully implemented (the
+#                                  load-bearing fixture loader other
+#                                  crates dev-dep on for cross-stack
+#                                  equivalence).
 #   * `canon-cli-common`         — fully implemented (shared CLI /
-#                                  logging helpers; small but
-#                                  consumable today).
-#   * All other crates           — skeleton-only.  Each has a minimal
-#                                  `lib.rs` / `main.rs` documenting the
-#                                  symbol surface its work unit must
-#                                  fill in (RH-A.1 → RH-G).  The
-#                                  skeletons compile clean, satisfy
-#                                  `cargo clippy -D warnings`, and pass
-#                                  `cargo fmt --check`, so RH-H
-#                                  delivers a green workspace from day
-#                                  one without prefiguring the
-#                                  implementation choices of the
-#                                  downstream WUs.
+#                                  logging helpers).
+#   * `canon-verify-secp256k1`   — fully implemented (RH-A.1: ECDSA
+#                                  secp256k1 verifier; cdylib exports
+#                                  `canon_verify_ecdsa`).
+#   * `canon-hash-keccak256`     — fully implemented (RH-A.2:
+#                                  Keccak-256 hash adaptor; cdylib
+#                                  exports `canon_hash_bytes` /
+#                                  `canon_hash_stream` /
+#                                  `canon_hash_identifier`).
+#   * `canon-host`, `canon-l1-ingest`, `canon-event-subscribe`,
+#     `canon-storage`, `canon-indexer`, `canon-faultproof-observer`,
+#     `canon-bench`              — skeleton-only.  Each has a minimal
+#                                  `lib.rs` / `main.rs` documenting
+#                                  the symbol surface its work unit
+#                                  must fill in.  Skeletons compile
+#                                  clean, satisfy `cargo clippy -D
+#                                  warnings`, and pass `cargo fmt
+#                                  --check`.
 
 [workspace]
 resolver = "2"

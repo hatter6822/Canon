@@ -127,7 +127,6 @@ dependencies = [
  "hex",
  "k256",
  "proptest",
- "rand",
  "subtle",
 ]
 

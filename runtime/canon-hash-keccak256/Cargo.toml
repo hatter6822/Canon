@@ -73,7 +73,14 @@ module_name_repetitions = "allow"
 [lints.rust]
 missing_docs = "warn"
 unreachable_pub = "warn"
-# `deny` rather than `forbid` so the C-ABI shim's narrow `unsafe`
-# blocks can opt in via `#[allow(unsafe_code)]`.  All `unsafe`
-# in this crate is in `src/hash.rs`'s pointer-slice helpers.
+# `deny` rather than `forbid` so the C-ABI shim's `unsafe`
+# annotations can opt in via `#[allow(unsafe_code)]`.  All
+# `unsafe` in this crate lives in `src/hash.rs`:
+#   * the `extern "C"` block declaring the C shim wrappers
+#     (cfg-gated on `canon_lean_ffi`),
+#   * the five raw-bytes C ABI entry points
+#     (`canon_hash_keccak256_*`),
+#   * the three Lean ABI entry points (`canon_hash_bytes`,
+#     `canon_hash_stream`, `canon_hash_identifier`; cfg-gated).
+# Each carries a documented `# Safety` contract.
 unsafe_code = "deny"

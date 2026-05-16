@@ -242,9 +242,10 @@ pub unsafe extern "C" fn canon_verify_ecdsa_raw(
 #[allow(unsafe_code)]
 unsafe fn make_slice<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if len == 0 {
-        // `NonNull::dangling()` returns a well-aligned non-null
-        // pointer suitable for empty slices.  This avoids any
-        // dependence on the caller's pointer for the empty case.
+        // Returning `&[]` (a slice of a compiler-synthesized
+        // static empty array) avoids any dependence on the
+        // caller's pointer for the empty case — even a NULL or
+        // dangling `ptr` is safe when `len == 0`.
         &[]
     } else {
         // Caller guarantees `ptr` is valid for `len` bytes.

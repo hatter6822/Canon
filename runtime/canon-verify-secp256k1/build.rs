@@ -93,11 +93,33 @@ fn main() {
 /// Locate Lean's C header include directory.
 ///
 /// Returns `Some(path)` if any of the discovery strategies hits;
-/// `None` otherwise.
+/// `None` otherwise.  The returned path is the directory the
+/// C compiler should pass to `-I` so `#include <lean/lean.h>`
+/// resolves: i.e. the parent of `lean/`, not `lean/` itself.
 fn locate_lean_include() -> Option<PathBuf> {
+    // Helper: given a candidate directory `p`, check whether
+    // `lean.h` is reachable via either layout:
+    //   * `<p>/lean/lean.h` — standard install (return `p`).
+    //   * `<p>/lean.h` — user passed the inner `lean/` dir
+    //     directly (return `p.parent()` so `<parent>/lean/lean.h`
+    //     resolves `#include <lean/lean.h>`).
+    //
+    // Returns `None` if neither layout matches.
+    fn validate(p: PathBuf) -> Option<PathBuf> {
+        if p.join("lean").join("lean.h").is_file() {
+            return Some(p);
+        }
+        if p.join("lean.h").is_file() {
+            // User pointed at `.../include/lean/` directly; back
+            // up one level so the compiler's include search
+            // resolves `#include <lean/lean.h>` correctly.
+            return p.parent().map(PathBuf::from);
+        }
+        None
+    }
+
     if let Ok(dir) = env::var("LEAN_INCLUDE_DIR") {
-        let p = PathBuf::from(dir);
-        if p.join("lean").join("lean.h").is_file() || p.join("lean.h").is_file() {
+        if let Some(p) = validate(PathBuf::from(dir)) {
             return Some(p);
         }
     }
