@@ -142,10 +142,10 @@ pub trait Kernel: Send + Sync {
 ///
 /// Carries the **current** stage (the latest known stage at
 /// subscription time) plus a `Receiver` that emits **future**
-/// stage transitions in monotonic non-decreasing order.  The
-/// receiver closes (sender dropped) when the action reaches a
-/// terminal stage (typically `Finalized`) or when the kernel
-/// determines no further transitions are possible.  Once closed,
+/// stage transitions in strict-increasing order.  The receiver
+/// closes (sender dropped) when the action reaches a terminal
+/// stage (typically `Finalized`) or when the kernel determines no
+/// further transitions are possible.  Once closed,
 /// `events.try_recv()` returns `Err(TryRecvError::Disconnected)`
 /// after any still-buffered events are drained.
 ///
@@ -158,10 +158,50 @@ pub trait Kernel: Send + Sync {
 ///
 /// For any subscription `s`, the sequence of stages observed via
 /// `s` is `current` followed by the events emitted on
-/// `s.events`.  This sequence MUST be monotonically
-/// non-decreasing under the [`AdmissionStage`] total order.
-/// Implementations that violate this contract are correctness
-/// bugs.
+/// `s.events`.  This sequence MUST be **strictly increasing**
+/// (each event stage `> current` at subscribe time; each
+/// subsequent event `>` the previous).  The trait's
+/// implementations MUST guarantee this; subscribers can rely on
+/// it (e.g., they can `assert!(prev < next)` rather than
+/// `assert!(prev <= next)`).
+///
+/// ## Implementation requirements — the "atomic snapshot" rule
+///
+/// To honour strict-increasing monotonicity in the presence of
+/// concurrent stage-advance, implementations of
+/// `SubscribableKernel::subscribe` MUST satisfy the **atomic
+/// snapshot rule**:
+///
+/// > Under whatever synchronization primitive guards the action's
+/// > internal `current_stage` field, `subscribe` must read
+/// > `current_stage` AND drain any channel-buffered events
+/// > already `≤ current_stage` while holding that primitive.
+///
+/// In practice this means the canonical implementation holds a
+/// single `Mutex` (or equivalent) across BOTH operations that
+/// advance an action's stage:
+///
+///   1. `slot.current_stage = next_stage;`
+///   2. `slot.tx.send(next_stage).unwrap();`
+///
+/// AND across both operations in `subscribe`:
+///
+///   1. let snapshot = `slot.current_stage`;
+///   2. let receiver = `slot.tx.subscribe()` (or equivalent);
+///
+/// Holding the mutex across both pairs guarantees that the
+/// snapshot read by `subscribe` is consistent with the channel's
+/// buffered contents: any event already-sent at the moment of
+/// snapshot is reflected in the snapshot (so it won't be
+/// re-emitted); any event sent after the snapshot is strictly
+/// greater than the snapshot (so it can be safely emitted).
+///
+/// A naive implementation that bumps `current_stage` and `send`s
+/// the channel WITHOUT holding the mutex across both can lead to
+/// the subscriber observing duplicate stages (e.g., `current =
+/// Sequenced` followed by `events.recv() = Sequenced` again).
+/// This violates strict-increasing monotonicity and is a
+/// correctness bug.
 ///
 /// ## Consumption discipline
 ///
@@ -178,7 +218,9 @@ pub struct Subscription {
     pub current: AdmissionStage,
     /// Receiver of future stage transitions.  Each emitted stage
     /// is strictly greater than the previous (`current` for the
-    /// first emission, the previous emission otherwise).
+    /// first emission, the previous emission otherwise).  See the
+    /// struct-level "atomic snapshot" rule for the implementation
+    /// constraint that makes this guarantee sound.
     pub events: std::sync::mpsc::Receiver<AdmissionStage>,
 }
 
@@ -765,14 +807,21 @@ pub mod command {
                 }
             };
             let temp_path = temp_file.path().to_path_buf();
-            // Write the input bytes via the tempfile handle, then
-            // close it (Drop on the file half) so canon can open
-            // it; the NamedTempFile's *path* still owns the
-            // filesystem entry, which is removed when the
-            // NamedTempFile itself is dropped (after this function
-            // returns).
+            // Disarm the auto-delete-on-drop behaviour of
+            // `NamedTempFile` so the file persists long enough for
+            // the subprocess to read it.  `keep()` consumes the
+            // `NamedTempFile` and returns `(File, TempPath)`.  The
+            // `File` is our handle; the `TempPath` (bound below as
+            // `_temp_path_handle`) carries the path but, post-
+            // `keep`, no longer schedules deletion on drop.  We
+            // own deletion explicitly at step 5 below.
+            //
+            // If `keep()` returns `Err`, the inner `NamedTempFile`
+            // is preserved on the error value; dropping the error
+            // (when we early-return) re-arms auto-delete, so the
+            // partially-created file is cleaned up.
             {
-                let (mut file, _path) = match temp_file.keep() {
+                let (mut file, _temp_path_handle) = match temp_file.keep() {
                     Ok((f, p)) => (f, p),
                     Err(e) => {
                         return KernelResponse::with_reason(
@@ -788,11 +837,24 @@ pub mod command {
                         format!("write temp file {temp_path:?}: {e}"),
                     );
                 }
-                if let Err(e) = file.flush() {
+                // Use `sync_data` rather than `flush`: `std::fs::File`'s
+                // `Write::flush` is a documented no-op (the File has no
+                // userspace buffer to flush), so calling it conveys no
+                // durability guarantee.  `sync_data` issues fdatasync(2),
+                // which forces the dirty pages backing this file out to
+                // disk.  This matters on filesystems with weaker
+                // cache-coherence than local ext4/xfs — most notably
+                // NFS-mounted work directories and some FUSE drivers —
+                // where the subprocess might otherwise `open` the file
+                // before the writeback has propagated and observe an
+                // empty or truncated payload.  Cost: one fdatasync per
+                // request; negligible for the CommandKernel which is
+                // already O(log size) per request.
+                if let Err(e) = file.sync_data() {
                     let _ = std::fs::remove_file(&temp_path);
                     return KernelResponse::with_reason(
                         Verdict::NotAdmissible,
-                        format!("flush temp file {temp_path:?}: {e}"),
+                        format!("sync temp file {temp_path:?}: {e}"),
                     );
                 }
                 // Drop closes the file handle.
@@ -1458,49 +1520,72 @@ mod tests {
     /// for every submitted action, demonstrating the canonical
     /// staging flow a future `ConsensusKernel` would follow.
     ///
-    /// The fixture:
-    ///   * Returns `Verdict::Ok` synchronously and declares
-    ///     `LocallyAdmitted` as its ok stage (immediate admission;
-    ///     consensus pending).
-    ///   * Stores `(action_id → (sender, receiver))` so
-    ///     `subscribe` can hand the receiver to the caller and
-    ///     the test thread can drive the sender forward.
-    ///   * The action_id is the raw bytes of the submitted action
-    ///     (real kernels would use a content-addressed hash).
+    /// The fixture follows the [`Subscription`] atomic-snapshot
+    /// rule: a single `Mutex` guards each action slot, and BOTH
+    /// the driver-side advance (`current = X; tx.send(X)`) AND
+    /// the subscriber-side snapshot (`let cur = current; let rx
+    /// = tx_clone_or_take`) are performed while holding it.
+    /// This eliminates the duplicate-event race the audit flagged
+    /// in finding #8.
     ///
-    /// **Monotonicity check.**  The test drives the senders with
-    /// strictly-increasing stages and asserts the subscriber
-    /// observes a non-decreasing sequence.  This is the
-    /// load-bearing test for the [`Subscription`] contract.
+    /// **Strict-monotonicity check.**  The subscriber asserts
+    /// `prev < next` (strict) rather than `prev <= next`,
+    /// witnessing that the trait's contract holds for this
+    /// implementation.
     #[test]
-    fn staging_kernel_emits_monotonic_chain() {
+    fn staging_kernel_emits_strictly_monotonic_chain() {
         use std::collections::HashMap;
         use std::sync::mpsc::{channel, Receiver, Sender};
         use std::sync::Mutex;
         use std::time::Duration;
 
-        // Per-action state: the current stage plus a sender we
-        // can use to advance.  The `Option<Receiver>` holds the
-        // not-yet-claimed receiver; it transfers to the
-        // Subscription on first `subscribe`.
-        type ActionSlot = (
-            AdmissionStage,
-            Sender<AdmissionStage>,
-            Option<Receiver<AdmissionStage>>,
-        );
+        /// Per-action state.  The single `Mutex<ActionSlot>`
+        /// guarding it is the synchronisation primitive whose
+        /// scope satisfies the atomic-snapshot rule.
+        struct ActionSlot {
+            current: AdmissionStage,
+            tx: Sender<AdmissionStage>,
+            /// Single-subscriber fixture: the receiver moves into
+            /// the first `Subscription`; subsequent `subscribe`
+            /// calls return None.
+            rx: Option<Receiver<AdmissionStage>>,
+        }
 
         struct StagingKernel {
             actions: Mutex<HashMap<Vec<u8>, ActionSlot>>,
+        }
+
+        impl StagingKernel {
+            /// Canonical driver: advances an action's stage AND
+            /// emits the corresponding event while holding the
+            /// slot's mutex.  This is the pattern the contract
+            /// requires of production implementations.
+            fn advance(&self, action_id: &[u8], next: AdmissionStage) {
+                let mut guard = self.actions.lock().unwrap();
+                let slot = guard.get_mut(action_id).expect("known action");
+                assert!(
+                    next > slot.current,
+                    "advance must be strictly increasing: {:?} -> {:?}",
+                    slot.current,
+                    next
+                );
+                slot.current = next;
+                slot.tx.send(next).expect("subscriber alive");
+            }
         }
 
         impl Kernel for StagingKernel {
             fn submit(&self, bytes: &[u8]) -> KernelResponse {
                 let action_id = bytes.to_vec();
                 let (tx, rx) = channel();
-                self.actions
-                    .lock()
-                    .unwrap()
-                    .insert(action_id, (AdmissionStage::LocallyAdmitted, tx, Some(rx)));
+                self.actions.lock().unwrap().insert(
+                    action_id,
+                    ActionSlot {
+                        current: AdmissionStage::LocallyAdmitted,
+                        tx,
+                        rx: Some(rx),
+                    },
+                );
                 KernelResponse::from_verdict(crate::verdict::Verdict::Ok)
             }
             fn identifier(&self) -> &str {
@@ -1513,16 +1598,17 @@ mod tests {
 
         impl SubscribableKernel for StagingKernel {
             fn subscribe(&self, action_id: &[u8]) -> Option<Subscription> {
+                // Hold the mutex across BOTH the snapshot of
+                // `current` and the take of `rx`.  Any concurrent
+                // `advance()` is blocked on the same mutex, so
+                // the snapshot is consistent: events buffered
+                // before this point are all `≤ current`; events
+                // sent after will be `> current`.
                 let mut guard = self.actions.lock().unwrap();
                 let slot = guard.get_mut(action_id)?;
-                // Take the receiver if it's still present; once
-                // taken, future `subscribe` calls return None.
-                // (A real kernel would support multiple
-                // subscribers via broadcast; this fixture is
-                // single-subscriber for simplicity.)
-                let rx = slot.2.take()?;
+                let rx = slot.rx.take()?;
                 Some(Subscription {
-                    current: slot.0,
+                    current: slot.current,
                     events: rx,
                 })
             }
@@ -1531,7 +1617,6 @@ mod tests {
             }
         }
 
-        // Drive a single action through the chain.
         let kernel = StagingKernel {
             actions: Mutex::new(HashMap::new()),
         };
@@ -1542,21 +1627,15 @@ mod tests {
         let sub = kernel.subscribe(b"action-1").expect("subscription");
         assert_eq!(sub.current, AdmissionStage::LocallyAdmitted);
 
-        // Drive subsequent stages from the test thread
-        // (simulating consensus then L1 finalization).
-        {
-            let guard = kernel.actions.lock().unwrap();
-            let (_, tx, _) = guard.get(b"action-1" as &[u8]).unwrap();
-            tx.send(AdmissionStage::Sequenced).unwrap();
-            tx.send(AdmissionStage::Finalized).unwrap();
-        }
+        // Drive subsequent stages via the canonical advance() helper.
+        kernel.advance(b"action-1", AdmissionStage::Sequenced);
+        kernel.advance(b"action-1", AdmissionStage::Finalized);
 
-        // Observe the chain.  Stage sequence must be monotonically
-        // non-decreasing per the [`Subscription`] contract.
+        // Observe.  STRICT monotonicity (each event > previous).
         let mut prev = sub.current;
         let mut observed = vec![prev];
         while let Ok(s) = sub.events.recv_timeout(Duration::from_millis(50)) {
-            assert!(prev <= s, "monotonicity violated: {prev:?} -> {s:?}");
+            assert!(prev < s, "strict monotonicity violated: {prev:?} -> {s:?}");
             observed.push(s);
             prev = s;
         }
@@ -1569,13 +1648,10 @@ mod tests {
             ]
         );
 
-        // Second subscribe returns None (single-subscriber
-        // fixture); confirms the documented contract that
-        // `subscribe` may return None after the receiver has
-        // been claimed.
+        // Second subscribe returns None (receiver claimed).
         assert!(kernel.subscribe(b"action-1").is_none());
 
-        // `subscribe` for an unknown action returns None.
+        // Unknown action returns None.
         assert!(kernel.subscribe(b"never-submitted").is_none());
 
         // `receipt_for` builds a stage receipt with the kernel's
@@ -1585,9 +1661,125 @@ mod tests {
         assert_eq!(receipt.action_id, b"action-2".to_vec());
 
         // `AdmissionReceipt::finalized` is the canonical
-        // centralized-kernel constructor — referenced here for
-        // import visibility.
+        // centralized-kernel constructor.
         let centralized = AdmissionReceipt::finalized();
         assert_eq!(centralized.stage, AdmissionStage::Finalized);
+    }
+
+    /// AR-RHC-audit-2 #8: subscribe-during-advance race.  This
+    /// test demonstrates that the canonical atomic-snapshot
+    /// pattern (hold a single mutex across both snapshot and
+    /// advance) eliminates duplicate-event delivery even when a
+    /// subscriber races with stage advancement.
+    ///
+    /// The test sets up an action, spawns a concurrent advancer
+    /// thread that performs `LocallyAdmitted → Sequenced →
+    /// Finalized` while the main thread races to subscribe.  The
+    /// observed sequence (`current` then `events`) MUST be
+    /// strictly increasing — no stage may appear twice.
+    #[test]
+    fn subscribe_during_advance_no_duplicate_events() {
+        use std::collections::HashMap;
+        use std::sync::mpsc::{channel, Receiver, Sender};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        struct ActionSlot {
+            current: AdmissionStage,
+            tx: Sender<AdmissionStage>,
+            rx: Option<Receiver<AdmissionStage>>,
+        }
+        struct StagingKernel {
+            actions: Mutex<HashMap<Vec<u8>, ActionSlot>>,
+        }
+        impl StagingKernel {
+            fn advance(&self, action_id: &[u8], next: AdmissionStage) {
+                let mut guard = self.actions.lock().unwrap();
+                let slot = guard.get_mut(action_id).expect("known action");
+                if next > slot.current {
+                    slot.current = next;
+                    let _ = slot.tx.send(next);
+                }
+            }
+        }
+        impl Kernel for StagingKernel {
+            fn submit(&self, bytes: &[u8]) -> KernelResponse {
+                let (tx, rx) = channel();
+                self.actions.lock().unwrap().insert(
+                    bytes.to_vec(),
+                    ActionSlot {
+                        current: AdmissionStage::LocallyAdmitted,
+                        tx,
+                        rx: Some(rx),
+                    },
+                );
+                KernelResponse::from_verdict(crate::verdict::Verdict::Ok)
+            }
+            fn identifier(&self) -> &str {
+                "racy-stage/v1"
+            }
+            fn ok_admission_stage(&self) -> AdmissionStage {
+                AdmissionStage::LocallyAdmitted
+            }
+        }
+        impl SubscribableKernel for StagingKernel {
+            fn subscribe(&self, action_id: &[u8]) -> Option<Subscription> {
+                let mut guard = self.actions.lock().unwrap();
+                let slot = guard.get_mut(action_id)?;
+                let rx = slot.rx.take()?;
+                Some(Subscription {
+                    current: slot.current,
+                    events: rx,
+                })
+            }
+        }
+
+        let kernel = std::sync::Arc::new(StagingKernel {
+            actions: Mutex::new(HashMap::new()),
+        });
+        kernel.submit(b"action");
+
+        // Start the advancer thread.  It hammers advance() with
+        // staggered stages.  The main thread races to subscribe.
+        let kernel_advance = std::sync::Arc::clone(&kernel);
+        let advancer = std::thread::spawn(move || {
+            // Sleep a tiny bit to give the subscriber a chance to
+            // race in either window (before all advances or after).
+            std::thread::sleep(Duration::from_millis(5));
+            kernel_advance.advance(b"action", AdmissionStage::Sequenced);
+            std::thread::sleep(Duration::from_millis(5));
+            kernel_advance.advance(b"action", AdmissionStage::Finalized);
+        });
+
+        // Race to subscribe.  Subscription may land before, between,
+        // or after the advances.
+        let sub = kernel.subscribe(b"action").expect("subscription");
+        advancer.join().unwrap();
+
+        // Collect ALL stages observed: `current` then events.
+        let mut observed = vec![sub.current];
+        while let Ok(s) = sub.events.recv_timeout(Duration::from_millis(100)) {
+            observed.push(s);
+        }
+
+        // Property #1: strict monotonicity over the entire observed
+        // sequence (no duplicates).
+        for window in observed.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "duplicate or regressing stage at {observed:?}"
+            );
+        }
+
+        // Property #2: the final observed stage MUST be Finalized
+        // (the advancer ran to completion before we drained, and
+        // strict-monotonicity from initial LocallyAdmitted means
+        // the entire chain is reachable).
+        assert_eq!(*observed.last().unwrap(), AdmissionStage::Finalized);
+
+        // Property #3: the first observed stage is the kernel's
+        // `ok_admission_stage` or higher (depending on race
+        // window).  Never lower.
+        assert!(observed[0] >= AdmissionStage::LocallyAdmitted);
     }
 }

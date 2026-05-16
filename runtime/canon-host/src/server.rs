@@ -60,7 +60,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::kernel::Kernel;
+use crate::kernel::{Kernel, KernelResponse};
 use crate::listener::{tcp::TcpListener, HandlerConfig};
 use crate::queue::{drain_one, try_drain_one, BoundedQueue, DrainOutcome, DEFAULT_MAX_QUEUE_DEPTH};
 
@@ -262,6 +262,25 @@ fn wait_for_handlers_drain(counter: &Arc<AtomicUsize>, timeout: Duration) {
 
 /// The worker loop.  Owns the kernel; reads requests from the
 /// queue's receiver until shutdown.
+///
+/// ## Panic isolation
+///
+/// In release builds the workspace uses `panic = "abort"`, so a
+/// `kernel.submit` panic terminates the entire process immediately.
+/// In debug builds (the test profile) `panic = "unwind"` applies,
+/// and a panic in `kernel.submit` would otherwise unwind out of the
+/// worker thread, killing it.  Subsequent submissions would then
+/// receive `Busy` (the disconnected-queue graceful path) — correct
+/// but operator-visible as a permanent stall.
+///
+/// To make the worker survive transient kernel panics in debug, we
+/// wrap each `submit` call in `std::panic::catch_unwind`.  On a
+/// caught panic we synthesise a `NotAdmissible` response with a
+/// `"kernel panicked"` reason, dispatch it back to the connection
+/// handler, log the panic via `tracing::error`, and continue
+/// draining.  This gives operators an accurate verdict (panic, not
+/// timeout) and lets debug-build CI runs surface kernel bugs
+/// without the host appearing to wedge.
 fn worker_loop(
     receiver: std::sync::mpsc::Receiver<crate::queue::QueuedRequest>,
     kernel: Box<dyn Kernel>,
@@ -276,18 +295,68 @@ fn worker_loop(
             // exiting.  Uses non-blocking polling so we don't
             // wait for new arrivals.
             while let DrainOutcome::Dispatched =
-                try_drain_one(&receiver, |bytes| kernel.submit(bytes))
+                try_drain_one(&receiver, |bytes| catch_unwinding_submit(&*kernel, bytes))
             {
                 // counted; loop until queue empty or disconnected
             }
             break;
         }
-        match drain_one(&receiver, poll_timeout, |bytes| kernel.submit(bytes)) {
+        match drain_one(&receiver, poll_timeout, |bytes| {
+            catch_unwinding_submit(&*kernel, bytes)
+        }) {
             DrainOutcome::Dispatched | DrainOutcome::Timeout => continue,
             DrainOutcome::Disconnected => break,
         }
     }
     tracing::info!(kernel = %kernel_id, "worker thread exited");
+}
+
+/// Invoke `kernel.submit(bytes)` with a panic firewall.
+///
+/// In release builds the workspace uses `panic = "abort"`, so the
+/// `catch_unwind` is a no-op (a panic aborts the process before
+/// the catch sees anything).  In debug builds (the test profile)
+/// it transforms a panicked `submit` call into a `NotAdmissible`
+/// response with a `"kernel panicked"` reason — keeping the
+/// worker alive for subsequent submissions.
+///
+/// `AssertUnwindSafe` is correct here: the kernel's only mutable
+/// state is behind a `Mutex` (MockKernel, CommandKernel both lock
+/// for every call), and our `lock().unwrap_or_else(|p|
+/// p.into_inner())` poison-recovery pattern tolerates a panicked
+/// lock-holder.  A panic mid-submit may leave the mutex poisoned,
+/// but the next call recovers.
+fn catch_unwinding_submit(kernel: &dyn Kernel, bytes: &[u8]) -> KernelResponse {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| kernel.submit(bytes))) {
+        Ok(response) => response,
+        Err(panic) => {
+            let detail = panic_message(&panic);
+            tracing::error!(
+                panic = %detail,
+                "kernel.submit panicked; reporting NotAdmissible"
+            );
+            KernelResponse::with_reason(
+                crate::verdict::Verdict::NotAdmissible,
+                format!("kernel panicked: {detail}"),
+            )
+        }
+    }
+}
+
+/// Best-effort extraction of a panic payload's text content.
+///
+/// `Box<dyn Any + Send>` from `catch_unwind` contains either a
+/// `&'static str`, a `String`, or some other arbitrary type.  We
+/// downcast to the two common cases; everything else surfaces as
+/// the opaque type name.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 /// Builder for `ServerConfig`.  Validation-friendly: every

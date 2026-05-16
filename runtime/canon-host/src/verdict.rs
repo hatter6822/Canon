@@ -173,17 +173,20 @@ impl VerdictResponse {
         // Total = verdict byte + 4-byte length prefix + reason payload.
         let mut out = Vec::with_capacity(1 + 4 + reason_bytes.len());
         out.push(self.verdict.to_byte());
-        // Use saturating cast to u32 — reason is operator-supplied
-        // English text that won't approach 4 GB in any realistic
-        // deployment; if it ever did, we'd truncate the length
-        // field but still send the first 4 GB.  The defensive
-        // alternative (panicking on `u32::try_from` failure) is
-        // worse: a misbehaving Kernel emitting a giant reason
-        // would crash the host rather than degrading gracefully.
+        // Wire-format length prefix is a u32, so reasons longer
+        // than `u32::MAX` bytes can't fit.  Saturate the declared
+        // length (rather than panicking) so a misbehaving kernel
+        // emitting a multi-gigabyte reason degrades gracefully.
         let reason_len_u32 = u32::try_from(reason_bytes.len()).unwrap_or(u32::MAX);
-        // Bound the actual emitted payload by the declared length
-        // so the wire stays self-consistent even in the saturated
-        // case.
+        // Bound the actually-emitted payload to the declared length
+        // so the wire stays self-consistent in the saturation case.
+        // On a 64-bit host with `reason_bytes.len() > u32::MAX`:
+        //   declared = u32::MAX,
+        //   emit_len = u32::MAX as usize,
+        //   emit_len.min(reason_bytes.len()) = u32::MAX,
+        // so we emit exactly the first 4 GiB.  On any
+        // realistic-length reason (≤ u32::MAX), emit_len ==
+        // reason_bytes.len() and the `.min` is a no-op.
         let emit_len = reason_len_u32 as usize;
         out.extend_from_slice(&reason_len_u32.to_be_bytes());
         out.extend_from_slice(&reason_bytes[..emit_len.min(reason_bytes.len())]);
@@ -268,6 +271,40 @@ mod tests {
         // 1 byte verdict (0x01) + 4-byte length BE (0x00000003) +
         // 3 bytes "bad" ASCII.
         assert_eq!(bytes, vec![0x01, 0x00, 0x00, 0x00, 0x03, b'b', b'a', b'd']);
+    }
+
+    /// Wire self-consistency at the u32::MAX-byte boundary:
+    /// the declared length field MUST equal the actual emitted
+    /// payload length, regardless of reason size.  This is the
+    /// load-bearing invariant a streaming client relies on:
+    /// "consume `declared` bytes, then expect either another
+    /// frame or EOF."  For a 5 GiB reason (the saturation case),
+    /// we'd declare 4 GiB and emit 4 GiB.  For a reason ≤ u32::MAX,
+    /// declared == reason.len() and we emit reason.len().
+    ///
+    /// We can't actually allocate 5 GiB in a test, so we drive
+    /// the invariant for reasons up to a few hundred kilobytes,
+    /// plus the boundary case where reason.len() is well within
+    /// u32::MAX.  The 5-GiB saturation case is documented but
+    /// untested (allocating 5 GiB on a CI host is prohibitive);
+    /// the encode() function's `.min(reason_bytes.len())` clause
+    /// is the load-bearing line that enforces the property by
+    /// construction.
+    #[test]
+    fn encode_declared_length_equals_emitted_payload_for_realistic_sizes() {
+        // Test reasons of varied sizes well below u32::MAX.
+        for &n in &[0usize, 1, 10, 1024, 65_536, 1_048_576] {
+            let reason = "x".repeat(n);
+            let r = VerdictResponse::with_reason(Verdict::NotAdmissible, reason);
+            let bytes = r.encode();
+            assert!(bytes.len() >= 5, "response too short: len={}", bytes.len());
+            let declared = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+            let emitted = bytes.len() - 5;
+            assert_eq!(
+                declared, emitted,
+                "wire desync at reason.len()={n}: declared={declared}, emitted={emitted}"
+            );
+        }
     }
 
     /// UTF-8 reasons round-trip in the payload.

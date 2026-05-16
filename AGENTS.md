@@ -870,13 +870,15 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  488 tests across 24 non-empty test
+**Rust-side test count.**  526 tests across 24 non-empty test
 binaries at the RH-C landing (up from 343 at the RH-B landing —
-+148 tests across the new `canon-host` crate: 116 lib + 14 TCP
++183 tests across the new `canon-host` crate: 150 lib + 15 TCP
 integration + 7 Unix-socket integration + 11 property, including
-6 regression tests from the post-implementation audit pass).
-`cargo test --workspace` from `runtime/` is the canonical query.
-Test mass breakdown:
+regression tests from two post-implementation audit passes
+covering kernel timeout, symlink defence, mutex-poison recovery,
+admission staging, race-safe subscription, and kernel-panic
+isolation).  `cargo test --workspace` from `runtime/` is the
+canonical query.  Test mass breakdown:
 
   * `canon-cross-stack` — 31 tests (29 unit + 2 integration);
     unchanged since RH-H.
@@ -925,7 +927,7 @@ Test mass breakdown:
     chunked-encoding rejection, EIP-1271 end-to-end
     integration, decoder allocation bounds, keystore file-size
     bounds, capacity-1 reorg window semantics.
-  * `canon-host` — 148 tests (116 lib + 14 TCP integration +
+  * `canon-host` — 183 tests (150 lib + 15 TCP integration +
     7 Unix-socket integration + 11 property).  Lib tests cover:
     Verdict byte-table + round-trip + Send/Sync;
     VerdictResponse encode (empty + UTF-8 + payload-length
@@ -1360,11 +1362,33 @@ Closeout for the full per-sub-unit breakdown.  Headlines:
     log accuracy via the new `HandleOutcome` enum; #12
     mutex poison recovery in CommandKernel's spawn_lock;
     #15 documented BoundedQueue zero-capacity behaviour).
+    A second audit pass (post-staging-extension) surfaced 9
+    findings; three CRITICAL / HIGH issues fixed in-PR:
+    - **AR-2 #2 (HIGH)** `file.flush()` is a no-op on
+      `std::fs::File`; replaced with `file.sync_data()` for
+      NFS / FUSE work-dir durability.
+    - **AR-2 #3 (HIGH)** kernel-panic isolation: every
+      `kernel.submit` call wrapped in
+      `panic::catch_unwind(AssertUnwindSafe(...))`.  In
+      release `panic=abort` makes the wrap inert; in debug
+      a panic becomes `NotAdmissible "kernel panicked"`
+      keeping the worker alive.
+    - **AR-2 #8 (CRITICAL)** `SubscribableKernel`
+      contract strengthened from "non-decreasing" to
+      "strictly increasing" with documented atomic-snapshot
+      rule (implementations hold a single mutex across both
+      `current` advancement + channel send, and across both
+      snapshot + receiver claim in `subscribe`).  New
+      regression test
+      `subscribe_during_advance_no_duplicate_events`.
+    - Plus a self-found defence-in-depth: clamped
+      `ConnectionSlot::try_acquire`'s `cap` against
+      `HARD_MAX_CONCURRENT_CONNECTIONS`.
     Final gates:
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — 488 tests passing
-      (+148 from the RH-B landing's 343).
+    - `cargo test --workspace --locked` — 526 tests passing
+      (+183 from the RH-B landing's 343).
     - `cargo clippy --workspace --all-targets --locked -- -D
       warnings` — clean.
     - `cargo fmt --all -- --check` — clean.

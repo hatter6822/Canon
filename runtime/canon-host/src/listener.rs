@@ -115,6 +115,12 @@ impl ConnectionSlot {
     /// the load-bearing DoS defence: when full, the listener
     /// responds `Busy` immediately without spawning a thread.
     ///
+    /// `cap` is internally clamped to [`HARD_MAX_CONCURRENT_CONNECTIONS`]
+    /// (defence-in-depth against library consumers constructing a
+    /// `HandlerConfig` with `max_concurrent_connections = usize::MAX`,
+    /// which would disable the protection entirely).  CLI-supplied
+    /// values reach this function pre-clamped via `Config::validate`.
+    ///
     /// Uses an atomic CAS so concurrent attempts on multiple
     /// listener threads stay coherent.
     pub fn try_acquire(
@@ -122,6 +128,10 @@ impl ConnectionSlot {
         cap: usize,
     ) -> Option<Self> {
         use std::sync::atomic::Ordering;
+        // Defence-in-depth clamp.  Parallel to `frame::read_frame`'s
+        // `HARD_MAX_FRAME_SIZE` clamp.  Library consumers that
+        // construct `HandlerConfig` directly cannot bypass.
+        let cap = cap.min(HARD_MAX_CONCURRENT_CONNECTIONS);
         let mut current = counter.load(Ordering::Relaxed);
         loop {
             if current >= cap {

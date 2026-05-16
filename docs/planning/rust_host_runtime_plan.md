@@ -2012,20 +2012,22 @@ the original lump estimate implied).
     arbitrary attacker-supplied bytes through the parser and
     verify it never panics.
 
-  * **Audit posture at landing (post-RH-C audit pass).**
-    An independent code-review agent surfaced 20 findings;
-    the six critical / high-severity issues have been
-    addressed in-PR (see "Audit-pass fixes" below).
+  * **Audit posture at landing (post-RH-C two audit passes).**
+    Two independent code-review-agent audits surfaced 29
+    findings combined; every CRITICAL / HIGH-severity issue
+    has been addressed in-PR (see "Audit-pass fixes" below).
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — 488 tests passing
-      (+180 from the RH-B landing's 308).  Breakdown:
-      * `canon-host` lib: 116 unit tests (verdict + frame +
-        kernel + queue + listener + server + tls + config,
-        plus the new timeout / symlink / mutex-poison
-        regression tests).
-      * `canon-host` integration TCP: 14 tests (incl.
-        connection-limit + shutdown-drain new tests).
+    - `cargo test --workspace --locked` — 526 tests passing
+      (+218 from the RH-B landing's 308).  Breakdown:
+      * `canon-host` lib: 150 unit tests (verdict + frame +
+        kernel + queue + listener + server + tls + config +
+        admission, plus the timeout / symlink / mutex-poison
+        / panic-isolation / staging / race-safety regression
+        tests).
+      * `canon-host` integration TCP: 15 tests (incl.
+        connection-limit + shutdown-drain + kernel-panic-
+        isolation tests).
       * `canon-host` integration Unix: 7 tests.
       * `canon-host` property: 11 tests.
     - `cargo clippy --workspace --all-targets --locked --
@@ -2097,6 +2099,71 @@ the original lump estimate implied).
     connection-limit-returns-busy test (a smaller-scale
     variant — full 10k-connection chaos testing belongs to
     RH-F's benchmark harness).
+
+  * **Audit-pass-2 fixes (the post-staging-extension
+    review).**  After landing the `AdmissionStage` ladder
+    and `SubscribableKernel` extension trait, a second
+    independent audit surfaced 9 findings; the three
+    CRITICAL / HIGH-severity issues are addressed in-PR:
+    - **#2 (HIGH) `file.flush()` is a no-op on
+      `std::fs::File`.**  Replaced with `file.sync_data()`
+      in `CommandKernel::submit`.  Std's `Write` impl for
+      `File` returns `Ok(())` from `flush` (the File has
+      no userspace buffer); without `sync_data` the
+      subprocess could observe an empty or truncated
+      payload on NFS / FUSE work-dirs where the page-cache
+      writeback hasn't propagated.  Cost: one fdatasync
+      per request.
+    - **#3 (HIGH) kernel-panic isolation.**  Wrapped every
+      `kernel.submit` call in
+      `std::panic::catch_unwind(AssertUnwindSafe(...))`.
+      In release builds the workspace uses
+      `panic = "abort"` so the wrap is inert; in debug
+      builds (the test profile) it converts a panic into
+      a `NotAdmissible` response with a `"kernel
+      panicked"` reason, keeping the worker alive for
+      subsequent submissions.  Operators get accurate
+      verdicts (panic, not timeout); CI doesn't appear to
+      wedge on a buggy kernel impl.  New regression test:
+      `kernel_panic_does_not_stall_host`.
+    - **#8 (CRITICAL) `SubscribableKernel` race-window
+      under-documentation.**  Strengthened the
+      `Subscription` contract from "monotonically
+      non-decreasing" to "strictly increasing" and added
+      the **atomic-snapshot rule**: implementations MUST
+      hold a single synchronisation primitive across both
+      the `current` advancement AND the `events` channel
+      send, AND across both the snapshot read AND the
+      receiver claim in `subscribe`.  Otherwise a
+      naive impl that bumps `current` and `send`s without
+      locking could deliver a stage twice (once as
+      `current`, once as the first `events` emission),
+      violating the contract.  The test fixture was
+      rewritten to follow the canonical pattern; a new
+      regression test
+      `subscribe_during_advance_no_duplicate_events`
+      spawns a concurrent advancer thread and asserts
+      strict-increasing observed-stage sequence under
+      race.
+    - Plus a self-found defence-in-depth: clamped
+      `ConnectionSlot::try_acquire`'s `cap` parameter
+      against `HARD_MAX_CONCURRENT_CONNECTIONS`,
+      paralleling `read_frame`'s `HARD_MAX_FRAME_SIZE`
+      clamp.  Defends against library consumers
+      constructing `HandlerConfig` with `usize::MAX`
+      (bypassing the CLI validation).
+    - Plus documentation cleanups (#1 `NamedTempFile` /
+      `keep()` semantics; #5 `VerdictResponse::encode`
+      saturation behaviour) and a new test
+      (`encode_declared_length_equals_emitted_payload_for_realistic_sizes`)
+      verifying wire self-consistency at the
+      length-prefix boundary.
+    - The remaining findings (#4 ordering of zero/oversize
+      check is acceptable; #6 latent test-flake risk under
+      partial reads not triggered today; #7 `Receiver
+      !Sync` enforced by the type system; #9 CAS Acquire
+      on success is wasteful but not buggy) are all
+      INFO/LOW.
 
   * **Workspace dependency additions.**  `rustls = "0.23"`
     with `ring` + `tls12` + `std` features (no

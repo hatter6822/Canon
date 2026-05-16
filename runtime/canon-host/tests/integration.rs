@@ -517,6 +517,73 @@ fn shutdown_drains_inflight_requests() {
     server_handle.join().expect("server join");
 }
 
+/// AR-RHC-audit-2 #3: a kernel that panics on submit must NOT
+/// kill the worker thread or stall the host.  The host's
+/// `catch_unwind` wrap synthesises a `NotAdmissible` response
+/// with a `"kernel panicked"` reason, the worker survives, and
+/// subsequent submissions process normally.
+///
+/// Only meaningful in debug builds (panic=unwind).  Release
+/// builds use panic=abort, in which case a kernel panic
+/// terminates the process — operators see the abort, not the
+/// graceful response.
+#[test]
+fn kernel_panic_does_not_stall_host() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+    /// Kernel that panics on the FIRST submission, then returns
+    /// Ok for every later submission.
+    struct PanicOnceKernel {
+        calls: Arc<AtomicUsize>,
+    }
+    impl canon_host::kernel::Kernel for PanicOnceKernel {
+        fn submit(&self, _bytes: &[u8]) -> KernelResponse {
+            let n = self.calls.fetch_add(1, AOrdering::SeqCst);
+            assert!(n != 0, "intentional kernel panic for regression test");
+            KernelResponse::from_verdict(Verdict::Ok)
+        }
+        fn identifier(&self) -> &str {
+            "panic-once-kernel/v1"
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let kernel = Box::new(PanicOnceKernel {
+        calls: Arc::clone(&calls),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let cfg = ServerConfigBuilder::new()
+        .tcp(listener)
+        .max_queue_depth(4)
+        .build(kernel)
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || Server::new(cfg).run(server_stop));
+    std::thread::sleep(Duration::from_millis(100));
+
+    // First submission: kernel panics.  Host must synthesise
+    // NotAdmissible (rather than letting the panic kill the worker).
+    let r1 = submit_one(local_addr, b"first");
+    let (v1, reason1) = parse_response(&r1);
+    assert_eq!(v1, Verdict::NotAdmissible.to_byte());
+    assert!(
+        reason1.contains("kernel panicked") || reason1.contains("intentional"),
+        "panic should be surfaced in reason; got: {reason1}"
+    );
+
+    // Second submission: kernel returns Ok.  Worker must still be
+    // alive.
+    let r2 = submit_one(local_addr, b"second");
+    let (v2, _) = parse_response(&r2);
+    assert_eq!(v2, Verdict::Ok.to_byte(), "worker did not survive panic");
+
+    // Kernel was called at least twice (panic counted).
+    assert!(calls.load(AOrdering::SeqCst) >= 2);
+
+    join_server(stop, handle);
+}
+
 /// Cross-stack-style: a binary fixture corpus of `(payload bytes,
 /// expected verdict byte)` records can be replayed against the
 /// host with a configurable `MockKernel`.  This test demonstrates
