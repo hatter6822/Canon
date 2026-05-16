@@ -445,10 +445,18 @@ impl<S: L1Source, B: Submitter> WatcherLoop<S, B> {
         let mut all_logs = self
             .source
             .logs_in_block_by_hash(&header.hash, &self.config.bridge_contract)?;
-        all_logs.extend(
-            self.source
-                .logs_in_block_by_hash(&header.hash, &self.config.identity_registry_contract)?,
-        );
+        // If the operator points both contract flags at the
+        // same address (a test / single-contract deployment
+        // pattern), skip the second RPC call — it would just
+        // return the same logs and our process_event idempotency
+        // layer would dedup them.  Saves one round-trip and
+        // halves the log-decode work.
+        if self.config.bridge_contract != self.config.identity_registry_contract {
+            all_logs.extend(
+                self.source
+                    .logs_in_block_by_hash(&header.hash, &self.config.identity_registry_contract)?,
+            );
+        }
         // Sort by log index for determinism.
         all_logs.sort_by_key(|l| l.log_index);
         // 3. Decode and process each log.

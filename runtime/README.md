@@ -163,12 +163,12 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (334 tests post-RH-B-double-audit —
-# 198 in the new `canon-l1-ingest` lib + 4 cross-stack + 5
-# integration + 11 property tests, including 37 regression tests
-# from two audit passes that surfaced and fixed 15 correctness /
-# security issues; up from 116 at the RH-A landing and 44 at the
-# RH-H baseline).
+# Run every member crate's tests (343 tests post-RH-B-triple-audit —
+# 204 in the new `canon-l1-ingest` lib + 4 cross-stack + 6
+# integration + 11 property tests, including 46 regression tests
+# from three audit passes that surfaced and fixed 23 correctness
+# / security issues; up from 116 at the RH-A landing and 44 at
+# the RH-H baseline).
 cargo test --workspace
 
 # Lint gate: every clippy warning is promoted to a hard error.

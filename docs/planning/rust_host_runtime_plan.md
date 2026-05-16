@@ -1182,9 +1182,9 @@ estimate; the decomposition surfaced no scope expansion).
 ### RH-B — Closeout
 
 **Status.**  **Complete.**  See "Audit pass" below for the
-post-landing review that surfaced and fixed seven correctness /
-security issues; the production code as shipped is the
-post-audit form.
+post-landing review that surfaced and fixed 23 correctness /
+security issues across three audit passes; the production code
+as shipped is the post-third-audit form.
 
 **Landed deliverables.**
 
@@ -1508,12 +1508,15 @@ weaken any security or correctness property:
 
 #### Audit pass (post-landing review)
 
-After the initial RH-B landing, two deep audit passes surfaced
-fifteen issues in total — all remediated in the same workstream
-PR.  Each is regression-tested.  The first-pass audit found
-seven correctness / security issues (state corruption, nonce
-desync, etc.); the second-pass audit (this section) found eight
-additional issues:
+After the initial RH-B landing, three deep audit passes surfaced
+twenty-three issues in total — all remediated in the same
+workstream PR.  Each is regression-tested.  The first-pass audit
+found seven correctness / security issues (state corruption,
+nonce desync, etc.); the second-pass found eight more (ID
+overflow, arithmetic guards, chunked encoding, etc.); the third
+pass (this section's final entries) found eight more (DoS via
+unbounded allocations, redundant RPC fetches, documentation
+drift):
 
   1. **State corruption on submission failure (CRITICAL).**
      The previous code eagerly mutated the address book inside
@@ -1681,9 +1684,85 @@ additional issues:
       added `tests/integration.rs::end_to_end_eip1271_registration`.
 
   Audit posture after the second pass: 334 tests passing across
-  the workspace (+37 over the initial landing, +17 over the
-  first-audit-pass landing), all four CI gates clean,
-  `unsafe_code = "forbid"` workspace-wide.
+  the workspace.
+
+  **Third-pass audit issues** (found and fixed in the same PR):
+
+  16. **Unbounded address-book allocation in fixture decoder
+      (MEDIUM, DoS).**  `decode_input` read a u64 length field
+      from the fixture and called `Vec::with_capacity(book_len)`
+      directly.  A crafted fixture with `book_len = u64::MAX`
+      would trigger an allocation abort (process death) or, on
+      systems with overcommit, allocate ~57 GiB before failing.
+      **Fix**: bounded by `MAX_DECODED_ADDRESS_BOOK_ENTRIES =
+      1_000_000`; additionally cap the `Vec::with_capacity` at
+      `(bytes_remaining / 28)` so the allocation never exceeds
+      what the actual input could populate.  Regression tests:
+      `fixture::tests::decode_input_rejects_huge_address_book_length`,
+      `decode_input_rejects_at_threshold`,
+      `decode_input_accepts_at_threshold_but_fails_on_truncation`.
+
+  17. **Unbounded keystore file read (LOW, DoS).**  `from_file`
+      called `std::fs::read(path)` which loads the ENTIRE file
+      into memory.  An operator misconfiguration pointing at
+      `/dev/zero` (or a huge file) would exhaust memory.
+      **Fix**: use `File::open` + `read_exact(&mut [0u8; 32])`
+      to read at most 32 bytes; additionally check file
+      metadata against `MAX_KEYSTORE_FILE_BYTES = 4096`.
+      Regression test:
+      `key::tests::from_file_rejects_oversized_file`.
+
+  18. **Redundant RPC fetch when contracts coincide (LOW,
+      efficiency).**  If the operator sets `bridge_contract ==
+      identity_registry_contract` (a single-contract / test
+      deployment), the watcher called `logs_in_block_by_hash`
+      twice with the same arguments, then relied on the dedup
+      layer to absorb the duplicate events.  **Fix**: detect
+      the coincidence and skip the second RPC call.
+      Regression test:
+      `tests/integration.rs::end_to_end_same_contract_for_bridge_and_identity`.
+
+  19. **`ingest` swallowed `commit_assignment` errors (LOW).**
+      The deprecated `ingest` wrapper used `let _ =
+      commit_assignment(...)`, silently discarding errors
+      (overflow or expected-id mismatch).  **Fix**: panic with
+      a clear message via `.expect(...)`.  `ingest` is only
+      used in tests and the fixture generator where overflow
+      is unreachable, so panicking is acceptable; production
+      code uses the typed-error `commit_assignment` directly.
+
+  20. **Stale `from_file` docstring (DOC).**  The docstring
+      didn't mention the new size bound.  **Fix**: documented
+      the read-at-most-32-bytes behaviour and the
+      `MAX_KEYSTORE_FILE_BYTES` upper bound.
+
+  21. **Misleading "SIGINT / SIGTERM" claim in main.rs
+      (DOC).**  The binary's module docstring claimed the
+      watcher was "stopped via SIGINT / SIGTERM", but no
+      signal handler was installed — Ctrl-C delivered the
+      default libc abort.  **Fix**: docstring now accurately
+      describes the actual behaviour (libc default) and points
+      at the `stop` `AtomicBool` hook that a future
+      signal-handler crate could populate.
+
+  22. **Misleading "fsync-bounded" claim in state.rs (DOC).**
+      The `append` docstring claimed durability was
+      "fsync-bounded" but the code only calls `flush` (writes
+      to OS page cache).  **Fix**: docstring now accurately
+      describes the best-effort durability semantic and points
+      at RH-E.0 as the future transactional boundary.
+
+  23. **Missing test for capacity-1 reorg window (LOW,
+      coverage).**  No test exercised the edge case where the
+      window holds only one block.  **Fix**: added
+      `reorg::tests::capacity_1_window_linear_then_reorg_rejected`
+      and `capacity_drops_oldest_on_linear_advance`.
+
+  Audit posture after the third pass: 343 tests passing across
+  the workspace (+46 over the initial landing, +26 over the
+  first-audit-pass landing, +9 over the second-audit-pass
+  landing), all four CI gates clean, `unsafe_code = "forbid"`
+  workspace-wide.
 
 ---
 

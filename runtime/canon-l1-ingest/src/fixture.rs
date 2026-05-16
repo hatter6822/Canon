@@ -71,6 +71,14 @@ const EVENT_TAG_REGISTERED_EIP1271: u8 = 1;
 const EVENT_TAG_REVOKED: u8 = 2;
 const EVENT_TAG_DEPOSIT_INITIATED: u8 = 3;
 
+/// Defensive bound on the address-book length field decoded
+/// from a fixture input.  Production bridges have ≤ ~10k
+/// registered identities; one million is well past any
+/// realistic value but small enough to fit in available memory
+/// (one million entries × 28 bytes = 28 MiB).  Adjust upward
+/// only if a deployment scenario justifies it.
+pub const MAX_DECODED_ADDRESS_BOOK_ENTRIES: usize = 1_000_000;
+
 /// Errors surfaced by the fixture encoders / decoders.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FixtureError {
@@ -203,13 +211,40 @@ pub fn encode_input(input: &FixtureInput) -> Result<Vec<u8>, FixtureError> {
 ///
 /// Returns `FixtureError::UnexpectedEnd` if the stream is too
 /// short; `FixtureError::UnknownEventTag` if the leading byte
-/// doesn't match a known event.
+/// doesn't match a known event; `FixtureError::Overflow` if
+/// the address-book length field exceeds
+/// [`MAX_DECODED_ADDRESS_BOOK_ENTRIES`].
 pub fn decode_input(bytes: &[u8]) -> Result<FixtureInput, FixtureError> {
     let mut cursor = 0usize;
     let event = decode_event(bytes, &mut cursor)?;
-    let book_len = read_u64_be(bytes, &mut cursor)? as usize;
+    let book_len_u64 = read_u64_be(bytes, &mut cursor)?;
+    // Defence against an attacker-controlled fixture claiming a
+    // huge `book_len`: bound the address-book length BEFORE
+    // calling `Vec::with_capacity`, which would otherwise abort
+    // the process on allocation failure.  One million addresses
+    // is well above any realistic deployment's bridge actor
+    // count (production Ethereum bridges typically have ≤ 10k
+    // registered identities).
+    if book_len_u64 > MAX_DECODED_ADDRESS_BOOK_ENTRIES as u64 {
+        return Err(FixtureError::Overflow(format!(
+            "decoded address-book length {book_len_u64} exceeds bound \
+             {MAX_DECODED_ADDRESS_BOOK_ENTRIES}",
+        )));
+    }
+    // Additional defence: refuse to allocate beyond what the
+    // remaining input could possibly populate.  Each entry is at
+    // least 28 bytes (20-byte address + 8-byte id); if the
+    // remaining buffer can't hold them, refuse early.
+    let remaining = bytes.len().saturating_sub(cursor);
+    let max_entries_from_input = remaining / 28;
+    let book_len = (book_len_u64 as usize).min(max_entries_from_input);
     let mut address_book = Vec::with_capacity(book_len);
-    for _ in 0..book_len {
+    // But we still need to consume EXACTLY `book_len_u64`
+    // entries from the stream (the input might have padding /
+    // we're not the only consumer).  Use the u64 value, not
+    // the bounded one, so a too-large entry count surfaces as
+    // UnexpectedEnd rather than silently truncating.
+    for _ in 0..book_len_u64 {
         let addr_bytes = read_bytes(bytes, &mut cursor, 20)?;
         let mut addr = [0u8; 20];
         addr.copy_from_slice(addr_bytes);
@@ -608,5 +643,76 @@ mod tests {
         let e1 = encode_input(&input).unwrap();
         let e2 = encode_input(&input).unwrap();
         assert_eq!(e1, e2);
+    }
+
+    /// REGRESSION: decoder rejects unreasonably large
+    /// address-book lengths to defend against memory-exhaustion
+    /// attacks via crafted fixtures.  The pre-fix decoder would
+    /// blindly call `Vec::with_capacity` with the attacker-
+    /// supplied value and abort on allocation failure.
+    #[test]
+    fn decode_input_rejects_huge_address_book_length() {
+        // Build a minimal valid `RegisteredEcdsa` prefix, then
+        // a fabricated address-book length of u64::MAX.
+        let mut bytes = Vec::new();
+        bytes.push(super::EVENT_TAG_REGISTERED_ECDSA);
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // block_number
+        bytes.extend_from_slice(&[0x00; 32]); // tx_hash
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // log_index
+        bytes.extend_from_slice(&[0x00; 20]); // actor
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // pubkey_len (0)
+                                                      // Now the address-book length: a malicious u64::MAX.
+        bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+        let result = decode_input(&bytes);
+        match result {
+            Err(FixtureError::Overflow(msg)) => {
+                assert!(
+                    msg.contains("address-book length"),
+                    "unexpected overflow message: {msg}"
+                );
+            }
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    /// REGRESSION: decoder rejects address-book lengths just
+    /// above the bound.
+    #[test]
+    fn decode_input_rejects_at_threshold() {
+        let mut bytes = Vec::new();
+        bytes.push(super::EVENT_TAG_REVOKED);
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // block_number
+        bytes.extend_from_slice(&[0x00; 32]); // tx_hash
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // log_index
+        bytes.extend_from_slice(&[0x00; 20]); // actor
+                                              // book_len = MAX + 1.
+        let bad_len = super::MAX_DECODED_ADDRESS_BOOK_ENTRIES as u64 + 1;
+        bytes.extend_from_slice(&bad_len.to_be_bytes());
+        match decode_input(&bytes) {
+            Err(FixtureError::Overflow(_)) => {}
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    /// Address-book length at the boundary (MAX) is accepted in
+    /// principle; the decoder fails later via UnexpectedEnd if
+    /// the input is too short to actually populate that many
+    /// entries (which it always will be in practice).
+    #[test]
+    fn decode_input_accepts_at_threshold_but_fails_on_truncation() {
+        let mut bytes = Vec::new();
+        bytes.push(super::EVENT_TAG_REVOKED);
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(&[0x00; 32]);
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(&[0x00; 20]);
+        // book_len = MAX exactly.
+        let at_bound = super::MAX_DECODED_ADDRESS_BOOK_ENTRIES as u64;
+        bytes.extend_from_slice(&at_bound.to_be_bytes());
+        // Insufficient data for the entries → UnexpectedEnd.
+        match decode_input(&bytes) {
+            Err(FixtureError::UnexpectedEnd { .. }) => {}
+            other => panic!("expected UnexpectedEnd, got {other:?}"),
+        }
     }
 }

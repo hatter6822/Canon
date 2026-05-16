@@ -557,11 +557,23 @@ impl StateStore {
         Ok(state)
     }
 
-    /// Append a record to the state file and flush.  Each call
-    /// is fsync-bounded; durability is "the OS thinks it's
-    /// written" (no explicit `sync_data` is called per record to
-    /// keep latency low).  RH-E.0 will add a proper transactional
-    /// boundary.
+    /// Append a record to the state file and flush.
+    ///
+    /// ## Durability semantics
+    ///
+    /// `flush` is called after every record — the bytes leave
+    /// our `BufWriter` and enter the OS page cache.  We do
+    /// **NOT** call `sync_data` / fsync; a hard crash (OOM,
+    /// panic-abort, OS reboot) before the OS flushes the cache
+    /// can lose up to ~5-30 seconds of recent records.
+    ///
+    /// This trade-off keeps per-record latency low at the cost
+    /// of "best-effort" durability.  On a graceful exit (the
+    /// process returns from main without crashing) the OS will
+    /// sync the cache and all records are durable.
+    ///
+    /// RH-E.0 (SQLite-backed storage) will add a proper
+    /// transactional / WAL durability boundary.
     ///
     /// # Errors
     ///

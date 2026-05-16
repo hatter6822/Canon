@@ -277,3 +277,32 @@ fn end_to_end_eip1271_registration() {
     let addr = canon_l1_ingest::action::EthAddress::from_bytes(&actor).unwrap();
     assert_eq!(watcher.address_book().lookup(&addr), Some(1));
 }
+
+/// When the operator configures `bridge_contract ==
+/// identity_registry_contract` (a single-contract / test
+/// deployment), the watcher skips the redundant second RPC
+/// fetch.  Functional correctness: the action is still
+/// submitted exactly once (via the dedup layer's idempotency).
+#[test]
+fn end_to_end_same_contract_for_bridge_and_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("state.jsonl");
+    let mut source = InMemoryL1Source::new();
+    let log = build_registered_ecdsa_log([0x77; 20], &[0x02, 0xab], 0, 0, [0x99; 32]);
+    push_chain_with_log(&mut source, 13, 0, log);
+    let submitter = BufferingSubmitter::new();
+    // Point both contract flags at the SAME address.
+    let same_addr = identity_addr();
+    let mut config = WatcherConfig::new(same_addr, same_addr, vec![]);
+    config.confirmation_depth = 12;
+    let mut watcher = WatcherLoop::new(config, source, submitter, test_key(), &state_path).unwrap();
+    let processed = watcher.run_iteration().unwrap();
+    assert_eq!(processed, 1);
+    // The action was submitted exactly once (NOT twice).
+    let recorded = watcher.submitter().recorded();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "expected exactly 1 submission; the watcher must dedup the redundant second RPC call"
+    );
+}

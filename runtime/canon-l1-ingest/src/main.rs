@@ -8,8 +8,28 @@
 //!
 //! Production deployments invoke this binary with the
 //! configuration flags documented in §RH-B.1 of the engineering
-//! plan.  The watcher loop runs synchronously until stopped via
-//! SIGINT / SIGTERM.
+//! plan.  The watcher loop runs synchronously until it reaches
+//! the configured `--until-block` (or, by default, runs
+//! indefinitely until killed).
+//!
+//! ## Graceful shutdown
+//!
+//! The current entry point does NOT install custom SIGINT /
+//! SIGTERM handlers — Ctrl-C delivers the default libc
+//! behaviour (immediate process termination).  Because every
+//! state mutation is durable on disk via the atomic `Submitted`
+//! record (see [`canon_l1_ingest::state`]), an interrupt at
+//! ANY point produces a consistent state file: either the
+//! submission completed and was recorded, or the submission was
+//! never attempted and the watcher resumes from the
+//! `last_confirmed_block` checkpoint.
+//!
+//! Operators wanting cooperative shutdown should wrap this
+//! binary in a supervisor (systemd, runit, etc.) that monitors
+//! the exit code and restarts on transient failures.  A
+//! follow-up work unit could land a `signal-hook`-backed
+//! handler that flips the `stop` `AtomicBool`; the watcher
+//! loop already polls the flag at the top of each iteration.
 //!
 //! ## CLI flags
 //!

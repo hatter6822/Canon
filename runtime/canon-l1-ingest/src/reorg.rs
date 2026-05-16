@@ -615,4 +615,67 @@ mod tests {
         }
         assert_eq!(w.head().unwrap().hash, sibling2.hash);
     }
+
+    /// Capacity-1 window: only remembers the most recent block.
+    /// Linear extensions work; any re-org attempt fails with
+    /// `DeepReorg` (no slot to walk back into).
+    #[test]
+    fn capacity_1_window_linear_then_reorg_rejected() {
+        let mut w = ReorgWindow::new(1);
+        let chain = linear_chain(3, 100, 1);
+        for h in &chain {
+            let outcome = w.advance(*h).unwrap();
+            assert_eq!(outcome, AdvanceOutcome::Advanced);
+        }
+        // Window now holds only block 102.
+        assert_eq!(w.len(), 1);
+        assert_eq!(w.head().unwrap().number, 102);
+        // A 1-block re-org of block 102 needs to walk back to
+        // block 101's hash, but block 101 is no longer in the
+        // window.  Therefore: DeepReorg (at-floor) since
+        // `incoming.number (102) <= window_floor (102)`.
+        let sibling = BlockHeader {
+            number: 102,
+            hash: [0xff; 32],
+            parent_hash: chain[1].hash, // hash of block 101
+        };
+        let err = w.advance(sibling).unwrap_err();
+        match err {
+            ReorgError::DeepReorg {
+                incoming_number,
+                window_floor,
+            } => {
+                assert_eq!(incoming_number, 102);
+                assert_eq!(window_floor, 102);
+            }
+            other => panic!("expected DeepReorg, got {other:?}"),
+        }
+    }
+
+    /// REGRESSION: when the window is at capacity and we
+    /// advance linearly, the OLDEST block is dropped — NOT the
+    /// newest.  Subsequent re-orgs against the dropped block
+    /// fail correctly.
+    #[test]
+    fn capacity_drops_oldest_on_linear_advance() {
+        let mut w = ReorgWindow::new(3);
+        let chain = linear_chain(5, 100, 1);
+        for h in &chain {
+            w.advance(*h).unwrap();
+        }
+        assert_eq!(w.len(), 3);
+        // After 5 linear advances with capacity 3: window holds 102, 103, 104.
+        assert_eq!(w.tail().unwrap().number, 102);
+        assert_eq!(w.head().unwrap().number, 104);
+        // A re-org targeting block 101 (which was dropped from
+        // the window) fails: `incoming.number (101) <
+        // window_floor (102)` → DeepReorg.
+        let orphan = BlockHeader {
+            number: 101,
+            hash: [0xee; 32],
+            parent_hash: chain[0].hash,
+        };
+        let err = w.advance(orphan).unwrap_err();
+        assert!(matches!(err, ReorgError::DeepReorg { .. }));
+    }
 }

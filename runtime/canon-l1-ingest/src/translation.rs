@@ -238,6 +238,16 @@ pub fn commit_assignment(
 ///
 /// Matches Lean's `Bridge.Ingest.ingest` byte-for-byte under
 /// CBE encoding (verified by the cross-stack fixture corpus).
+///
+/// # Panics
+///
+/// Panics if the address-book commit fails with `Overflow`
+/// (counter reached `u64::MAX`).  This is unreachable on any
+/// realistic input — the cross-stack fixtures use at most ~16
+/// addresses, well below the bound — but the panic is louder
+/// than silently swallowing the error.  Production callers
+/// MUST use `preview_ingest` + `commit_assignment` which
+/// returns `Result` instead.
 pub fn ingest(
     book: &mut AddressBook,
     event: &IngestedEvent,
@@ -251,7 +261,14 @@ pub fn ingest(
             address,
             new_actor_id,
         } => {
-            let _ = commit_assignment(book, &address, new_actor_id);
+            // Panic on commit error — unreachable for the
+            // controlled inputs `ingest` is used with (tests,
+            // fixture generator).  The previous `let _ =`
+            // pattern silently swallowed `Overflow` and
+            // `ExpectedIdMismatch`, which would have hidden
+            // bugs.
+            commit_assignment(book, &address, new_actor_id)
+                .expect("ingest: address-book commit failed");
             Some(action)
         }
     }

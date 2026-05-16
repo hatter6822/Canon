@@ -55,6 +55,18 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Length of a pre-hashed message (always 32 bytes).
 pub const PREHASH_LEN: usize = 32;
 
+/// Defensive bound on the keystore file size accepted by
+/// [`BridgeActorKey::from_file`].  A legitimate raw-scalar
+/// keystore is exactly [`PRIVATE_KEY_LEN`] = 32 bytes.  Anything
+/// larger than this threshold is a misconfigured path (e.g.
+/// operator pointed at a PEM, a JSON keystore, or `/dev/zero`)
+/// and we fail loudly rather than silently consuming the first
+/// 32 bytes (which would likely be header bytes of a structured
+/// format and either produce an `InvalidScalar` error or — worse
+/// — a valid-looking-but-wrong key).  4 KiB is generous: even
+/// EIP-2335 keystores are ≤ 1 KiB.
+pub const MAX_KEYSTORE_FILE_BYTES: usize = 4096;
+
 /// The bridge-actor's secp256k1 keypair.  The private bytes live
 /// behind `Zeroizing<[u8; 32]>` so they are erased on drop.
 ///
@@ -165,23 +177,63 @@ impl BridgeActorKey {
     /// CLI layer may wrap it with EIP-2335 decryption / KMS
     /// integration.
     ///
+    /// Reads at most [`PRIVATE_KEY_LEN`] bytes — does NOT load
+    /// the entire file into memory.  This bounds the memory
+    /// allocation regardless of the file's actual size (e.g. a
+    /// misconfigured operator pointing at `/dev/zero` or a
+    /// large arbitrary file would otherwise exhaust memory).
+    ///
     /// # Errors
     ///
-    /// Returns `KeyError::Io` if the file cannot be read,
-    /// `KeyError::InvalidLength` if the file is too short, and
-    /// `KeyError::InvalidScalar` if the scalar is invalid.
+    /// Returns `KeyError::Io` if the file cannot be opened or
+    /// read, `KeyError::InvalidLength` if the file is too short,
+    /// and `KeyError::InvalidScalar` if the scalar is invalid.
     pub fn from_file(path: &std::path::Path) -> Result<Self, KeyError> {
-        let bytes = std::fs::read(path).map_err(|source| KeyError::Io {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).map_err(|source| KeyError::Io {
             path: path.display().to_string(),
             source,
         })?;
-        if bytes.len() < PRIVATE_KEY_LEN {
-            return Err(KeyError::InvalidLength {
-                got: bytes.len(),
-                expected: PRIVATE_KEY_LEN,
-            });
+        // Read exactly PRIVATE_KEY_LEN bytes.  `read_exact`
+        // returns `UnexpectedEof` if the file is shorter than
+        // 32 bytes, which we map to `InvalidLength`.
+        let mut bytes = [0u8; PRIVATE_KEY_LEN];
+        match file.read_exact(&mut bytes) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Determine actual file length for the error.
+                let actual = std::fs::metadata(path)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0);
+                return Err(KeyError::InvalidLength {
+                    got: actual,
+                    expected: PRIVATE_KEY_LEN,
+                });
+            }
+            Err(source) => {
+                return Err(KeyError::Io {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
         }
-        Self::from_private_bytes(&bytes[..PRIVATE_KEY_LEN])
+        // Sanity bound: refuse to load if file is unreasonably
+        // large.  A legitimate raw-scalar keystore is exactly
+        // 32 bytes.  Larger files indicate the operator pointed
+        // at the wrong file (e.g. a PEM, a database, etc.) and
+        // should fail loudly rather than silently consuming
+        // only the first 32 bytes (which would likely be header
+        // bytes from a structured format and produce an invalid
+        // scalar).
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > MAX_KEYSTORE_FILE_BYTES as u64 {
+                return Err(KeyError::InvalidLength {
+                    got: meta.len() as usize,
+                    expected: PRIVATE_KEY_LEN,
+                });
+            }
+        }
+        Self::from_private_bytes(&bytes)
     }
 
     /// Return the SEC1-compressed public key bytes (33 bytes).
@@ -450,6 +502,59 @@ mod tests {
     fn from_file_missing() {
         let result = BridgeActorKey::from_file(std::path::Path::new("/non/existent/path"));
         assert!(matches!(result, Err(KeyError::Io { .. })));
+    }
+
+    /// REGRESSION: `from_file` refuses to load keystores larger
+    /// than `MAX_KEYSTORE_FILE_BYTES`.  Without this bound, an
+    /// operator misconfiguration (pointing at a huge file like
+    /// `/dev/zero` or a database) would either consume the
+    /// first 32 bytes blindly or exhaust memory.
+    #[test]
+    fn from_file_rejects_oversized_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("oversize.bin");
+        // Write 5 KiB (above the 4 KiB threshold).
+        let oversize_bytes = vec![0x11u8; 5 * 1024];
+        std::fs::write(&path, &oversize_bytes).unwrap();
+        let result = BridgeActorKey::from_file(&path);
+        match result {
+            Err(KeyError::InvalidLength { got, expected }) => {
+                assert_eq!(got, oversize_bytes.len());
+                assert_eq!(expected, PRIVATE_KEY_LEN);
+            }
+            other => panic!("expected InvalidLength, got {other:?}"),
+        }
+    }
+
+    /// `from_file` accepts a file with exactly `PRIVATE_KEY_LEN`
+    /// bytes — the canonical raw-scalar format.
+    #[test]
+    fn from_file_accepts_exact_length() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ok.bin");
+        let mut scalar = [0u8; PRIVATE_KEY_LEN];
+        scalar[31] = 9;
+        std::fs::write(&path, scalar).unwrap();
+        let key = BridgeActorKey::from_file(&path).unwrap();
+        assert!(matches!(key.public_key_compressed()[0], 0x02 | 0x03));
+    }
+
+    /// `from_file` accepts a file with more than 32 bytes but
+    /// under the threshold, reading only the first 32 bytes.
+    /// Documents the relaxed parsing semantic: extra bytes after
+    /// the scalar are silently ignored.  (The threshold itself
+    /// is the upper bound to prevent abuse.)
+    #[test]
+    fn from_file_accepts_under_threshold() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ok.bin");
+        let mut data = vec![0u8; PRIVATE_KEY_LEN + 100];
+        data[31] = 13; // valid scalar
+        std::fs::write(&path, &data).unwrap();
+        let key = BridgeActorKey::from_file(&path).unwrap();
+        // Sanity: pubkey is from the first-32-bytes scalar.
+        let direct = BridgeActorKey::from_private_bytes(&data[..PRIVATE_KEY_LEN]).unwrap();
+        assert_eq!(key.public_key_compressed(), direct.public_key_compressed());
     }
 
     /// `Debug` impl does NOT expose private bytes.
