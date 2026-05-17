@@ -2165,6 +2165,74 @@ the original lump estimate implied).
       on success is wasteful but not buggy) are all
       INFO/LOW.
 
+  * **Audit-pass-3 fixes (the post-audit-2 review).**  A
+    third independent audit surfaced 6 findings; the
+    headline finding (MEDIUM) is fixed in-PR plus several
+    quality items.  The most important is **#1**: the AR-2
+    "race-safety" test was passing for the wrong reason.
+    - **AR-3 #1 (MEDIUM) Race-safety test passes by
+      accident.**  The audit-2 `subscribe_during_advance
+      _no_duplicate_events` test had a 5ms sleep at the
+      start of the advancer thread, which deterministically
+      let the subscriber win the race.  The "race" the test
+      named NEVER happened; what it actually tested was the
+      easy subscribe-before-advance case.  The fixture's
+      `subscribe()` ALSO didn't drain buffered events ≤
+      snapshot, so a true subscribe-after-advance race
+      would observe `[Finalized, Sequenced, Finalized]` —
+      a strict-monotonicity violation.  Audit-3 rewrote
+      the fixture to drain buffered events under the mutex
+      (the canonical atomic-snapshot pattern) AND
+      restructured the test into three deterministic
+      scenarios: subscribe-before-advance,
+      subscribe-after-advance (the previously-missed bug
+      case), and concurrent advancer + subscriber.  All
+      three assert strict monotonicity.  This is the
+      canonical reference any future RH-D /
+      ConsensusKernel implementer should copy.
+    - **AR-3 #4 (LOW) TLS crypto provider not pinned
+      per-config.**  Previously `tls.rs::TlsConfigBuilder
+      ::build` called `install_default()` (idempotent
+      no-op if a different provider was already installed)
+      then used the implicit process-global provider via
+      `builder_with_protocol_versions`.  If a library
+      consumer installed `aws-lc-rs` (or similar) earlier
+      in the process, canon-host's ServerConfig would use
+      THEIR provider's primitives, not `ring`.  Audit-3
+      switched to `ServerConfig::builder_with_provider
+      (Arc::new(ring::default_provider()))` so the
+      provider choice is explicit per-config.  Both
+      `ring` and `aws-lc-rs` are audited and secure, but
+      the docstring + Cargo.toml promised `ring`
+      specifically — now actually delivered.
+    - **AR-3 #2 (LOW) MockKernel poison-recovery
+      inconsistency.**  MockKernel's six mutex-lock sites
+      used `.expect("MockKernel mutex poisoned")`, which
+      would re-panic the worker if the mutex was already
+      poisoned.  CommandKernel uses the
+      `.unwrap_or_else(|p| p.into_inner())` recovery
+      pattern.  Audit-3 normalised MockKernel to the
+      same pattern, eliminating an inconsistency and
+      making `catch_unwinding_submit` actually keep the
+      MockKernel-backed worker alive across a panic.
+    - **AR-3 #3 / #5 / #6 (LOW / INFO)** documentation
+      polish.  Fixed the `keep()` return-type docstring
+      (`(File, PathBuf)`, not `(File, TempPath)`).
+      Removed the unused `canon-cross-stack` dev-dep
+      from `canon-host/Cargo.toml`.  Clarified
+      `panic_message`'s payload-type expectations.
+    - **Plus a flaky-test fix found during the audit-3
+      run.**  `shutdown_drains_inflight_requests` and
+      `saturation_returns_busy` were calling `submit_one`
+      (which `.expect()`s a successful response).  Under
+      shutdown / saturation races, some connections
+      would reach the server but get closed without a
+      response (TCP reset), causing `submit_one` to
+      panic on the empty buffer.  Switched both tests
+      to use `try_submit_one` and tolerate transport
+      errors via `Option<u8>` semantics.  Verified
+      stable across 50 consecutive runs (0/50 failures).
+
   * **Workspace dependency additions.**  `rustls = "0.23"`
     with `ring` + `tls12` + `std` features (no
     `aws-lc-rs`, no logging, no `default-features`),

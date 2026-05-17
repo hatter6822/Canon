@@ -88,12 +88,10 @@ rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
 
 [dev-dependencies]
-# `canon-cross-stack` provides the cross-stack fixture loader the
-# integration tests use to load the canonical SignedAction /
-# Verdict corpus.
-canon-cross-stack = { workspace = true }
-# `tempfile` provides isolated tempdirs for the Unix-socket and
-# subprocess-kernel tests.  Pin lives at the workspace level.
+# `tempfile` is also a runtime dep (CommandKernel uses
+# `tempfile::Builder::tempfile_in`).  Listed here for clarity that
+# tests rely on it too (Unix-socket scratch dirs, fixture build-up).
+# Pin lives at the workspace level.
 tempfile = { workspace = true }
 # `proptest` powers the property tests over the wire-frame parser
 # and verdict encoding.

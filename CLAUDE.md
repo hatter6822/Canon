@@ -1363,7 +1363,8 @@ Closeout for the full per-sub-unit breakdown.  Headlines:
     mutex poison recovery in CommandKernel's spawn_lock;
     #15 documented BoundedQueue zero-capacity behaviour).
     A second audit pass (post-staging-extension) surfaced 9
-    findings; three CRITICAL / HIGH issues fixed in-PR:
+    findings; a third audit pass (post-audit-2) surfaced 6
+    findings.  Headline fixes across both passes:
     - **AR-2 #2 (HIGH)** `file.flush()` is a no-op on
       `std::fs::File`; replaced with `file.sync_data()` for
       NFS / FUSE work-dir durability.
@@ -1381,9 +1382,36 @@ Closeout for the full per-sub-unit breakdown.  Headlines:
       snapshot + receiver claim in `subscribe`).  New
       regression test
       `subscribe_during_advance_no_duplicate_events`.
+    - **AR-3 #1 (MEDIUM)** the AR-2 race-safety test was
+      passing for the wrong reason — the fixture's
+      `subscribe()` didn't drain channel-buffered events ≤
+      snapshot, but a 5ms sleep in the advancer ensured the
+      subscriber always won the race.  Audit-3 rewrote the
+      fixture to drain buffered events under the mutex AND
+      restructured the test into three deterministic
+      scenarios (subscribe-before-advance,
+      subscribe-after-advance, concurrent), proving strict
+      monotonicity in all orderings.
+    - **AR-3 #4 (LOW)** pinned the rustls crypto provider
+      per-config via `builder_with_provider` (audited:
+      `ring`) instead of relying on the process-global
+      default.  Defends against library consumers that
+      install a different provider.
+    - **AR-3 #2 (LOW)** MockKernel's `.expect("MockKernel
+      mutex poisoned")` lock calls replaced with the
+      `unwrap_or_else(|p| p.into_inner())` recovery
+      pattern, matching CommandKernel.
+    - **AR-3 #5 (LOW)** removed the unused
+      `canon-cross-stack` dev-dep from canon-host.
     - Plus a self-found defence-in-depth: clamped
       `ConnectionSlot::try_acquire`'s `cap` against
       `HARD_MAX_CONCURRENT_CONNECTIONS`.
+    - Plus a flaky-test fix:
+      `shutdown_drains_inflight_requests` and
+      `saturation_returns_busy` now use `try_submit_one`
+      and tolerate transport errors during shutdown /
+      concurrency races (the strict assertion path was
+      panicking on rare connection-refused outcomes).
     Final gates:
     - `cargo build --workspace --all-targets --locked` —
       green.

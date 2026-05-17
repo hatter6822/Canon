@@ -359,7 +359,7 @@ pub mod mock {
         /// exhausted.  Passing an empty `Vec` reverts to "always
         /// Ok".
         pub fn set_responses(&self, responses: Vec<KernelResponse>) {
-            let mut inner = self.inner.lock().expect("MockKernel mutex poisoned");
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             inner.responses = responses;
             inner.next_response = 0;
         }
@@ -375,7 +375,7 @@ pub mod mock {
         /// [`Kernel::ok_admission_stage`]; the wire byte returned
         /// by `submit` is unchanged.
         pub fn set_ok_stage(&self, stage: AdmissionStage) {
-            let mut inner = self.inner.lock().expect("MockKernel mutex poisoned");
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             inner.ok_stage = stage;
         }
 
@@ -384,7 +384,7 @@ pub mod mock {
         pub fn recorded(&self) -> Vec<Vec<u8>> {
             self.inner
                 .lock()
-                .expect("MockKernel mutex poisoned")
+                .unwrap_or_else(|p| p.into_inner())
                 .recorded
                 .clone()
         }
@@ -394,7 +394,7 @@ pub mod mock {
         pub fn len(&self) -> usize {
             self.inner
                 .lock()
-                .expect("MockKernel mutex poisoned")
+                .unwrap_or_else(|p| p.into_inner())
                 .recorded
                 .len()
         }
@@ -408,7 +408,7 @@ pub mod mock {
 
     impl Kernel for MockKernel {
         fn submit(&self, signed_action_bytes: &[u8]) -> KernelResponse {
-            let mut inner = self.inner.lock().expect("MockKernel mutex poisoned");
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             inner.recorded.push(signed_action_bytes.to_vec());
             if inner.responses.is_empty() {
                 return KernelResponse::from_verdict(Verdict::Ok);
@@ -810,18 +810,18 @@ pub mod command {
             // Disarm the auto-delete-on-drop behaviour of
             // `NamedTempFile` so the file persists long enough for
             // the subprocess to read it.  `keep()` consumes the
-            // `NamedTempFile` and returns `(File, TempPath)`.  The
-            // `File` is our handle; the `TempPath` (bound below as
-            // `_temp_path_handle`) carries the path but, post-
-            // `keep`, no longer schedules deletion on drop.  We
-            // own deletion explicitly at step 5 below.
+            // `NamedTempFile` and returns `(File, PathBuf)`; the
+            // `PathBuf`'s Drop is just deallocation, so the file
+            // is NOT auto-deleted.  We own deletion explicitly at
+            // step 5 below.
             //
             // If `keep()` returns `Err`, the inner `NamedTempFile`
-            // is preserved on the error value; dropping the error
-            // (when we early-return) re-arms auto-delete, so the
+            // is preserved on the `PersistError` value; dropping
+            // the error (when we early-return) re-arms the inner
+            // `NamedTempFile`'s auto-delete, so the
             // partially-created file is cleaned up.
             {
-                let (mut file, _temp_path_handle) = match temp_file.keep() {
+                let (mut file, _kept_path) = match temp_file.keep() {
                     Ok((f, p)) => (f, p),
                     Err(e) => {
                         return KernelResponse::with_reason(
@@ -1666,17 +1666,32 @@ mod tests {
         assert_eq!(centralized.stage, AdmissionStage::Finalized);
     }
 
-    /// AR-RHC-audit-2 #8: subscribe-during-advance race.  This
-    /// test demonstrates that the canonical atomic-snapshot
-    /// pattern (hold a single mutex across both snapshot and
-    /// advance) eliminates duplicate-event delivery even when a
-    /// subscriber races with stage advancement.
+    /// AR-RHC-audit-2 #8 / audit-3 #1: subscribe-during-advance
+    /// race.  This test demonstrates that a correctly-implemented
+    /// `SubscribableKernel` satisfies strict-increasing
+    /// monotonicity under BOTH possible race orderings:
     ///
-    /// The test sets up an action, spawns a concurrent advancer
-    /// thread that performs `LocallyAdmitted → Sequenced →
-    /// Finalized` while the main thread races to subscribe.  The
-    /// observed sequence (`current` then `events`) MUST be
-    /// strictly increasing — no stage may appear twice.
+    ///   1. **subscribe-before-advance**: subscriber registers
+    ///      before any advance() runs.  Observes
+    ///      `[LocallyAdmitted, Sequenced, Finalized]`.
+    ///   2. **subscribe-after-advance**: subscriber registers
+    ///      AFTER the advancer has driven the action all the way
+    ///      to Finalized.  Observes `[Finalized]` ONLY — the
+    ///      buffered `Sequenced` event was drained inside
+    ///      `subscribe()` (because it's ≤ current=Finalized).
+    ///
+    /// The fixture's `subscribe()` follows the canonical
+    /// "atomic snapshot rule" by draining the channel under the
+    /// mutex AFTER reading `current`: every buffered event is ≤
+    /// current (since the advance held the same mutex), so
+    /// discarding them all leaves the channel empty.  Future
+    /// advances send strictly-greater events, satisfying the
+    /// strict-increasing contract.
+    ///
+    /// Without the drain, the subscribe-after-advance scenario
+    /// would observe `[Finalized, Sequenced, Finalized]` —
+    /// strict-monotonicity violation.  Audit-3 #1 found this
+    /// bug in the original fixture.
     #[test]
     fn subscribe_during_advance_no_duplicate_events() {
         use std::collections::HashMap;
@@ -1724,62 +1739,131 @@ mod tests {
         }
         impl SubscribableKernel for StagingKernel {
             fn subscribe(&self, action_id: &[u8]) -> Option<Subscription> {
+                // Hold the mutex across BOTH:
+                //   (a) reading `slot.current`
+                //   (b) draining any channel-buffered events ≤
+                //       current that were sent before subscribe.
+                // Step (b) is the load-bearing fix audit-3 #1
+                // identified: without it, a late subscriber would
+                // see `current = Finalized` AND a buffered
+                // `Sequenced` event still in the channel,
+                // violating strict-monotonicity.
                 let mut guard = self.actions.lock().unwrap();
                 let slot = guard.get_mut(action_id)?;
+                let current = slot.current;
                 let rx = slot.rx.take()?;
+                // Drain buffered events.  Under the mutex, no
+                // concurrent advance can send; after this loop
+                // returns Empty, the channel is empty.  Every
+                // drained event satisfies `event <= current`
+                // because advance() is monotonically increasing
+                // and updates `current` under this same mutex.
+                while rx.try_recv().is_ok() {}
                 Some(Subscription {
-                    current: slot.current,
+                    current,
                     events: rx,
                 })
             }
         }
 
+        // --- Scenario 1: subscribe-before-advance ---
         let kernel = std::sync::Arc::new(StagingKernel {
             actions: Mutex::new(HashMap::new()),
         });
-        kernel.submit(b"action");
+        kernel.submit(b"a1");
+        let sub1 = kernel.subscribe(b"a1").expect("sub1");
+        assert_eq!(sub1.current, AdmissionStage::LocallyAdmitted);
+        kernel.advance(b"a1", AdmissionStage::Sequenced);
+        kernel.advance(b"a1", AdmissionStage::Finalized);
 
-        // Start the advancer thread.  It hammers advance() with
-        // staggered stages.  The main thread races to subscribe.
-        let kernel_advance = std::sync::Arc::clone(&kernel);
-        let advancer = std::thread::spawn(move || {
-            // Sleep a tiny bit to give the subscriber a chance to
-            // race in either window (before all advances or after).
-            std::thread::sleep(Duration::from_millis(5));
-            kernel_advance.advance(b"action", AdmissionStage::Sequenced);
-            std::thread::sleep(Duration::from_millis(5));
-            kernel_advance.advance(b"action", AdmissionStage::Finalized);
-        });
-
-        // Race to subscribe.  Subscription may land before, between,
-        // or after the advances.
-        let sub = kernel.subscribe(b"action").expect("subscription");
-        advancer.join().unwrap();
-
-        // Collect ALL stages observed: `current` then events.
-        let mut observed = vec![sub.current];
-        while let Ok(s) = sub.events.recv_timeout(Duration::from_millis(100)) {
-            observed.push(s);
+        let mut observed1 = vec![sub1.current];
+        while let Ok(s) = sub1.events.recv_timeout(Duration::from_millis(50)) {
+            observed1.push(s);
         }
-
-        // Property #1: strict monotonicity over the entire observed
-        // sequence (no duplicates).
-        for window in observed.windows(2) {
+        // STRICT monotonicity: each event > previous.
+        for window in observed1.windows(2) {
             assert!(
                 window[0] < window[1],
-                "duplicate or regressing stage at {observed:?}"
+                "scenario 1: duplicate / regressing stage at {observed1:?}"
             );
         }
+        assert_eq!(
+            observed1,
+            vec![
+                AdmissionStage::LocallyAdmitted,
+                AdmissionStage::Sequenced,
+                AdmissionStage::Finalized,
+            ],
+            "scenario 1: subscribe-before-advance must observe full chain"
+        );
 
-        // Property #2: the final observed stage MUST be Finalized
-        // (the advancer ran to completion before we drained, and
-        // strict-monotonicity from initial LocallyAdmitted means
-        // the entire chain is reachable).
-        assert_eq!(*observed.last().unwrap(), AdmissionStage::Finalized);
+        // --- Scenario 2: subscribe-AFTER-advance (the bug case) ---
+        kernel.submit(b"a2");
+        // Drive the advancer fully BEFORE subscribing.  This is
+        // the ordering the original audit-3 test missed.
+        kernel.advance(b"a2", AdmissionStage::Sequenced);
+        kernel.advance(b"a2", AdmissionStage::Finalized);
 
-        // Property #3: the first observed stage is the kernel's
-        // `ok_admission_stage` or higher (depending on race
-        // window).  Never lower.
-        assert!(observed[0] >= AdmissionStage::LocallyAdmitted);
+        let sub2 = kernel.subscribe(b"a2").expect("sub2");
+        // With the drain in subscribe(), buffered Sequenced and
+        // Finalized events are discarded under the mutex.
+        // Subscriber observes only the snapshot current = Finalized.
+        assert_eq!(sub2.current, AdmissionStage::Finalized);
+        let mut observed2 = vec![sub2.current];
+        while let Ok(s) = sub2.events.recv_timeout(Duration::from_millis(50)) {
+            observed2.push(s);
+        }
+        // STRICT monotonicity: each event > previous (vacuously
+        // true if observed2.len() == 1).
+        for window in observed2.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "scenario 2: duplicate / regressing stage at {observed2:?}"
+            );
+        }
+        // The observed sequence MUST be exactly [Finalized] —
+        // no buffered events leak through.
+        assert_eq!(
+            observed2,
+            vec![AdmissionStage::Finalized],
+            "scenario 2: subscribe-after-advance must drain buffered events"
+        );
+
+        // --- Scenario 3: concurrent advancer + subscriber ---
+        // The previous version of this test had a 5ms sleep in
+        // the advancer that always let the subscriber win the
+        // race.  We now run both orderings deterministically via
+        // scenarios 1 and 2; the concurrent case below confirms
+        // strict monotonicity under genuine race conditions
+        // without making any timing assumption.
+        let kernel_c = std::sync::Arc::clone(&kernel);
+        kernel.submit(b"a3");
+        let advancer = std::thread::spawn(move || {
+            kernel_c.advance(b"a3", AdmissionStage::Sequenced);
+            kernel_c.advance(b"a3", AdmissionStage::Finalized);
+        });
+        let sub3 = kernel.subscribe(b"a3").expect("sub3");
+        advancer.join().unwrap();
+
+        let mut observed3 = vec![sub3.current];
+        while let Ok(s) = sub3.events.recv_timeout(Duration::from_millis(50)) {
+            observed3.push(s);
+        }
+        // STRICT monotonicity holds regardless of race ordering.
+        for window in observed3.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "scenario 3: duplicate / regressing stage at {observed3:?}"
+            );
+        }
+        assert_eq!(
+            *observed3.last().unwrap(),
+            AdmissionStage::Finalized,
+            "scenario 3: subscriber must eventually reach Finalized"
+        );
+        assert!(
+            observed3[0] >= AdmissionStage::LocallyAdmitted,
+            "scenario 3: initial stage must be at least LocallyAdmitted"
+        );
     }
 }

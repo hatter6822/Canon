@@ -125,10 +125,19 @@ impl TlsConfigBuilder {
         certs: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
     ) -> Result<Arc<ServerConfig>, TlsConfigError> {
-        // Install the process-global crypto provider.  Idempotent:
-        // if a provider is already installed, the call is a no-op
-        // and we don't fail.
+        // Per-config crypto-provider pinning (audit-3 #4).
+        // `builder_with_provider` takes the provider explicitly,
+        // so the resulting `ServerConfig` always uses `ring`
+        // regardless of any process-global default a downstream
+        // consumer of this crate may have installed (e.g.
+        // `aws-lc-rs` installed by a different test harness).  We
+        // ALSO still call `install_default` (best-effort
+        // idempotent) so callers that build a `rustls::ClientConfig`
+        // via the global default path get the same provider; the
+        // load-bearing pin for canon-host's server side is the
+        // explicit `builder_with_provider` call below.
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
 
         // Pick the protocol versions.
         let versions: &[&SupportedProtocolVersion] = if self.allow_tls12 {
@@ -137,7 +146,9 @@ impl TlsConfigBuilder {
             &[&rustls::version::TLS13]
         };
 
-        let builder = ServerConfig::builder_with_protocol_versions(versions);
+        let builder = ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(versions)
+            .map_err(|e| TlsConfigError::RustlsBuilderError(e.to_string()))?;
         let server_config = builder
             .with_no_client_auth()
             .with_single_cert(certs, key)
