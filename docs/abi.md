@@ -1116,6 +1116,30 @@ subscriber's eviction does not affect other subscribers — each
 has its own queue, its own lag counter, and its own dispatch
 thread.
 
+### 11.6.1 Graceful shutdown semantics
+
+When the server initiates graceful shutdown (operator stop, or
+extractor halt), it broadcasts a Shutdown signal to every live
+subscriber.  Per subscriber, the dispatch thread will emit
+exactly one `SERVER_SHUTDOWN` frame and close the TCP
+connection.
+
+**Post-shutdown event loss.**  The extractor may have already
+queued additional `EVENT` frames in some subscribers' channels
+*before* the shutdown signal arrived (those events were
+broadcast during the extractor's final batch).  The dispatch
+thread processes the channel in FIFO order; once it observes
+the `Shutdown` sentinel OR the `shutdown_requested` atomic
+flag, it emits `SERVER_SHUTDOWN` and closes — *any remaining
+Live events in the channel are silently dropped server-side*.
+
+Clients MUST treat `SERVER_SHUTDOWN` as terminal: stop reading,
+close the socket, and reconnect later (with `resume_from =
+last_delivered_seq` carried in the frame) to recover any dropped
+events from the cache.  Subscribers that miss `SERVER_SHUTDOWN`
+because their TCP read times out first will see a clean TCP
+FIN; they can rely on the same recovery semantics.
+
 ### 11.7 Subscriber capacity cap
 
 `--max-subscribers <N>` (default 256) bounds the number of

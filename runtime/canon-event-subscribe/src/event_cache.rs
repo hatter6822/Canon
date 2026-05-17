@@ -72,10 +72,18 @@ pub enum RangeOutcome {
         events: Vec<CachedEvent>,
     },
     /// The requested `from_seq` is older than the oldest cached
-    /// event.  Carries the oldest sequence the client could
-    /// successfully resume from.
+    /// event, OR the cache's front is a partial multi-event
+    /// batch.  Carries the smallest `resume_from` the client
+    /// can pass on a retry to receive a valid (complete-batch)
+    /// stream — NOT necessarily the oldest seq in the cache.
+    /// See [`EventCache::range`] for the partial-batch case
+    /// where this differs from `oldest_seq()`.
     OutOfWindow {
-        /// Oldest seq the cache still holds.
+        /// Smallest `resume_from` the client can pass on retry
+        /// to receive a valid (complete-batch) event stream.
+        /// In the normal case this is the cache's `oldest_seq`;
+        /// in the partial-batch-front case (M-1 audit) it is
+        /// `partial_seq + 1` to skip the incomplete batch.
         oldest_available_seq: u64,
     },
     /// The requested `from_seq` is at or past the cache's live

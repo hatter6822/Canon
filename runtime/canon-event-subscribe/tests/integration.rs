@@ -993,6 +993,17 @@ fn multi_event_per_frame_atomic_under_concurrent_subscribe() {
         .map(|h| h.join().unwrap_or_default())
         .collect();
 
+    // M-2 audit: guard against vacuous pass.  At least ONE
+    // subscriber must have received at least one event,
+    // otherwise the atomicity assertion below never runs (the
+    // test would trivially "pass" with no subscribers having
+    // delivered events).
+    let total_events: usize = all_received.iter().map(Vec::len).sum();
+    assert!(
+        total_events > 0,
+        "no subscriber received any events; test cannot verify atomicity invariant"
+    );
+
     // For each subscriber, verify atomic-batch delivery: for any
     // frame index they received events for, they must have
     // received ALL 3 events of that frame (a, b, AND c) — never
