@@ -391,6 +391,32 @@ impl Storage for SqliteStorage {
     }
 
     fn snapshot(&self) -> Result<Box<dyn StorageSnapshot + '_>, StorageError> {
+        let guard = self.lock();
+        // Defensive autocommit check: if a prior caller's
+        // commit-failure cleanup left the connection in a
+        // half-transaction state (mutex was released but the
+        // SQLite transaction wasn't), recover before we try
+        // BEGIN again.  This is the H-1 audit defense.
+        recover_autocommit_if_needed(&guard);
+        drop(guard);
+        // Re-acquire after recovery (we dropped to avoid the
+        // re-entrant-lock concern of nested guards).
+        self.snapshot_inner()
+    }
+
+    fn transaction(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
+        let guard = self.lock();
+        recover_autocommit_if_needed(&guard);
+        drop(guard);
+        self.transaction_inner()
+    }
+}
+
+impl SqliteStorage {
+    /// Internal helper: BEGIN DEFERRED + WAL-pin warmup, separated
+    /// from the trait method so it can be called after the
+    /// autocommit-recovery dance.
+    fn snapshot_inner(&self) -> Result<Box<dyn StorageSnapshot + '_>, StorageError> {
         // Acquire the connection mutex and BEGIN a deferred read
         // transaction.  The deferred mode means the transaction
         // doesn't actually grab a lock until the first SQL
@@ -460,7 +486,10 @@ impl Storage for SqliteStorage {
         }))
     }
 
-    fn transaction(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
+    /// Internal helper: BEGIN IMMEDIATE, separated from the trait
+    /// method so it can be called after the autocommit-recovery
+    /// dance.
+    fn transaction_inner(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
         let guard = self.lock();
         // BEGIN IMMEDIATE acquires the write lock at the BEGIN
         // statement itself (no warm-up needed).  Either the BEGIN
@@ -473,6 +502,36 @@ impl Storage for SqliteStorage {
             guard: Some(guard),
             ended: false,
         }))
+    }
+}
+
+/// Internal helper: if the connection has a stale open
+/// transaction (autocommit is off), force a ROLLBACK to recover.
+/// Called at the start of [`SqliteStorage::snapshot`] and
+/// [`SqliteStorage::transaction`] as defence-in-depth (audit H-1).
+///
+/// **Threat model.**  A previous caller's `snapshot()` or
+/// `transaction()` could leave the SQLite connection in a
+/// half-transaction state if BOTH the operation's primary cleanup
+/// AND the defensive ROLLBACK failed (e.g., back-to-back I/O
+/// errors).  Without recovery here, the next caller's `BEGIN`
+/// would fail with "cannot start a transaction within a
+/// transaction" until the process restarts.
+///
+/// Calling this at the start of each public BEGIN-issuing method
+/// guarantees forward progress under any failure pattern.
+fn recover_autocommit_if_needed(conn: &Connection) {
+    if !conn.is_autocommit() {
+        if let Err(e) = conn.execute_batch("ROLLBACK;") {
+            tracing::warn!(
+                error = %e,
+                "recovered from wedged transaction state via ROLLBACK; original transaction state was inconsistent"
+            );
+        } else {
+            tracing::debug!(
+                "recovered from wedged transaction state (autocommit was off; issued ROLLBACK)"
+            );
+        }
     }
 }
 
@@ -886,7 +945,22 @@ impl StorageTransaction for SqliteTransaction<'_> {
                 let rollback_result = guard.execute_batch("ROLLBACK;");
                 self.ended = true;
                 if let Err(rollback_err) = rollback_result {
-                    tracing::debug!(
+                    // Bumped from `debug` → `warn` per audit M-2.
+                    // A failed COMMIT followed by a failed
+                    // defensive ROLLBACK means the SQLite
+                    // connection may be in an inconsistent state;
+                    // operators running at INFO level would miss
+                    // a debug log.  WARN aligns with the snapshot
+                    // warmup and Drop log levels.
+                    //
+                    // NOTE: this is often benign — SQLite
+                    // typically auto-rolls-back on a constraint /
+                    // busy commit failure, after which our defensive
+                    // ROLLBACK returns "no transaction in progress".
+                    // The `recover_autocommit_if_needed` defense at
+                    // the start of the next snapshot/transaction
+                    // also handles this case.
+                    tracing::warn!(
                         rollback_error = %rollback_err,
                         commit_error = %e,
                         "transaction commit failed; defensive ROLLBACK also failed (likely already auto-rolled-back)"

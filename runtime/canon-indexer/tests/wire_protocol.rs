@@ -291,3 +291,66 @@ fn connect_failure() {
     let result = SubscribeClient::connect("127.0.0.1:1", 0, 1024);
     assert!(matches!(result, Err(ClientError::Io(_))));
 }
+
+/// **Empty-payload regression**: a zero-length EVENT frame
+/// (declared length = 0) decodes without panicking.  The
+/// resulting `Event` payload is an empty byte vector — the
+/// indexer's decoder will reject it as `Truncated` (since the
+/// constructor tag head requires 9 bytes), but the client
+/// itself MUST NOT panic on `vec![0u8; 0]`.
+#[test]
+fn empty_payload_zero_length_frame() {
+    let (listener, addr) = bind_listener();
+    // EVENT frame with declared length = 0 and no payload bytes.
+    let mut frame = vec![1u8]; // KIND_EVENT
+    frame.extend_from_slice(&7u64.to_be_bytes()); // seq=7
+    frame.extend_from_slice(&0u32.to_be_bytes()); // length=0
+                                                  // No payload bytes.
+    let frames = vec![frame];
+
+    let server_thread = thread::spawn(move || run_mock_server(listener, frames));
+
+    let mut client = SubscribeClient::connect(&addr, 0, 1024 * 1024).unwrap();
+    let result = client.read_frame().unwrap();
+    match result {
+        ServerFrame::Event { seq, payload } => {
+            assert_eq!(seq, 7);
+            assert_eq!(payload.len(), 0);
+        }
+        other => panic!("expected Event{{seq=7, payload=[]}}, got {other:?}"),
+    }
+    let _ = server_thread.join().unwrap();
+}
+
+/// **DoS bound**: a server claiming an oversize declared length
+/// (just under the configured max) doesn't actually allocate
+/// that much memory unless we read the payload.  We can't
+/// directly assert on allocation, but we can verify the
+/// declared-length check fires before the read attempts to
+/// pre-allocate.
+#[test]
+fn oversize_declared_length_rejected_before_allocation() {
+    let (listener, addr) = bind_listener();
+    // Declared length = 2x configured max.  The client should
+    // reject without reading any payload bytes.
+    let max_frame = 1024;
+    let mut frame = vec![1u8];
+    frame.extend_from_slice(&1u64.to_be_bytes());
+    frame.extend_from_slice(&((max_frame * 2) as u32).to_be_bytes());
+    // No payload bytes — we never read them, so the check must
+    // fire on the length prefix alone.
+    let frames = vec![frame];
+
+    let server_thread = thread::spawn(move || run_mock_server(listener, frames));
+
+    let mut client = SubscribeClient::connect(&addr, 0, max_frame).unwrap();
+    let result = client.read_frame();
+    match result {
+        Err(ClientError::OversizeFrame { declared, max }) => {
+            assert_eq!(declared, max_frame * 2);
+            assert_eq!(max, max_frame);
+        }
+        other => panic!("expected OversizeFrame, got {other:?}"),
+    }
+    let _ = server_thread.join().unwrap();
+}

@@ -238,9 +238,13 @@ impl SubscribeClient {
         handshake[0] = KIND_SUBSCRIBE;
         handshake[1..9].copy_from_slice(&resume_from.to_be_bytes());
         reader.get_mut().write_all(&handshake)?;
-        // No flush needed on raw TcpStream (writes are unbuffered
-        // at the Rust level).  Keeping the comment for future
-        // implementers who add intermediate buffering.
+        // Defensive flush.  std::net::TcpStream is unbuffered at
+        // the Rust level (writes go straight to the kernel
+        // socket-send queue), so this flush is a no-op today —
+        // but it's free insurance against a future maintainer
+        // wrapping in a `BufWriter` and silently breaking the
+        // handshake delivery.  Per audit L-3.
+        reader.get_mut().flush()?;
         Ok(Self {
             reader,
             max_frame_size,

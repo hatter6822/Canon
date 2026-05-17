@@ -120,6 +120,15 @@ use crate::decoder::DecodeError;
 use crate::event::{ActorId, Event, ResourceId};
 use crate::INDEXER_IDENTIFIER;
 
+/// Maximum number of events allowed in a single `apply_batch`
+/// call.  Defence-in-depth bound mirroring
+/// `canon-event-subscribe::extract::HARD_MAX_EVENT_COUNT` (1024).
+/// A batch that exceeds this is treated as a wire-protocol
+/// violation; the indexer halts the batch rather than
+/// allocating an unbounded HashSet for the two-pass dispatch
+/// pre-computation.
+pub const INDEXER_MAX_BATCH_EVENTS: usize = 1024;
+
 /// Indexer-level errors.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexerError {
@@ -148,6 +157,18 @@ pub enum IndexerError {
     /// one event per log frame.
     #[error("empty event batch")]
     EmptyBatch,
+    /// The event batch exceeds [`INDEXER_MAX_BATCH_EVENTS`].
+    /// Indicates an extractor / wire protocol bug — the upstream
+    /// canon-event-subscribe bounds batches at `HARD_MAX_EVENT_COUNT`
+    /// (1024) per its docstring.  Defence-in-depth in case the
+    /// wire format ever loosens the bound silently.
+    #[error("batch too large: {size} events > {max}")]
+    BatchTooLarge {
+        /// The offending batch size.
+        size: usize,
+        /// The configured maximum.
+        max: usize,
+    },
     /// The event's seq is at or before the cursor.  Indicates a
     /// wire-protocol bug: the server should never deliver events
     /// the indexer has already processed.
@@ -182,6 +203,13 @@ pub enum IndexerError {
     /// shows the old value, the commit truly failed.  Either way,
     /// the caller MUST treat the in-memory cursor as authoritative
     /// (via `cursor()`) when retrying.
+    ///
+    /// **Recovery semantics.**  This variant is RECOVERABLE: the
+    /// in-memory cursor has been resynced to disk; the daemon
+    /// loop can continue (the next `apply_batch` for the same seq
+    /// returns `StaleEvent`, and the server will replay subsequent
+    /// events).  The daemon SHOULD log at WARN and reconnect
+    /// rather than halt.
     #[error("commit ambiguous at seq {seq} (disk cursor after reload: {disk_cursor})")]
     CommitAmbiguous {
         /// The seq being committed.
@@ -189,6 +217,37 @@ pub enum IndexerError {
         /// The disk cursor value AFTER reload from storage.
         disk_cursor: u64,
     },
+    /// `tx.commit()` AND the subsequent disk-cursor reload BOTH
+    /// failed.  The on-disk state is now unknown — we don't know
+    /// whether the batch's mutations persisted.  The indexer
+    /// marks itself as poisoned; subsequent `apply_batch` calls
+    /// return [`IndexerError::Poisoned`] until the operator
+    /// restarts.
+    ///
+    /// **Recovery semantics.**  This variant is UNRECOVERABLE
+    /// within the current process.  The daemon MUST halt; the
+    /// operator inspects the on-disk state (e.g., via
+    /// `canon-indexer query`), confirms no corruption, and
+    /// restarts.
+    #[error(
+        "cursor recovery failed at seq {seq} (commit error: {commit_error}; cursor read error: {cursor_error})"
+    )]
+    CursorRecoveryFailed {
+        /// The seq being committed.
+        seq: u64,
+        /// The original commit error (string form — we don't
+        /// preserve the structured error because the cursor read
+        /// also failed).
+        commit_error: String,
+        /// The cursor-read error.
+        cursor_error: String,
+    },
+    /// The indexer is poisoned due to a previous
+    /// [`IndexerError::CursorRecoveryFailed`].  All subsequent
+    /// `apply_batch` calls return this error until the process
+    /// restarts.
+    #[error("indexer poisoned by a previous cursor-recovery failure; restart required")]
+    Poisoned,
 }
 
 /// An indexer instance backed by a [`Storage`].
@@ -203,12 +262,19 @@ pub struct Indexer<'a, S: Storage + ?Sized> {
     /// fast access.  Synced with the on-disk cursor at startup
     /// and after each successful batch commit.
     cursor: u64,
+    /// Set to `true` after a [`IndexerError::CursorRecoveryFailed`]
+    /// — the in-memory cursor may not reflect disk; subsequent
+    /// `apply_batch` calls reject with [`IndexerError::Poisoned`].
+    /// Recovery requires restarting the process (so the
+    /// in-memory cursor reloads from disk via [`Indexer::open`]).
+    poisoned: bool,
 }
 
 impl<S: Storage + ?Sized> std::fmt::Debug for Indexer<'_, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Indexer")
             .field("cursor", &self.cursor)
+            .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
 }
@@ -228,7 +294,18 @@ impl<'a, S: Storage + ?Sized> Indexer<'a, S> {
         ensure_identifier(storage, INDEXER_IDENTIFIER)?;
         let cursor = read_cursor(storage)?;
         tracing::info!(cursor, identifier = INDEXER_IDENTIFIER, "indexer opened");
-        Ok(Self { storage, cursor })
+        Ok(Self {
+            storage,
+            cursor,
+            poisoned: false,
+        })
+    }
+
+    /// `true` if a previous `apply_batch` cascade-failed (commit
+    /// AND cursor reload both failed).  Subsequent `apply_batch`
+    /// calls reject with [`IndexerError::Poisoned`].
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
 
     /// Current cursor value (last-committed seq).
@@ -253,8 +330,20 @@ impl<'a, S: Storage + ?Sized> Indexer<'a, S> {
     /// remains at its previous value).  Returns
     /// [`IndexerError::Storage`] on transaction commit failure.
     pub fn apply_batch(&mut self, seq: u64, events: &[Event]) -> Result<(), IndexerError> {
+        // Poisoned check first: if a previous cascade-failure
+        // left the in-memory cursor in an unknown state, refuse
+        // any further operations until the process restarts.
+        if self.poisoned {
+            return Err(IndexerError::Poisoned);
+        }
         if events.is_empty() {
             return Err(IndexerError::EmptyBatch);
+        }
+        if events.len() > INDEXER_MAX_BATCH_EVENTS {
+            return Err(IndexerError::BatchTooLarge {
+                size: events.len(),
+                max: INDEXER_MAX_BATCH_EVENTS,
+            });
         }
         if seq <= self.cursor {
             return Err(IndexerError::StaleEvent {
@@ -332,17 +421,43 @@ impl<'a, S: Storage + ?Sized> Indexer<'a, S> {
                 // succeeded despite the error report; if disk
                 // shows the previous value, the commit truly
                 // rolled back.
-                let disk_cursor = read_cursor(self.storage).map_err(IndexerError::Cursor)?;
-                self.cursor = disk_cursor;
-                if disk_cursor >= seq {
-                    // The commit actually succeeded.  Surface the
-                    // CommitAmbiguous error so the caller knows
-                    // the original error reported wasn't fatal.
-                    Err(IndexerError::CommitAmbiguous { seq, disk_cursor })
-                } else {
-                    // The commit truly failed.  Propagate the
-                    // original commit error.
-                    Err(IndexerError::Storage(commit_err))
+                //
+                // **Cascading-failure handling (audit C-2)**:
+                // if read_cursor ITSELF fails, we don't know the
+                // disk state — the indexer is poisoned and MUST
+                // halt until restart.  Without this defense, the
+                // in-memory cursor stays stale; a subsequent
+                // `apply_batch` would skip a stale-seq check and
+                // potentially double-apply.
+                match read_cursor(self.storage) {
+                    Ok(disk_cursor) => {
+                        self.cursor = disk_cursor;
+                        if disk_cursor >= seq {
+                            // The commit actually succeeded.  Surface
+                            // the CommitAmbiguous error so the caller
+                            // knows the original error reported wasn't
+                            // fatal.  Caller (daemon loop) should log
+                            // a WARN and continue — the cursor is
+                            // synced.
+                            Err(IndexerError::CommitAmbiguous { seq, disk_cursor })
+                        } else {
+                            // The commit truly failed.  Propagate the
+                            // original commit error.
+                            Err(IndexerError::Storage(commit_err))
+                        }
+                    }
+                    Err(cursor_err) => {
+                        // Cascade failure.  Poison the indexer so
+                        // any subsequent apply_batch refuses to
+                        // run.  Operator must inspect on-disk
+                        // state and restart.
+                        self.poisoned = true;
+                        Err(IndexerError::CursorRecoveryFailed {
+                            seq,
+                            commit_error: commit_err.to_string(),
+                            cursor_error: cursor_err.to_string(),
+                        })
+                    }
                 }
             }
         }

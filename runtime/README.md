@@ -234,9 +234,13 @@ runtime/
 │   └── tests/
 │       ├── integration.rs           — end-to-end pipeline scenarios
 │       ├── property.rs              — decoder roundtrips + balance oracle
+│       │                              + decoder fuzz
 │       ├── wire_protocol.rs         — mock-server frame round-trips
-│       └── daemon_loop.rs           — partial-batch / two-pass regression
-│                                      tests against a mock server
+│       │                              + DoS-bound regressions
+│       ├── daemon_loop.rs           — partial-batch / two-pass regression
+│       │                              tests against a mock server
+│       └── fault_injection.rs       — cursor-recovery / commit-failure /
+│                                      poisoning recovery via FaultyStorage
 ├── canon-faultproof-observer/       — RH-G skeleton (binary + lib)
 ├── canon-bench/                     — RH-F skeleton
 │
@@ -255,11 +259,12 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (900 tests at the RH-E landing —
-# +198 from RH-D: 67 in the new `canon-storage` library (49 unit +
-# 10 integration + 8 property) and 133 in the new `canon-indexer`
-# crate (103 unit + 7 integration + 5 property + 10 wire-protocol +
-# 8 daemon-loop integration); up from 702 at the RH-D landing).
+# Run every member crate's tests (913 tests at the RH-E
+# audit-pass-2 landing — +211 from RH-D: 67 in `canon-storage`
+# (49 unit + 10 integration + 8 property) and 137 in `canon-indexer`
+# (108 unit + 7 integration + 7 property + 12 wire-protocol +
+# 8 daemon-loop + 4 fault-injection); up from 702 at the RH-D
+# landing).
 cargo test --workspace
 
 # Lint gate: every clippy warning is promoted to a hard error.

@@ -286,4 +286,34 @@ proptest! {
         prop_assert_eq!(indexer.cursor(), applied);
         prop_assert!(indexer.cursor() <= last_seq);
     }
+
+    /// **Decoder fuzz**: arbitrary byte input either decodes
+    /// successfully or returns a typed `DecodeError` — NEVER
+    /// panics, NEVER hangs.  Property-test surface over the
+    /// decoder's robustness; complements the hand-picked
+    /// adversarial patterns in `decoder::tests::decoder_does_not_panic_on_random_input`.
+    #[test]
+    fn decoder_fuzz_never_panics(bytes in vec(any::<u8>(), 0..=512)) {
+        // Either Ok or Err — never panic.  No assertions on the
+        // outcome (any byte string is permissible input); the
+        // load-bearing assertion is "does not panic".
+        let _ = canon_indexer::decoder::decode_event(&bytes);
+    }
+
+    /// **Decoder fuzz with valid CBE prefix**: bytes prefixed
+    /// with a valid CBE uint head (tag=0x00 + 8 LE bytes)
+    /// followed by arbitrary tail.  Exercises the
+    /// constructor-tag dispatch path more thoroughly.
+    #[test]
+    fn decoder_fuzz_with_valid_tag_prefix(
+        tag in 0u64..=20,
+        tail in vec(any::<u8>(), 0..=256)
+    ) {
+        let mut payload = vec![0x00u8]; // CBE uint tag
+        payload.extend_from_slice(&tag.to_le_bytes());
+        payload.extend(tail);
+        // Either Ok (for valid tag values + well-formed tail)
+        // or Err — never panic.
+        let _ = canon_indexer::decoder::decode_event(&payload);
+    }
 }

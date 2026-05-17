@@ -2876,6 +2876,37 @@ table.  Headline implementation notes:
       `canon_indexer::daemon` so the partial-batch fix
       has unit-test coverage.
 
+  * **Second audit pass (post-first-fix).**  Independent
+    re-audit surfaced 4 new findings introduced by the
+    first audit's fixes plus 6 missed items; all
+    addressed.  See CLAUDE.md "Second audit pass" section
+    for the full catalogue.  Headlines:
+    - **Broken test assertion**: a `matches!(...)` without
+      `assert!` wrapper silently passed any variant in the
+      partial-batch test.  Fixed.
+    - **Cascading-failure cursor desync**: commit failure
+      + cursor-reload failure now sets a `poisoned` flag
+      and returns `IndexerError::CursorRecoveryFailed`.
+      Subsequent `apply_batch` calls reject with
+      `IndexerError::Poisoned` until the process restarts.
+      Fault-injection tests via a `FaultyStorage` adaptor.
+    - **Autocommit-recovery defense**: new
+      `recover_autocommit_if_needed` helper at the start
+      of every `snapshot()` / `transaction()` defends
+      against wedged SQLite connection state.
+    - **CommitAmbiguous is recoverable**: daemon loop now
+      logs WARN and continues rather than halting.
+    - **Bounded batch size**: new
+      `INDEXER_MAX_BATCH_EVENTS = 1024` constant; oversize
+      batches return `IndexerError::BatchTooLarge`.
+    - **encode_event_checked**: fallible encoder variant
+      that rejects amounts `>= 2^64`.  The unchecked
+      variant keeps Lean-encoder-matching truncation
+      semantics for the test path.
+    - Tests grew by 13 (5 encode_event_checked, 2 decoder
+      fuzz, 2 wire-protocol DoS, 4 fault-injection).
+      Final test count: 913.
+
   * **Workspace version bump.**  `0.1.3 → 0.2.0` (minor bump
     — RH-E ships two substantial new public APIs in
     `canon-storage` and `canon-indexer`; per the workspace

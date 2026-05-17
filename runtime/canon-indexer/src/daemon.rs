@@ -144,6 +144,15 @@ pub fn consume_batched(
     let mut batch = match decode_event(&first_payload) {
         Ok(e) => vec![e],
         Err(e) => {
+            // Per audit L-4: log the partial-batch-discard
+            // context for the first-frame decode case, matching
+            // the EOF/client-error paths below.
+            tracing::debug!(
+                current_seq,
+                in_flight_events = 0_usize,
+                error = %e,
+                "first-frame decode failed; no batch accumulated, cursor unchanged"
+            );
             return ConsumeOutcome::IndexerError(IndexerError::Decode {
                 seq: current_seq,
                 source: e,

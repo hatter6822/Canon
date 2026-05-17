@@ -162,8 +162,32 @@ fn run_daemon(cfg: DaemonConfig) -> OperatorExitCode {
                 reconnects = reconnects.saturating_add(1);
             }
             ConsumeOutcome::IndexerError(e) => {
-                tracing::error!(error = %e, "indexer error; surfacing operator action");
-                return OperatorExitCode::OperatorAction;
+                // Distinguish recoverable from terminal indexer errors:
+                //   * `CommitAmbiguous` → commit succeeded but report
+                //     was ambiguous; the in-memory cursor has been
+                //     resynced from disk.  Safe to retry: the next
+                //     subscribe will resume from the corrected cursor.
+                //     Log at WARN so operators see it without halting.
+                //   * `Poisoned` and `CursorRecoveryFailed` → unsafe to
+                //     continue; halt and require operator action.
+                //   * All other indexer errors (decode, balance,
+                //     protocol violation, etc.) → halt with operator
+                //     action.
+                match &e {
+                    canon_indexer::indexer::IndexerError::CommitAmbiguous { seq, disk_cursor } => {
+                        tracing::warn!(
+                            seq,
+                            disk_cursor,
+                            "commit ambiguous; cursor resynced from disk, continuing"
+                        );
+                        // Treat like CleanEof: re-subscribe with the
+                        // (now-correct) cursor and continue.
+                    }
+                    _ => {
+                        tracing::error!(error = %e, "indexer error; surfacing operator action");
+                        return OperatorExitCode::OperatorAction;
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(cfg.reconnect_backoff_ms));

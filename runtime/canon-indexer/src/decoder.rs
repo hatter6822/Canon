@@ -385,15 +385,49 @@ fn write_byte_string(out: &mut Vec<u8>, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
+/// Errors surfaced by [`encode_event_checked`].  Mirrors the
+/// shape of `canon-l1-ingest/src/encoding.rs::EncodeError`.
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum EncodeError {
+    /// An `Amount` (or `Nonce`) field exceeded the CBE
+    /// canonical-encoding bound (`< 2^64`).  The Lean encoder
+    /// silently truncates such values; the Rust checked path
+    /// rejects them so callers can surface the error to the
+    /// operator.
+    #[error("amount field {value} exceeds 2^64 CBE encoding bound")]
+    AmountExceedsBound {
+        /// The offending field's value.
+        value: u128,
+    },
+}
+
+/// Encode an Amount (u128 that fits in u64) into `out` — fallible.
+/// Returns `EncodeError::AmountExceedsBound` if the value is
+/// `>= 2^64`.  Mirrors `canon-l1-ingest::encoding::encode_u128_checked`.
+fn write_amount_checked(out: &mut Vec<u8>, amount: Amount) -> Result<(), EncodeError> {
+    if amount >= 1u128 << 64 {
+        return Err(EncodeError::AmountExceedsBound { value: amount });
+    }
+    #[allow(clippy::cast_possible_truncation)] // bound-checked above
+    let n = amount as u64;
+    write_uint(out, n);
+    Ok(())
+}
+
 /// Encode an Amount (u128 fitting in u64) into `out`.
+///
+/// **Silent truncation.**  The CBE convention restricts amounts
+/// to `< 2^64`; this function silently truncates the high 64
+/// bits of larger values, matching the Lean encoder's
+/// documented behaviour for out-of-bounds `Nat`s.
+///
+/// Callers that want explicit rejection on overflow use
+/// [`encode_event_checked`] (which calls [`write_amount_checked`]
+/// instead).  This unchecked variant is reserved for the test
+/// path where synthetic events are bounded by construction;
+/// production code that handles arbitrary Amount values should
+/// route through the checked variant.
 fn write_amount(out: &mut Vec<u8>, amount: Amount) {
-    // The CBE convention restricts amounts to < 2^64.  We trust
-    // the caller has validated; this is a pure encoder.  For
-    // values >= 2^64 we silently truncate (matches Lean's
-    // documented behaviour for out-of-bounds Nats).  Callers
-    // who need rejection use `encode_event_checked` (deferred —
-    // not currently needed by callers since synthetic events
-    // are bounded by construction).
     let n = (amount & u128::from(u64::MAX)) as u64;
     write_uint(out, n);
 }
@@ -541,6 +575,151 @@ pub fn encode_event(event: &Event) -> Vec<u8> {
     out
 }
 
+/// Re-encode an event back to bytes, rejecting amounts >= 2^64
+/// with [`EncodeError::AmountExceedsBound`].
+///
+/// This is the **safe** variant of [`encode_event`].  Production
+/// code that handles arbitrary Amount values (e.g., values sourced
+/// from operator input or external systems) should route through
+/// this function instead of `encode_event`.  The unchecked
+/// `encode_event` silently truncates to match the Lean encoder's
+/// documented behaviour for out-of-bounds Nats — appropriate for
+/// the test path where Amounts are bounded by construction, but a
+/// footgun for general use.
+///
+/// # Errors
+///
+/// Returns [`EncodeError::AmountExceedsBound`] if any of the
+/// event's `Amount` / `Nonce` / `payout` fields is `>= 2^64`.
+pub fn encode_event_checked(event: &Event) -> Result<Vec<u8>, EncodeError> {
+    let mut out = Vec::new();
+    write_uint(&mut out, u64::from(event.tag()));
+    match event {
+        Event::BalanceChanged {
+            resource,
+            actor,
+            old_value,
+            new_value,
+        } => {
+            write_uint(&mut out, *resource);
+            write_uint(&mut out, *actor);
+            write_amount_checked(&mut out, *old_value)?;
+            write_amount_checked(&mut out, *new_value)?;
+        }
+        Event::NonceAdvanced {
+            actor,
+            old_nonce,
+            new_nonce,
+        } => {
+            write_uint(&mut out, *actor);
+            write_amount_checked(&mut out, *old_nonce)?;
+            write_amount_checked(&mut out, *new_nonce)?;
+        }
+        Event::IdentityRegistered { actor, key } => {
+            write_uint(&mut out, *actor);
+            write_byte_string(&mut out, key);
+        }
+        Event::IdentityRevoked { actor } | Event::LocalPolicyRevoked { actor } => {
+            write_uint(&mut out, *actor);
+        }
+        Event::TimeRecorded { time } => {
+            write_uint(&mut out, *time);
+        }
+        Event::DisputeFiled {
+            challenger,
+            target_idx,
+        } => {
+            write_uint(&mut out, *challenger);
+            write_uint(&mut out, *target_idx);
+        }
+        Event::DisputeWithdrawn { dispute_idx } => {
+            write_uint(&mut out, *dispute_idx);
+        }
+        Event::VerdictApplied {
+            dispute_idx,
+            outcome_tag,
+        } => {
+            write_uint(&mut out, *dispute_idx);
+            write_uint(&mut out, *outcome_tag);
+        }
+        Event::RewardIssued {
+            resource,
+            recipient,
+            amount,
+        } => {
+            write_uint(&mut out, *resource);
+            write_uint(&mut out, *recipient);
+            write_amount_checked(&mut out, *amount)?;
+        }
+        Event::WithdrawalRequested {
+            resource,
+            sender,
+            amount,
+            recipient_l1,
+            withdrawal_id,
+        } => {
+            write_uint(&mut out, *resource);
+            write_uint(&mut out, *sender);
+            write_amount_checked(&mut out, *amount)?;
+            write_eth_address(&mut out, recipient_l1);
+            write_uint(&mut out, *withdrawal_id);
+        }
+        Event::DepositCredited {
+            resource,
+            recipient,
+            amount,
+            deposit_id,
+        } => {
+            write_uint(&mut out, *resource);
+            write_uint(&mut out, *recipient);
+            write_amount_checked(&mut out, *amount)?;
+            write_uint(&mut out, *deposit_id);
+        }
+        Event::LocalPolicyDeclared { actor, policy } => {
+            write_uint(&mut out, *actor);
+            write_byte_string(&mut out, policy);
+        }
+        Event::FaultProofGameOpened {
+            game_id,
+            challenger,
+            disputed_start_idx,
+            disputed_end_idx,
+            binding_hash,
+        } => {
+            write_uint(&mut out, *game_id);
+            write_uint(&mut out, *challenger);
+            write_uint(&mut out, *disputed_start_idx);
+            write_uint(&mut out, *disputed_end_idx);
+            write_byte_string(&mut out, binding_hash);
+        }
+        Event::FaultProofBisectionStep {
+            game_id,
+            round,
+            party,
+            idx,
+            commit,
+        } => {
+            write_uint(&mut out, *game_id);
+            write_uint(&mut out, *round);
+            write_uint(&mut out, *party);
+            write_uint(&mut out, *idx);
+            write_byte_string(&mut out, commit);
+        }
+        Event::FaultProofGameSettled {
+            game_id,
+            winner,
+            loser,
+            payout,
+        } => {
+            write_uint(&mut out, *game_id);
+            write_uint(&mut out, *winner);
+            write_uint(&mut out, *loser);
+            write_amount_checked(&mut out, *payout)?;
+        }
+    }
+    Ok(out)
+}
+
 /// Convenience: an Amount value as a fixed-length 16-byte BE u128
 /// byte string suitable for storage as a balance value.  Used by
 /// the balance store and the indexer.  Not part of the CBE wire
@@ -577,8 +756,8 @@ type _Aliases = (
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_event, encode_event, DecodeError, ETH_ADDRESS_BYTES, HARD_MAX_BYTE_STRING_LEN,
-        HEAD_LEN,
+        decode_event, encode_event, encode_event_checked, DecodeError, ETH_ADDRESS_BYTES,
+        HARD_MAX_BYTE_STRING_LEN, HEAD_LEN,
     };
     use crate::event::Event;
 
@@ -945,6 +1124,105 @@ mod tests {
         for p in patterns {
             // Either Ok or Err — never panic.
             let _ = decode_event(p);
+        }
+    }
+
+    /// `encode_event_checked` accepts bounded amounts.
+    #[test]
+    fn encode_event_checked_accepts_bounded() {
+        let e = Event::BalanceChanged {
+            resource: 1,
+            actor: 2,
+            old_value: 100,
+            new_value: 200,
+        };
+        let bytes = encode_event_checked(&e).unwrap();
+        // Round-trip via the regular decoder.
+        let decoded = decode_event(&bytes).unwrap();
+        assert_eq!(decoded, e);
+    }
+
+    /// `encode_event_checked` rejects out-of-range amounts.
+    #[test]
+    fn encode_event_checked_rejects_overflow() {
+        // u128::MAX exceeds 2^64.
+        let e = Event::BalanceChanged {
+            resource: 1,
+            actor: 2,
+            old_value: 0,
+            new_value: u128::MAX,
+        };
+        let result = encode_event_checked(&e);
+        match result {
+            Err(super::EncodeError::AmountExceedsBound { value }) => {
+                assert_eq!(value, u128::MAX);
+            }
+            other => panic!("expected AmountExceedsBound, got {other:?}"),
+        }
+    }
+
+    /// `encode_event_checked` rejects exactly 2^64 (boundary).
+    #[test]
+    fn encode_event_checked_rejects_exact_boundary() {
+        let e = Event::RewardIssued {
+            resource: 0,
+            recipient: 0,
+            amount: 1u128 << 64, // exactly 2^64 — out of range
+        };
+        match encode_event_checked(&e) {
+            Err(super::EncodeError::AmountExceedsBound { value }) => {
+                assert_eq!(value, 1u128 << 64);
+            }
+            other => panic!("expected AmountExceedsBound, got {other:?}"),
+        }
+    }
+
+    /// `encode_event_checked` accepts the largest in-range value
+    /// (2^64 - 1).
+    #[test]
+    fn encode_event_checked_accepts_max_u64() {
+        let e = Event::RewardIssued {
+            resource: 0,
+            recipient: 0,
+            amount: u128::from(u64::MAX),
+        };
+        let bytes = encode_event_checked(&e).unwrap();
+        let decoded = decode_event(&bytes).unwrap();
+        assert_eq!(decoded, e);
+    }
+
+    /// `encode_event_checked` matches `encode_event` byte-for-byte
+    /// for in-range amounts.
+    #[test]
+    fn encode_event_checked_matches_unchecked_in_range() {
+        let events = vec![
+            Event::BalanceChanged {
+                resource: 1,
+                actor: 2,
+                old_value: 100,
+                new_value: 200,
+            },
+            Event::NonceAdvanced {
+                actor: 1,
+                old_nonce: 0,
+                new_nonce: 1,
+            },
+            Event::RewardIssued {
+                resource: 0,
+                recipient: 0,
+                amount: u128::from(u64::MAX),
+            },
+            Event::FaultProofGameSettled {
+                game_id: 1,
+                winner: 2,
+                loser: 3,
+                payout: u128::from(u64::MAX),
+            },
+        ];
+        for e in &events {
+            let unchecked = encode_event(e);
+            let checked = encode_event_checked(e).unwrap();
+            assert_eq!(unchecked, checked, "byte mismatch for {e:?}");
         }
     }
 }

@@ -135,7 +135,12 @@ fn partial_batch_on_eof_not_committed() {
 
     let mut client = SubscribeClient::connect(&addr, 0, 1024 * 1024).unwrap();
     let outcome = consume_stream(&mut indexer, &mut client);
-    matches!(outcome, ConsumeOutcome::CleanEof);
+    // **Audit C-1**: must assert!() — bare matches!() discards the
+    // bool and the test silently passes for any non-CleanEof outcome.
+    assert!(
+        matches!(outcome, ConsumeOutcome::CleanEof),
+        "expected CleanEof, got {outcome:?}"
+    );
 
     // Cursor MUST remain at 0 — the in-flight batch was discarded.
     assert_eq!(indexer.cursor(), 0);

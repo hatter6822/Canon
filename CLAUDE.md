@@ -870,15 +870,19 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  900 tests at the RH-E landing
-(up from 702 at the RH-D landing — +198 tests across the two
-new crates: 67 in `canon-storage` (49 lib + 10 integration + 8
-property — +1 integration test from the audit pass) and 125 in
-`canon-indexer` (103 lib + 7 integration + 5 property + 10
-wire-protocol + 8 daemon-loop — +8 audit-regression lib tests
-covering two-pass dispatch and credit overflow, plus the new
-daemon-loop integration tests covering the partial-batch
-discard).  At the RH-D landing the breakdown was 702 tests
+**Rust-side test count.**  913 tests at the RH-E
+audit-pass-2 landing (up from 702 at the RH-D landing —
++211 tests across the two new crates: 67 in `canon-storage`
+(49 lib + 10 integration + 8 property — +1 integration test
+from the audit pass) and 137 in `canon-indexer` (108 lib +
+7 integration + 7 property + 12 wire-protocol + 8
+daemon-loop + 4 fault-injection — +8 audit-regression lib
+tests covering two-pass dispatch and credit overflow, +5
+encode_event_checked tests, +2 decoder fuzz property tests,
++2 wire-protocol DoS / empty-payload tests, +4 fault-
+injection tests covering CursorRecoveryFailed / Poisoned /
+BatchTooLarge / commit-failure paths).  At the RH-D
+landing the breakdown was 702 tests
 across 26 non-empty test binaries
 (up from 526 at the RH-C landing —
 +176 tests across the new `canon-event-subscribe` crate: 150
@@ -2090,6 +2094,93 @@ and dispatch table.  Headlines:
     library module so the partial-batch / two-pass fixes
     have unit-test coverage.  `main.rs` now just wires
     the CLI to the library functions.
+
+  * **Second audit pass (post-first-audit-fix).**  A second
+    round of independent code review surfaced 4 additional
+    findings introduced by the first audit's fixes; all
+    addressed:
+    - **CRITICAL canon-indexer (broken test assertion)**:
+      `daemon_loop.rs::partial_batch_on_eof_not_committed`
+      used `matches!(outcome, ConsumeOutcome::CleanEof);`
+      which discards the resulting bool — the test would
+      silently pass for ANY outcome variant.  Fixed to
+      `assert!(matches!(...))`.
+    - **CRITICAL canon-indexer (cascading-failure cursor
+      desync)**: when `tx.commit()` failed AND the
+      subsequent disk-cursor reload ALSO failed, the
+      indexer silently propagated only the read-cursor
+      error.  The original commit error was dropped, and
+      the in-memory cursor stayed at the stale pre-batch
+      value — a subsequent `apply_batch` could double-apply
+      if SQLite had actually persisted the failed commit.
+      Fix: new `IndexerError::CursorRecoveryFailed` variant
+      carrying BOTH error messages; the indexer is marked
+      `poisoned` and rejects all subsequent `apply_batch`
+      calls with `IndexerError::Poisoned` until the process
+      restarts (which reloads the cursor from disk via
+      `Indexer::open`).  Four new fault-injection tests
+      verify the recovery semantics via a `FaultyStorage`
+      adaptor.
+    - **HIGH canon-storage (no autocommit defense)**: if a
+      previous `snapshot()` or `transaction()` call hit
+      back-to-back failures (BEGIN + defensive cleanup
+      both fail), the SQLite connection was left in a
+      half-transaction state.  Subsequent BEGIN calls
+      would fail until the process restarted.  Fix: new
+      `recover_autocommit_if_needed` helper that issues a
+      defensive ROLLBACK at the start of every
+      `snapshot()` / `transaction()` if `is_autocommit()`
+      is false.  Now the indexer can recover from any
+      transient SQLite-state corruption.
+    - **HIGH canon-indexer (commit-ambiguous daemon halt)**:
+      the daemon halted with `OperatorAction` on every
+      `IndexerError` including the recoverable
+      `CommitAmbiguous` (where the disk cursor has been
+      successfully resynced).  Fix: special-case
+      `CommitAmbiguous` to log at WARN and continue the
+      reconnect loop; only `Poisoned`,
+      `CursorRecoveryFailed`, and other terminal errors
+      halt.
+    - **HIGH canon-indexer (unbounded batch)**: `apply_batch`
+      built an O(N) HashSet of `(actor, resource)` pairs
+      with no upper bound on N.  Added
+      `INDEXER_MAX_BATCH_EVENTS = 1024` (mirrors
+      canon-event-subscribe's `HARD_MAX_EVENT_COUNT`); new
+      `IndexerError::BatchTooLarge` variant rejects
+      oversize batches before allocation.
+    - **MEDIUM canon-storage (silent debug log on
+      commit-fail rollback)**: bumped `tracing::debug` →
+      `tracing::warn` on the commit-failure defensive
+      rollback path so operators running at INFO level
+      see the diagnostic.
+    - **MEDIUM canon-indexer (silent encoder truncation)**:
+      added `encode_event_checked` (a fallible variant of
+      `encode_event`) that returns
+      `EncodeError::AmountExceedsBound` on amounts `>= 2^64`.
+      The original `encode_event` keeps its truncation
+      semantics (matches Lean's `Encodable Nat`); the
+      checked variant is for production callers handling
+      arbitrary Amount values.  Five new tests pin the
+      contract.
+    - **LOW canon-indexer (defensive client flush)**: added
+      explicit `flush()` after the handshake `write_all`
+      in `SubscribeClient::connect`.  No-op today (the
+      raw `TcpStream` is unbuffered) but defends against a
+      future maintainer wrapping in `BufWriter`.
+    - **LOW canon-indexer (first-frame decode log gap)**:
+      added `tracing::debug!` on the first-frame decode
+      error path in `consume_batched` to match the
+      EOF/client-error paths.
+    - Plus 2 new property tests (decoder fuzz against
+      arbitrary bytes + arbitrary tail-after-valid-tag);
+      2 new wire-protocol tests (empty-payload regression
+      + oversize-declared-length DoS bound); the 4
+      fault-injection tests already listed above.
+    Final gates: workspace `cargo test --workspace
+    --locked` reports 913 tests passing (+13 from the
+    first audit pass's 900: 5 encode_event_checked tests,
+    2 decoder fuzz, 2 wire-protocol DoS, 4 fault
+    injection).  Clippy + fmt clean.
 
 **Workstream AR (Audit Remediation, see
 `docs/planning/audit_remediation_plan.md`)** is the most recent landing.
