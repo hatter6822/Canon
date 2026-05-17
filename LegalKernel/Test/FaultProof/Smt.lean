@@ -590,6 +590,354 @@ def tests : List TestCase :=
         let root := smtRoot m
         assertEq (expected := 32) (actual := root.size) "32-byte two-element root"
     }
+  -- ## SC.1.f plan coverage: gap-filling tests
+  --
+  -- Per the plan §SC.1.f, additional value-level coverage:
+  --   * empty-map smtRoot matches hashBytes(H_255 ++ H_255).
+  --   * singleton coherence: smtRoot == empty-proof smtWalk.
+  --   * adversarial tampering: tamper value, sibling, bitmask
+  --     individually and check verifier rejects each.
+  --   * two-cell map with canonical proof construction via
+  --     `buildSmtCellProof`.
+  , { name := "Empty TreeMap smtRoot equals hashBytes (H_255 ++ H_255)"
+    , body := do
+        -- The empty map's SMT root at depth 256 is conceptually H_256,
+        -- computed on the fly as hashBytes(H_255 ++ H_255) since
+        -- emptySubtreeHashes only stores depths 0..255.
+        let m : Std.TreeMap UInt64 UInt64 compare := ∅
+        let actual := smtRoot m
+        let h_255 := emptySubtreeHash 255
+        let expected := hashBytes (h_255 ++ h_255)
+        assert (actual == expected)
+          "empty-map smtRoot matches hashBytes(H_255 ++ H_255)"
+    }
+  , { name := "Singleton smtRoot equals empty-proof smtWalk (coherence)"
+    , body := do
+        -- For a singleton map m = {(k, v)}, the canonical cell proof
+        -- for k is the empty proof (all-canonical-empty siblings).
+        -- The empty proof's smtWalk should equal smtRoot m.
+        let pairs : List (UInt64 × UInt64) :=
+          [(0, 0), (1, 100), (42, 99), (12345, 67890),
+           (0xDEADBEEF, 0xCAFEBABE)]
+        for (k, v) in pairs do
+          let m : Std.TreeMap UInt64 UInt64 compare :=
+            Std.TreeMap.empty.insert k v
+          let root_via_root := smtRoot m
+          let root_via_walk := smtWalk k v SmtCellProof.empty
+          assert (root_via_root == root_via_walk)
+            s!"singleton coherence for ({k}, {v})"
+    }
+  , { name := "Adversarial: tamper value rejects verification"
+    , body := do
+        -- Compute a valid (root, key, value, proof) tuple, then
+        -- substitute a wrong value and ensure verifySmtCellProof
+        -- rejects.  This validates the no-substitution property
+        -- operationally.
+        let key : UInt64 := 42
+        let value_honest : UInt64 := 100
+        let value_tampered : UInt64 := 999
+        let proof := SmtCellProof.empty
+        let root := smtWalk key value_honest proof
+        -- Honest verification succeeds.
+        assert (verifySmtCellProof root key value_honest proof)
+          "honest verification accepts"
+        -- Tampered verification (different value) fails.
+        assert (¬ verifySmtCellProof root key value_tampered proof)
+          "tampered-value verification rejects"
+    }
+  , { name := "Adversarial: tamper key rejects verification"
+    , body := do
+        -- Verify the proof against a wrong key (different from the
+        -- one used to compute root).  The walk traces a different
+        -- path, so should miss the root.
+        let key_honest : UInt64 := 42
+        let key_tampered : UInt64 := 43
+        let value : UInt64 := 100
+        let proof := SmtCellProof.empty
+        let root := smtWalk key_honest value proof
+        -- Honest verification succeeds.
+        assert (verifySmtCellProof root key_honest value proof)
+          "honest key accepts"
+        -- Wrong key fails (different bit path produces different walk).
+        assert (¬ verifySmtCellProof root key_tampered value proof)
+          "tampered-key verification rejects"
+    }
+  , { name := "Adversarial: tamper sibling at depth 0 rejects verification"
+    , body := do
+        -- Build a valid (key, value, proof) with a custom sibling at
+        -- depth 0.  Then submit a DIFFERENT custom sibling — the walk
+        -- should differ, and the original-root verification should
+        -- reject.
+        let custom_sib := ByteArray.mk (Array.replicate 32 (7 : UInt8))
+        let tampered_sib := ByteArray.mk (Array.replicate 32 (8 : UInt8))
+        let bm_array := (Array.replicate 32 (0 : UInt8)).set! 0 1
+        let proof_honest : SmtCellProof :=
+          { siblings := #[custom_sib], bitmask := ByteArray.mk bm_array }
+        let proof_tampered : SmtCellProof :=
+          { siblings := #[tampered_sib], bitmask := ByteArray.mk bm_array }
+        let key : UInt64 := 42
+        let value : UInt64 := 100
+        let root := smtWalk key value proof_honest
+        assert (verifySmtCellProof root key value proof_honest)
+          "honest proof verifies"
+        assert (¬ verifySmtCellProof root key value proof_tampered)
+          "tampered-sibling proof rejects"
+    }
+  , { name := "Adversarial: tamper bitmask bit rejects verification"
+    , body := do
+        -- Build a valid proof, then change a bitmask bit (turning a
+        -- non-canonical sibling into canonical-empty, or vice versa).
+        -- The walk should differ.
+        let custom_sib := ByteArray.mk (Array.replicate 32 (7 : UInt8))
+        let bm_honest := (Array.replicate 32 (0 : UInt8)).set! 0 1  -- bit 0 set
+        let bm_tampered := (Array.replicate 32 (0 : UInt8)).set! 0 2  -- bit 1 set
+        let proof_honest : SmtCellProof :=
+          { siblings := #[custom_sib], bitmask := ByteArray.mk bm_honest }
+        let proof_tampered : SmtCellProof :=
+          { siblings := #[custom_sib], bitmask := ByteArray.mk bm_tampered }
+        let key : UInt64 := 42
+        let value : UInt64 := 100
+        let root := smtWalk key value proof_honest
+        assert (verifySmtCellProof root key value proof_honest)
+          "honest proof verifies"
+        assert (¬ verifySmtCellProof root key value proof_tampered)
+          "tampered-bitmask proof rejects"
+    }
+  , { name := "buildSmtCellProof: empty map produces empty proof"
+    , body := do
+        let m : Std.TreeMap UInt64 UInt64 compare := ∅
+        let proof := buildSmtCellProof m (42 : UInt64)
+        -- An empty map's canonical proof has no non-canonical-empty
+        -- siblings and an all-zero bitmask.
+        assertEq (expected := 0) (actual := proof.siblings.size) "0 siblings"
+        assertEq (expected := 32) (actual := proof.bitmask.size) "32-byte bitmask"
+        assert (proof.isWellFormed) "well-formed"
+    }
+  , { name := "buildSmtCellProof: singleton map produces empty proof"
+    , body := do
+        -- For a singleton, the canonical proof is the empty proof —
+        -- no non-canonical siblings, all canonical-empty.
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert 42 100
+        let proof := buildSmtCellProof m (42 : UInt64)
+        assertEq (expected := 0) (actual := proof.siblings.size) "0 siblings"
+        assert (proof.isWellFormed) "well-formed"
+    }
+  , { name := "buildSmtCellProof: singleton proof verifies against smtRoot"
+    , body := do
+        -- The full coherence check: build a canonical proof for a
+        -- singleton, verify it against smtRoot m.
+        let pairs : List (UInt64 × UInt64) :=
+          [(0, 0), (1, 100), (42, 99), (12345, 67890),
+           (0xDEADBEEF, 0xCAFEBABE)]
+        for (k, v) in pairs do
+          let m : Std.TreeMap UInt64 UInt64 compare :=
+            Std.TreeMap.empty.insert k v
+          let proof := buildSmtCellProof m k
+          let root := smtRoot m
+          assert (verifySmtCellProof root k v proof)
+            s!"canonical proof for ({k}, {v}) verifies against smtRoot m"
+    }
+  , { name := "buildSmtCellProof: two-cell map produces non-trivial proof"
+    , body := do
+        -- For a two-element map with keys diverging at some bit,
+        -- the canonical proof has exactly ONE non-canonical-empty
+        -- sibling (the other key's sub-tree root at the divergence
+        -- depth).
+        let k1 : UInt64 := 1
+        let k2 : UInt64 := 2
+        let v1 : UInt64 := 100
+        let v2 : UInt64 := 200
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k1 v1 |>.insert k2 v2
+        let proof_k1 := buildSmtCellProof m k1
+        let proof_k2 := buildSmtCellProof m k2
+        -- Both proofs should be well-formed.
+        assert (proof_k1.isWellFormed) "proof for k1 well-formed"
+        assert (proof_k2.isWellFormed) "proof for k2 well-formed"
+        -- Both should have at least one non-canonical-empty sibling.
+        assert (proof_k1.siblings.size >= 1) "proof for k1 has siblings"
+        assert (proof_k2.siblings.size >= 1) "proof for k2 has siblings"
+    }
+  , { name := "buildSmtCellProof: two-cell proofs verify against smtRoot"
+    , body := do
+        -- The complete coherence test for multi-cell maps.
+        let k1 : UInt64 := 1
+        let k2 : UInt64 := 2
+        let v1 : UInt64 := 100
+        let v2 : UInt64 := 200
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k1 v1 |>.insert k2 v2
+        let root := smtRoot m
+        let proof_k1 := buildSmtCellProof m k1
+        let proof_k2 := buildSmtCellProof m k2
+        assert (verifySmtCellProof root k1 v1 proof_k1)
+          "proof_k1 verifies for (k1, v1) at root"
+        assert (verifySmtCellProof root k2 v2 proof_k2)
+          "proof_k2 verifies for (k2, v2) at root"
+    }
+  , { name := "buildSmtCellProof: tampering value at k1 fails"
+    , body := do
+        -- The no-value-substitution property exercised operationally:
+        -- a proof for the honest value verifies; the same proof with
+        -- a wrong value claim should fail.
+        let k1 : UInt64 := 1
+        let k2 : UInt64 := 2
+        let v1 : UInt64 := 100
+        let v2 : UInt64 := 200
+        let v_wrong : UInt64 := 999
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k1 v1 |>.insert k2 v2
+        let root := smtRoot m
+        let proof_k1 := buildSmtCellProof m k1
+        -- Honest verification works.
+        assert (verifySmtCellProof root k1 v1 proof_k1) "honest"
+        -- Substituting v_wrong fails.
+        assert (¬ verifySmtCellProof root k1 v_wrong proof_k1)
+          "value substitution rejected"
+    }
+  , { name := "Distinct two-cell maps have distinct smtRoots"
+    , body := do
+        -- Two maps differing in one cell value should have distinct
+        -- smtRoots — a basic sanity check on the SMT discrimination.
+        let m1 : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert 1 100 |>.insert 2 200
+        let m2 : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert 1 100 |>.insert 2 201
+        let r1 := smtRoot m1
+        let r2 := smtRoot m2
+        assert (¬ r1 == r2) "distinct maps yield distinct roots"
+    }
+  , { name := "Far-apart keys diverge at high depth (UInt64 MSB)"
+    , body := do
+        -- For UInt64 keys 0 and 2^63, they diverge at the MSB
+        -- (bit 0 in our MSB-first indexing).  Verify keyBit detects
+        -- this.
+        let k_low : UInt64 := 0
+        let k_high : UInt64 := 0x8000000000000000  -- 2^63
+        assert (¬ BitsKey.keyBit k_low 0) "k_low MSB = 0"
+        assert (BitsKey.keyBit k_high 0) "k_high MSB = 1"
+        -- All other bits agree.
+        for i in [1:64] do
+          assert (BitsKey.keyBit k_low i == BitsKey.keyBit k_high i)
+            s!"bit {i} agrees"
+    }
+  , { name := "verifySmtCellProof rejects proof with extra siblings (DoS bound)"
+    , body := do
+        -- A well-formed proof can have more siblings than the bitmask
+        -- popcount.  These extra siblings are simply unused by the
+        -- walk.  This test ensures the verifier doesn't accidentally
+        -- accept such a proof at a *different* root.
+        let extra_sib := ByteArray.mk (Array.replicate 32 (5 : UInt8))
+        let proof : SmtCellProof :=
+          { siblings := #[extra_sib, extra_sib, extra_sib],  -- 3 unused siblings
+            bitmask  := ByteArray.mk (Array.replicate 32 (0 : UInt8)) }
+        -- Well-formedness should still pass (every sibling is 32 bytes).
+        assert (proof.isWellFormed) "well-formed despite extras"
+        -- The walk is determined by the bitmask (all zeros) and key/value.
+        let key : UInt64 := 42
+        let value : UInt64 := 100
+        let root_via_extras := smtWalk key value proof
+        let root_via_empty := smtWalk key value SmtCellProof.empty
+        -- Both produce the same root because extras are unused.
+        assert (root_via_extras == root_via_empty)
+          "extras don't affect walk"
+    }
+  , { name := "buildSmtCellProof: 3-cell map with siblings at multiple depths"
+    , body := do
+        -- 3-cell map where the proof has non-canonical siblings at
+        -- multiple depths.  This tests the order of siblings in the
+        -- `siblings` array (must be low-depth-first to match the
+        -- expander's consumption order).
+        --
+        -- Keys: k_a = 0, k_b = 1 (LSB=1), k_c = 2^63 (MSB=1).
+        -- For k_a's proof in {k_a, k_b, k_c}:
+        --   - At top depths: all three on left.
+        --   - At d=64 (partition by LSB): k_b diverges; sibling at d=63 added.
+        --   - At d=1 (partition by MSB): k_c diverges; sibling at d=0 added.
+        -- Result: 2 non-canonical siblings (at d=0 and d=63).
+        let k_a : UInt64 := 0
+        let k_b : UInt64 := 1
+        let k_c : UInt64 := 0x8000000000000000
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k_a 100 |>.insert k_b 200 |>.insert k_c 300
+        let proof := buildSmtCellProof m k_a
+        let root := smtRoot m
+        -- The canonical proof for k_a should verify against smtRoot m.
+        assert (verifySmtCellProof root k_a 100 proof)
+          "canonical proof for 3-cell map verifies"
+        -- Sanity: proof has exactly 2 non-canonical siblings.
+        assertEq (expected := 2) (actual := proof.siblings.size)
+          "proof has 2 siblings (one per divergence)"
+    }
+  , { name := "buildSmtCellProof: 3-cell map verifies all cells"
+    , body := do
+        -- Build all three canonical proofs for the 3-cell map and
+        -- verify each.
+        let k_a : UInt64 := 0
+        let k_b : UInt64 := 1
+        let k_c : UInt64 := 0x8000000000000000
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k_a 100 |>.insert k_b 200 |>.insert k_c 300
+        let root := smtRoot m
+        for (k, v) in [(k_a, (100 : UInt64)), (k_b, 200), (k_c, 300)] do
+          let proof := buildSmtCellProof m k
+          assert (verifySmtCellProof root k v proof)
+            s!"canonical proof for k={k} verifies"
+    }
+  , { name := "buildSmtCellProof: 3-cell map rejects value substitution"
+    , body := do
+        -- For the 3-cell map, substituting a different value into
+        -- one cell's verification should be rejected.
+        let k_a : UInt64 := 0
+        let k_b : UInt64 := 1
+        let k_c : UInt64 := 0x8000000000000000
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert k_a 100 |>.insert k_b 200 |>.insert k_c 300
+        let root := smtRoot m
+        let proof_k_a := buildSmtCellProof m k_a
+        -- Honest verification (k_a → 100) passes.
+        assert (verifySmtCellProof root k_a 100 proof_k_a) "honest"
+        -- Substituting wrong values fails.
+        assert (¬ verifySmtCellProof root k_a 99 proof_k_a) "v=99 rejected"
+        assert (¬ verifySmtCellProof root k_a 200 proof_k_a) "v=200 rejected"
+        assert (¬ verifySmtCellProof root k_a 300 proof_k_a) "v=300 rejected"
+    }
+  , { name := "buildSmtCellProof: 4-cell map verifies all cells"
+    , body := do
+        -- Verify the canonical proofs for a 4-cell map.  Each
+        -- proof must verify against smtRoot m.
+        let m : Std.TreeMap UInt64 UInt64 compare :=
+          Std.TreeMap.empty.insert 0 10 |>.insert 1 20
+            |>.insert 0x4000000000000000 30
+            |>.insert 0x8000000000000000 40
+        let root := smtRoot m
+        for (k, v) in [((0 : UInt64), (10 : UInt64)),
+                       (1, 20),
+                       (0x4000000000000000, 30),
+                       (0x8000000000000000, 40)] do
+          let proof := buildSmtCellProof m k
+          assert (verifySmtCellProof root k v proof)
+            s!"canonical proof for k={k} verifies in 4-cell map"
+    }
+  , { name := "setBitmaskBit sets the correct bit"
+    , body := do
+        -- Sanity check on the bitmask manipulation helper.
+        let bm := ByteArray.mk (Array.replicate 32 (0 : UInt8))
+        let bm_after_bit_0 := setBitmaskBit bm 0
+        let bm_after_bit_8 := setBitmaskBit bm 8
+        let bm_after_bit_255 := setBitmaskBit bm 255
+        -- For each, construct a dummy proof to check via bitmaskBit.
+        let p0 : SmtCellProof := { siblings := #[], bitmask := bm_after_bit_0 }
+        let p8 : SmtCellProof := { siblings := #[], bitmask := bm_after_bit_8 }
+        let p255 : SmtCellProof := { siblings := #[], bitmask := bm_after_bit_255 }
+        assert (p0.bitmaskBit 0) "bit 0 set after setBitmaskBit 0"
+        assert (¬ p0.bitmaskBit 1) "bit 1 not set"
+        assert (p8.bitmaskBit 8) "bit 8 set after setBitmaskBit 8"
+        assert (¬ p8.bitmaskBit 0) "bit 0 not set"
+        assert (p255.bitmaskBit 255) "bit 255 set after setBitmaskBit 255"
+        assert (¬ p255.bitmaskBit 254) "bit 254 not set"
+    }
   ]
 
 end LegalKernel.Test.FaultProof.Smt

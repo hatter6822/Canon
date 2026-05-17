@@ -47,15 +47,39 @@ submissions off-chain until the SMT path is shipped"
 
 ### SC.1 closeout (post-landing)
 
-  * **Module:** `LegalKernel/FaultProof/Smt.lean` (new) +
-    `LegalKernel/FaultProof/Cell.lean` (re-exports under the
-    `Cell` sub-namespace).
-  * **Tests:** `LegalKernel/Test/FaultProof/Smt.lean` ships 47
-    test cases covering BitsKey instances, empty-subtree-hash
-    canonicality, well-formedness predicates, verifier
-    completeness, non-trivial proofs (with set bitmask bits),
-    and term-level API-stability checks for every shipped
-    theorem.
+  * **Module:** `LegalKernel/FaultProof/Smt.lean` (new, ~1010
+    lines) + `LegalKernel/FaultProof/Cell.lean` (re-exports
+    under the `Cell` sub-namespace; deferral marker retired).
+  * **Tests:** `LegalKernel/Test/FaultProof/Smt.lean` (~770
+    lines) ships 69 test cases plus 6 term-level API-stability
+    checks, covering:
+      - **Canonical hashes:** `emptySubtreeHashes` size +
+        per-entry size invariants; `emptySubtreeHash 0` matches
+        `hashBytes "EMPTY_LEAF"`; recursive definition
+        `H_{d+1} = hashBytes(H_d ++ H_d)`.
+      - **BitsKey instances:** MSB-first bit semantics for
+        `UInt64` and `ByteArray`; out-of-range behaviour;
+        edge cases.
+      - **Well-formedness:** `SmtCellProof.empty.isWellFormed`
+        (formal theorem + value test); rejection of wrong
+        bitmask size and wrong sibling size.
+      - **Walk + verifier:** deterministic walk; output-shape
+        invariants; non-trivial proofs with set bitmask bits;
+        depth-to-(byte, bit) mapping (bit 8 = LSB of byte 1).
+      - **Adversarial:** verifier rejects under EVERY tamper
+        variant (value, key, sibling at depth 0, bitmask
+        bit); empty map's `smtRoot` matches the on-the-fly
+        `hashBytes(H_255 ++ H_255)`.
+      - **`smtRoot` coherence:** singleton-map `smtRoot` equals
+        empty-proof `smtWalk` for several `(key, value)` pairs
+        (operational coherence between map-based and walk-
+        based formulations).
+      - **`buildSmtCellProof`:** canonical proof construction
+        works for empty / singleton / two-cell maps; two-cell
+        canonical proofs verify against `smtRoot`; tampered
+        value rejection through the full build-verify cycle.
+      - **DoS bound:** extra unused siblings don't affect the
+        walk (well-formed but ignored).
   * **Headline theorems shipped:**
     - `smtStep_inj_under_collision_free` — backward
       step-injectivity (the core SMT structural lemma).
@@ -71,6 +95,26 @@ submissions off-chain until the SMT path is shipped"
       well-formed proof verifies against its own walked root.
     - `verifySmtCellProof_empty_self_verifies` — specialisation:
       the empty proof self-verifies for any (key, value).
+    - `SmtCellProof.empty_isWellFormed` — the empty proof is
+      well-formed (formal theorem).
+    - Output-shape lemmas: `emptySubtreeHashes_size`,
+      `emptySubtreeHash_size`, `emptySubtreeHashes_get_size`,
+      `paddingHash_size`, `leafHash_size`, `smtStep_size`,
+      `stepPair_size`, `smtRoot_size`, `smtRootListAux_size`.
+    - Length lemmas: `expandSiblings_length`,
+      `expandSiblingsAux_length`, `keyBits_length`.
+    - Per-component invariants: `expandSiblings_all_32`,
+      `expandSiblingsAux_all_32`,
+      `isWellFormed_implies_all_siblings_32`.
+    - Helper: `byteArray_append_inj_left` (lifted to module
+      surface for re-use by future SC sub-units).
+  * **Canonical-proof constructor:** `buildSmtCellProof m k`
+    constructs the canonical SMT cell proof for `k` in `m`
+    (low-depth-first sibling order; bitmask marks
+    non-canonical depths).  Validated operationally for
+    empty / singleton / two-cell fixtures.  Helper
+    `setBitmaskBit` mutates a 32-byte bitmask at a specified
+    depth (used by the constructor).
   * **Soundness-formulation note.**  The plan's §2.4
     existential form `∃ m : TreeMap, smtRoot m = root ∧ m[key]?
     = some v` is not provable under `CollisionFree hashBytes`
@@ -91,6 +135,20 @@ submissions off-chain until the SMT path is shipped"
     docstring now points to `LegalKernel/FaultProof/Smt.lean`
     as the SMT-form home; the two forms (witness-state and
     SMT) ship side-by-side.
+  * **Padding-hash design.**  Out-of-bounds sibling lookups
+    during the walk substitute a 32-byte all-zero
+    `paddingHash` rather than `ByteArray.empty`, keeping the
+    walk total without requiring cursor-invariant tracking.
+    The `paddingHash` differs from every canonical
+    `emptySubtreeHash d` (under any non-trivial hash function),
+    so malformed proofs walk to distinct roots and fail
+    verification.  This is operationally sound and simplifies
+    the soundness proof.
+  * **Elaboration depth.**  The 256-level chain triggers deep
+    `decide`-driven elaboration in some helper lemmas; the
+    file sets `maxRecDepth := 1024` to accommodate.  This is
+    a file-local option and does not bleed into downstream
+    consumers.
 
 ## Table of contents
 

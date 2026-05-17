@@ -576,6 +576,108 @@ theorem smtRoot_size {K V : Type} [Ord K] [BitsKey K] [Encodable K] [Encodable V
   unfold smtDepth
   exact Nat.le.refl
 
+/-! ## Canonical proof construction (SC.1.b helper)
+
+For test fixtures and reference implementations, we provide a
+`buildSmtCellProof` function that constructs the canonical
+SMT proof for a key in a given list of entries.
+
+The canonical proof for `(entries, key)` has:
+  * `siblings`: the non-canonical-empty sibling-subtree roots
+    along the path from leaf to root, in **low-depth-first**
+    order (depth 0 first).
+  * `bitmask`: 32-byte mask with bit `d` set iff the sibling at
+    depth `d` is non-canonical-empty.
+
+This function is used by tests to validate the verifier's
+behaviour on multi-cell maps; it is NOT load-bearing for the
+soundness theorem (which works directly on the walk
+representation). -/
+
+/-- Set bit `d` (low-first within each byte, byte-low-first
+    across bytes) of a 32-byte bitmask, returning the modified
+    bitmask.  Used by `buildSmtCellProof` to mark the depths
+    where the canonical sibling is non-canonical-empty.
+
+    Out-of-range `d` (≥ `bitmask.size * 8`) returns the bitmask
+    unchanged. -/
+def setBitmaskBit (bitmask : ByteArray) (d : Nat) : ByteArray :=
+  let byteIdx := d / 8
+  if h : byteIdx < bitmask.size then
+    let byte := bitmask[byteIdx]'h
+    let newByte := UInt8.ofNat (byte.toNat ||| (1 <<< (d % 8)))
+    bitmask.set byteIdx newByte h
+  else
+    bitmask
+
+/-- Walk the entry list from the root down to the leaf for `key`,
+    collecting non-canonical-empty siblings along the way.
+
+    Given:
+      * `entries`: the entries at the current depth's bucket.
+      * `d`: remaining depth (counts DOWN from `smtDepth`).
+      * `key`: the key we're building a proof for.
+
+    Returns `(siblings, bitmaskDepths)` where:
+      * `siblings` are the non-canonical siblings in **low-depth-
+        first** order (depth-0's sibling first, matching the
+        expander's consumption order).  The sibling at the
+        smallest set bitmask bit comes first.
+      * `bitmaskDepths` lists the SMT depths where the
+        corresponding sibling is non-canonical-empty (used by
+        `buildSmtCellProof` to flip the appropriate bitmask bits).
+
+    The recursion descends from the root to the leaf.  The
+    recursive sub-call (`buildSmtCellProofAux d ourHalf key`)
+    returns siblings for depths `0..d-1` in low-depth-first
+    order.  At depth `d`, we APPEND our sibling (if
+    non-canonical) so the overall order remains low-first. -/
+def buildSmtCellProofAux {K V : Type} [BitsKey K] [Encodable K] [Encodable V] :
+    Nat → List (K × V) → K → List ByteArray × List Nat
+  | 0, _entries, _key => ([], [])
+  | d + 1, entries, key =>
+    let leftEntries  := entries.filter (fun e => ! BitsKey.keyBit e.1 d)
+    let rightEntries := entries.filter (fun e => BitsKey.keyBit e.1 d)
+    let bit          := BitsKey.keyBit key d
+    -- Our half: where `key` lives.  Their half: the sibling sub-tree.
+    let theirHalf    := if bit then leftEntries else rightEntries
+    let ourHalf      := if bit then rightEntries else leftEntries
+    let theirRoot    := smtRootListAux d theirHalf
+    let isCanonEmpty := theirRoot == emptySubtreeHash d
+    -- Recurse on our half at depth d.  childSibs / childBits cover
+    -- depths 0..d-1 in LOW-depth-first order.
+    let (childSibs, childBits) := buildSmtCellProofAux d ourHalf key
+    -- The sibling at depth d goes AT THE END of the list (so the
+    -- list stays low-first overall).  If it's canonical-empty,
+    -- omit; otherwise append.
+    if isCanonEmpty then
+      (childSibs, childBits)
+    else
+      (childSibs ++ [theirRoot], childBits ++ [d])
+
+/-- Build the canonical SMT cell proof for `key` in `m`.
+
+    The proof's `siblings` array contains the non-canonical-empty
+    sibling-subtree roots along the path from leaf to root, in
+    low-depth-first order.  The `bitmask` is a 32-byte ByteArray
+    whose bit `d` is set iff the canonical sibling at depth `d`
+    is non-canonical-empty.
+
+    Under the coherence property `smtRoot m = smtWalk key m[key]?
+    (buildSmtCellProof m key)`, the canonical proof verifies
+    against `smtRoot m`.  The coherence is established
+    operationally via the test fixtures (no formal Lean theorem
+    yet — the inductive structure mirrors `smtRootListAux` /
+    `smtWalk` in a way that's straightforward to extend if SC.3
+    requires the formal coherence). -/
+def buildSmtCellProof {K V : Type} [Ord K] [BitsKey K] [Encodable K] [Encodable V]
+    (m : Std.TreeMap K V compare) (key : K) : SmtCellProof :=
+  let entries := m.toList
+  let (sibs, bitDepths) := buildSmtCellProofAux smtDepth entries key
+  let emptyBitmask : ByteArray := ByteArray.mk (Array.replicate 32 (0 : UInt8))
+  let bitmask := bitDepths.foldl setBitmaskBit emptyBitmask
+  { siblings := sibs.toArray, bitmask := bitmask }
+
 /-! ## `verifySmtCellProof` (SC.1.c) -/
 
 /-- Verify an SMT cell proof against `(root, key, value)`.
