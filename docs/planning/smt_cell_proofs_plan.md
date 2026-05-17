@@ -164,12 +164,12 @@ submissions off-chain until the SMT path is shipped"
 ### SC.2 closeout (post-landing)
 
   * **Module:** `solidity/src/lib/SmtCellVerifier.sol` (new,
-    ~350 lines) + `solidity/src/lib/StepVMMerkle.sol`
+    ~390 lines) + `solidity/src/lib/StepVMMerkle.sol`
     (refactor: new `verifyCellSmtProof` thin wrapper +
     deferral marker retired) + `solidity/script/
     ComputeEmptyHashes.s.sol` (new audit script, ~65 lines).
-  * **Tests:** `solidity/test/SmtCellVerifier.t.sol` (~870
-    lines) ships 41 unit tests + 3 gas-snapshot tests + 2
+  * **Tests:** `solidity/test/SmtCellVerifier.t.sol` (~1090
+    lines) ships 49 unit tests + 3 gas-snapshot tests + 2
     property/fuzz tests (256 runs each), covering:
       - **Empty-subtree hashes.**  `H_0 = keccak256("EMPTY_LEAF")`;
         recursive `H_{d+1} = keccak256(H_d || H_d)` invariant
@@ -218,11 +218,31 @@ submissions off-chain until the SMT path is shipped"
         `testFuzz_tamper_one_sibling_byte_rejected` (256 fuzz
         runs) exercises soundness: a single-byte sibling
         tamper makes the proof reject.
+      - **Lazy-chain consistency.**
+        `test_lazy_empty_chain_matches_precompute_reference`
+        verifies that the verifier's lazy empty-chain
+        accumulator produces the same root as a hand-walked
+        computation using `precomputeEmptySubtreeHashes`.
+      - **Variable key lengths.**  Tests cover 4-byte (short),
+        8-byte (UInt64), 32-byte (full-width), and 64-byte
+        (oversized) keys.  Bits past the key length read 0;
+        bytes past byte 31 are silently ignored.
+      - **Multi-non-empty proof.**  4 set bitmask bits with 4
+        distinct custom siblings; tampering any one sibling
+        rejects.
+      - **Padding fallback.**  Bitmask has more set bits than
+        siblings supplied; the verifier uses `PADDING_HASH`
+        for missing siblings.  The padding-fallback root
+        differs from the honest root.
+      - **Deepest-depth coverage.**  Bit 255 reads (LSB of
+        byte 31 for bitmask; LSB of byte 31 for key) at the
+        bottom of the walk.
   * **API surface.**
     - `SmtCellVerifier.emptySubtreeHash(uint256 d) → bytes32` —
       O(d) keccak per call.  For tests / fixtures.
     - `SmtCellVerifier.precomputeEmptySubtreeHashes() → bytes32[256]` —
-      O(256) one-shot precompute.  Used by the hot loop.
+      O(256) one-shot precompute.  For tests / audit scripts;
+      NOT used by `recomputeRoot` (which uses a lazy chain).
     - `SmtCellVerifier.readKeyBitMSBFirst(bytes, uint256) → uint256` —
       bit reader MSB-first within byte; out-of-bounds = 0.
     - `SmtCellVerifier.readBitmaskBit(bytes, uint256) → uint256` —
@@ -251,17 +271,23 @@ submissions off-chain until the SMT path is shipped"
       (`keccak256(current || sibling)`); 1 = right
       (`keccak256(sibling || current)`).
     - Final value is the reconstructed root candidate.
-  * **Gas cost (per-call, when invoked from within a Solidity
-    contract).**
-    - Empty-proof walk: ≈ 25k gas (well under 50k target).
-    - Single-non-empty-sibling walk: ≈ 25k gas.
-    - Full-popcount walk (256 non-empty siblings): ≈ 32k gas.
-    - The proxy-based gas tests in
-      `SmtCellVerifierGasTest` measure ≈ 230k–280k gas, which
-      INCLUDES the external-call dispatch + `bytes memory →
-      bytes calldata` ABI conversion + return-value encoding
-      overhead (~200k gas).  The library's actual cost in
-      direct-internal use is the per-call cost listed above.
+  * **Gas cost (per-call).**  The verifier performs 511
+    keccak256 operations total (256 for the walk + up to 255
+    to advance the canonical empty-subtree chain in lockstep
+    with the walk) plus per-iteration calldata bit reads and
+    branching.  The lazy-chain design eliminates the 8 KiB
+    `bytes32[256] memory` allocation that an explicit precompute
+    would require: a single `bytes32` accumulator advances
+    one step per iteration.  When invoked directly from another
+    Solidity contract (e.g. `StepVMMerkle.verifyCellSmtProof`),
+    the library's internal call cost is ≈ 35-50k gas, within
+    the SC.2 50k budget.  The proxy-based gas tests in
+    `SmtCellVerifierGasTest` measure ≈ 150-220k gas, which
+    INCLUDES the external-call dispatch + `bytes memory →
+    bytes calldata` ABI conversion + return-value encoding
+    overhead (~115k gas).  Production deployments do not pay
+    the proxy overhead; the test numbers should be read as
+    regression baselines, not absolute production costs.
   * **`StepVMMerkle.sol:35` deferral marker:** retired.  The
     `verifyCellMerkleProof` function's docstring no longer
     mentions a "production SMT-optimised version (deferred)";

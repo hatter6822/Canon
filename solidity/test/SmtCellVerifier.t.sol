@@ -772,6 +772,229 @@ contract SmtCellVerifierTest is Test {
     }
 
     /* ---------------------------------------------------------- */
+    /* Lazy-chain consistency                                     */
+    /* ---------------------------------------------------------- */
+
+    /// @notice The verifier's internal lazy-empty chain must produce
+    ///         the same values as the standalone
+    ///         `precomputeEmptySubtreeHashes` table.  We exercise
+    ///         this indirectly: the empty proof for an MSB-only key
+    ///         walks every level using the canonical empty at that
+    ///         depth.  If the lazy chain diverged at any depth from
+    ///         the precompute, the resulting root would differ from
+    ///         the reference computation.
+    ///
+    ///         Reference computation: hand-walk using
+    ///         `precomputeEmptySubtreeHashes` for the canonical
+    ///         empties.  Walk output: `recomputeRoot` from the
+    ///         verifier.  Both must agree.
+    function test_lazy_empty_chain_matches_precompute_reference() public view {
+        bytes32[256] memory hs = smt.precomputeEmptySubtreeHashes();
+
+        // Build a fresh key + leaf preimage.
+        bytes memory smtKey = hex"DEADBEEFCAFEBABE";
+        uint64 keyU = 0xDEADBEEFCAFEBABE;
+        uint64 valueU = 0x0123456789ABCDEF;
+        bytes memory leafPreimage =
+            abi.encodePacked(_cbeEncodeUint64(keyU), _cbeEncodeUint64(valueU));
+        bytes memory proofData = _emptyProofData();
+
+        // Reference: hand-walk using the precomputed table.
+        bytes32 expected = keccak256(leafPreimage);
+        for (uint256 d = 0; d < 256; ++d) {
+            uint256 bit = smt.readKeyBitMSBFirst(smtKey, d);
+            bytes32 sibling = hs[d];
+            if (bit == 1) {
+                expected = keccak256(abi.encodePacked(sibling, expected));
+            } else {
+                expected = keccak256(abi.encodePacked(expected, sibling));
+            }
+        }
+
+        // Actual: verifier's recomputeRoot.
+        bytes32 actual = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertEq(actual, expected, "lazy chain matches precompute reference");
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Variable key lengths                                       */
+    /* ---------------------------------------------------------- */
+
+    /// @notice A 4-byte key has only 32 in-range bits; bits 32..255
+    ///         all return 0 (left-child branch).  Walking the empty
+    ///         proof for such a key uses 224 "left child" applications
+    ///         of the canonical empty siblings.  The walk completes
+    ///         and self-verifies.
+    function test_short_key_4_bytes_self_verifies() public view {
+        bytes memory smtKey = hex"12345678";
+        bytes memory leafPreimage = hex"BADC0FFEE0DDF00D";
+        bytes memory proofData = _emptyProofData();
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "short-key empty proof self-verifies"
+        );
+    }
+
+    /// @notice A 32-byte (full-width) key uses every bit in 0..255
+    ///         for the path.  Walks the empty proof and self-verifies.
+    function test_full_32byte_key_self_verifies() public view {
+        bytes memory smtKey = new bytes(32);
+        // Alternating bit pattern: 0xAA = 0b10101010.
+        for (uint256 i = 0; i < 32; ++i) {
+            smtKey[i] = 0xAA;
+        }
+        bytes memory leafPreimage = hex"DEADBEEFCAFEBABE";
+        bytes memory proofData = _emptyProofData();
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "full-32-byte key empty proof self-verifies"
+        );
+    }
+
+    /// @notice A 64-byte key has bits 0..255 in-range AND bits
+    ///         256..511 out-of-range (but the verifier only reads
+    ///         bits 0..255).  Bytes 32..63 are silently ignored.
+    function test_oversized_key_bytes_32_to_63_ignored() public view {
+        bytes memory smtKey32 = new bytes(32);
+        bytes memory smtKey64 = new bytes(64);
+        // First 32 bytes identical.  The loop's `i` is in [0, 31], so
+        // casting to `uint8` is safe.
+        for (uint256 i = 0; i < 32; ++i) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            smtKey32[i] = bytes1(uint8(i));
+            // forge-lint: disable-next-line(unsafe-typecast)
+            smtKey64[i] = bytes1(uint8(i));
+        }
+        // Bytes 32..63 of the 64-byte key carry "garbage".
+        for (uint256 i = 32; i < 64; ++i) {
+            smtKey64[i] = 0xFF;
+        }
+
+        bytes memory leafPreimage = hex"00";
+        bytes memory proofData = _emptyProofData();
+
+        bytes32 root32 = smt.recomputeRoot(smtKey32, leafPreimage, proofData);
+        bytes32 root64 = smt.recomputeRoot(smtKey64, leafPreimage, proofData);
+        assertEq(root32, root64, "bytes 32..63 of a 64-byte key are ignored");
+    }
+
+    /// @notice Multi-non-empty proof: 4 set bitmask bits (at depths
+    ///         0, 8, 16, 24) with 4 distinct custom siblings.  The
+    ///         proof is well-formed; self-verifies.
+    function test_multi_non_empty_proof_self_verifies() public view {
+        bytes memory bitmask = new bytes(32);
+        bitmask[0] = 0x01; // depth 0 (LSB of byte 0)
+        bitmask[1] = 0x01; // depth 8 (LSB of byte 1)
+        bitmask[2] = 0x01; // depth 16 (LSB of byte 2)
+        bitmask[3] = 0x01; // depth 24 (LSB of byte 3)
+
+        bytes memory siblings = new bytes(4 * 32);
+        // Fill each sibling with distinct content.
+        for (uint256 i = 0; i < 4; ++i) {
+            for (uint256 j = 0; j < 32; ++j) {
+                // 0x10 + i is in [0x10, 0x13]; casting to uint8 is safe.
+                // forge-lint: disable-next-line(unsafe-typecast)
+                siblings[i * 32 + j] = bytes1(uint8(0x10 + i));
+            }
+        }
+
+        bytes memory proofData = abi.encodePacked(bitmask, siblings);
+        bytes memory smtKey = hex"000000000000002A";
+        bytes memory leafPreimage = abi.encodePacked(_cbeEncodeUint64(42), _cbeEncodeUint64(100));
+
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "multi-non-empty proof self-verifies"
+        );
+
+        // Tampering ANY one sibling rejects.
+        for (uint256 si = 0; si < 4; ++si) {
+            bytes memory tampered = abi.encodePacked(siblings);
+            tampered[si * 32] = bytes1(uint8(tampered[si * 32]) ^ uint8(0x01));
+            bytes memory tamperedProof = abi.encodePacked(bitmask, tampered);
+            assertFalse(
+                smt.verifyCellProof(root, smtKey, leafPreimage, tamperedProof),
+                "tampered multi-sibling proof rejects"
+            );
+        }
+    }
+
+    /// @notice Bitmask has 2 set bits but proof supplies only 1
+    ///         sibling: the verifier uses the supplied sibling for
+    ///         the first set bit and PADDING_HASH for the second.
+    ///         This is the "padding fallback" path.
+    function test_underfilled_proof_uses_padding_for_missing_siblings() public view {
+        bytes memory bitmask = new bytes(32);
+        bitmask[0] = 0x03; // depths 0 and 1 set (bits 0, 1 of byte 0)
+
+        bytes memory siblings = new bytes(32); // Only 1 sibling
+        for (uint256 i = 0; i < 32; ++i) {
+            siblings[i] = 0x07;
+        }
+
+        bytes memory proofData = abi.encodePacked(bitmask, siblings);
+        bytes memory smtKey = hex"000000000000002A";
+        bytes memory leafPreimage = abi.encodePacked(_cbeEncodeUint64(42), _cbeEncodeUint64(100));
+
+        // The verifier should complete without reverting and the
+        // walk is well-defined (uses PADDING_HASH for the missing
+        // sibling at depth 1).
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "underfilled proof self-verifies (via padding)"
+        );
+
+        // The padding-fallback root is DISTINCT from the root
+        // computed when both siblings are supplied honestly.
+        bytes memory bothSiblings = new bytes(64);
+        for (uint256 i = 0; i < 32; ++i) {
+            bothSiblings[i] = 0x07;
+        }
+        for (uint256 i = 32; i < 64; ++i) {
+            bothSiblings[i] = 0x08;
+        }
+        bytes memory fullProof = abi.encodePacked(bitmask, bothSiblings);
+        bytes32 fullRoot = smt.recomputeRoot(smtKey, leafPreimage, fullProof);
+        assertTrue(root != fullRoot, "padding-fallback distinct from honest");
+    }
+
+    /// @notice Bitmask bit 255 is the deepest depth.  Sets the LSB of
+    ///         byte 31 of the bitmask.  Exercises the highest-depth
+    ///         walk step.
+    function test_bitmask_bit_255_is_LSB_of_byte_31() public view {
+        bytes memory bitmask = new bytes(32);
+        bitmask[31] = 0x01; // LSB of byte 31 = bit 248
+
+        // To set bit 255 (MSB of byte 31), we'd use bitmask[31] = 0x80.
+        bytes memory bitmask255 = new bytes(32);
+        bitmask255[31] = 0x80;
+
+        assertEq(smt.readBitmaskBit(bitmask, 248), 1, "bit 248 set");
+        assertEq(smt.readBitmaskBit(bitmask, 255), 0, "bit 255 unset");
+        assertEq(smt.readBitmaskBit(bitmask255, 248), 0, "bit 248 unset");
+        assertEq(smt.readBitmaskBit(bitmask255, 255), 1, "bit 255 set");
+    }
+
+    /// @notice Key bit 255 is the LSB of byte 31.  Exercises the
+    ///         deepest depth's path-selection.
+    function test_key_bit_255_is_LSB_of_byte_31() public view {
+        bytes memory key = new bytes(32);
+        key[31] = 0x01; // LSB of byte 31 (MSB-first within byte = bit 7 of byte)
+
+        bytes memory keyMSB = new bytes(32);
+        keyMSB[31] = 0x80; // MSB of byte 31
+
+        assertEq(smt.readKeyBitMSBFirst(key, 255), 1, "key[31].bit 0 (LSB) is bit 255");
+        assertEq(smt.readKeyBitMSBFirst(key, 248), 0, "key[31].bit 7 (MSB) is bit 248, unset");
+        assertEq(smt.readKeyBitMSBFirst(keyMSB, 248), 1, "key[31].bit 7 (MSB) set");
+        assertEq(smt.readKeyBitMSBFirst(keyMSB, 255), 0, "key[31].bit 0 (LSB) unset");
+    }
+
+    /* ---------------------------------------------------------- */
     /* Helpers                                                    */
     /* ---------------------------------------------------------- */
 

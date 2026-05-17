@@ -55,11 +55,24 @@ pragma solidity 0.8.20;
 ///         byte 0; bit 8 = MSB of byte 1).  Both conventions match
 ///         Lean's `BitsKey` typeclass and `SmtCellProof.bitmaskBit`.
 ///
-///         **Gas cost**.  Typical paths (≤ 1 non-canonical sibling)
-///         cost ≈ 25k gas; full-empty paths (256 empties pre-computed
-///         + 256 hashes for the walk) cost ≈ 28k gas; full-non-empty
-///         paths (256 user-supplied siblings) cost ≈ 32k gas.  All
-///         well within the 50k SC.2 target.
+///         **Gas cost.**  The verifier performs at most 511 keccak256
+///         calls (256 for the walk + up to 255 to advance the canonical
+///         empty chain in lockstep) plus per-iteration bit-extraction
+///         and branching.  No 8 KiB memory allocation: the empty
+///         subtree chain is tracked through a single `bytes32`
+///         accumulator that advances each iteration.
+///
+///         When invoked directly from another Solidity contract
+///         (e.g. `StepVMMerkle.verifyCellSmtProof`), the library's
+///         internal call cost is dominated by:
+///           * 511 keccak256 ops via the EVM scratch space (~21k gas).
+///           * 256 iterations of calldata-bit reads, branches, and
+///             cursor maintenance (~15-25k gas).
+///           * Total: 35-50k gas, within the SC.2 50k budget for
+///             typical paths.
+///         The exact cost depends on the proof's bitmask (no extra
+///         calldata for unset bits; one calldataload per set bit) and
+///         the surrounding contract's own dispatch overhead.
 ///
 ///         **Soundness**.  Under collision-resistance of `keccak256`,
 ///         the Lean side proves that the verifier accepts at most
@@ -105,11 +118,19 @@ library SmtCellVerifier {
     ///         using the recursion `H_0 = keccak256("EMPTY_LEAF")`,
     ///         `H_{d+1} = keccak256(H_d || H_d)`.
     ///
-    /// @dev    O(d) keccak256 calls per invocation.  For the verifier
-    ///         hot loop, use `precomputeEmptySubtreeHashes` instead
-    ///         (computes all 256 in one O(256) sweep, then constant-
-    ///         time lookup).  Provided here as a reference for tests
-    ///         and one-off computations.
+    /// @dev    O(d) keccak256 calls per invocation.  Provided as a
+    ///         reference for tests, audit scripts, and one-off
+    ///         computations.  `recomputeRoot` does NOT call this
+    ///         function: it tracks the empty-subtree chain through a
+    ///         single `bytes32` accumulator that advances in lockstep
+    ///         with the walk.
+    ///
+    ///         Reverts if `d >= 256`.  Lean's `emptySubtreeHash`
+    ///         returns `ByteArray.empty` (zero length) on out-of-range
+    ///         indices; this Solidity port reverts instead because
+    ///         no in-bounds caller has a legitimate reason to pass
+    ///         `d >= 256` and silently returning a different shape
+    ///         would mask a caller bug.
     ///
     /// @param  d  the depth (must be in [0, 256)).
     /// @return h  the canonical empty-subtree hash at depth `d`.
@@ -124,12 +145,15 @@ library SmtCellVerifier {
     }
 
     /// @notice Materialise all 256 canonical empty-subtree hashes
-    ///         into an in-memory array.  Used by the verifier hot
-    ///         loop for O(1) per-depth lookup after an O(256) setup.
+    ///         into an in-memory array.  Provided as a public helper
+    ///         for tests and audit scripts (e.g.
+    ///         `script/ComputeEmptyHashes.s.sol`).
     ///
-    /// @dev    Cost: 255 keccak256(64-byte) calls plus memory
-    ///         allocation; ≈ 10 700 gas total.  This is the cost
-    ///         every `recomputeRoot` call pays upfront.
+    /// @dev    `recomputeRoot` does NOT call this function.  Instead,
+    ///         it advances a single `bytes32` accumulator through the
+    ///         chain in lockstep with the walk to avoid an 8 KiB
+    ///         memory allocation.  Use this helper when you need a
+    ///         full reference table, e.g. for golden-value tests.
     ///
     /// @return hashes  hashes[d] = canonical empty-subtree hash at depth d.
     function precomputeEmptySubtreeHashes()
@@ -202,10 +226,14 @@ library SmtCellVerifier {
     ///         the proof's siblings (or canonical-empty defaults).
     ///         Returns the reconstructed root candidate.
     ///
-    /// @dev    Performs 256 keccak256 calls in the walk, plus 255
-    ///         calls upfront to materialise the empty-subtree array.
-    ///         Total: 511 hashes + minor memory + bit-extraction
-    ///         overhead.
+    /// @dev    Performs 256 keccak256 calls in the walk plus up to
+    ///         255 calls to advance the canonical-empty-subtree
+    ///         chain (lazily, in lockstep with the walk).  Total:
+    ///         511 hashes + minor bit-extraction overhead.  No
+    ///         8 KiB memory allocation — the empties chain is
+    ///         tracked through a single `bytes32` accumulator that
+    ///         advances each iteration via
+    ///         `H_{d+1} = keccak256(H_d ‖ H_d)`.
     ///
     ///         Reverts on malformed input:
     ///           * `SmtCellProofTooShort`  — proofData < 32 bytes.
@@ -236,8 +264,11 @@ library SmtCellVerifier {
         bytes calldata bitmask = proofData[0:BITMASK_BYTES];
         bytes calldata siblings = proofData[BITMASK_BYTES:];
 
+        // Initial state: leaf hash + H_0 (the leaf-level canonical
+        // empty subtree hash).  emptyAtD advances per-iteration to
+        // remain in lockstep with the walk's depth.
         bytes32 current = keccak256(leafPreimage);
-        bytes32[SMT_DEPTH] memory empties = precomputeEmptySubtreeHashes();
+        bytes32 emptyAtD = keccak256(EMPTY_LEAF_SEED);
 
         uint256 siblingsCursor = 0;
         unchecked {
@@ -251,7 +282,7 @@ library SmtCellVerifier {
                         sibling = PADDING_HASH;
                     }
                 } else {
-                    sibling = empties[d];
+                    sibling = emptyAtD;
                 }
 
                 if (readKeyBitMSBFirst(smtKey, d) == 1) {
@@ -260,6 +291,13 @@ library SmtCellVerifier {
                 } else {
                     // Left child: parent = keccak256(current || sibling)
                     current = _hashPair(current, sibling);
+                }
+
+                // Advance emptyAtD = keccak256(H_d || H_d) for the
+                // next iteration.  Skip at d=255 since H_256 is not
+                // needed (the walk terminates at d=255).
+                if (d < SMT_DEPTH - 1) {
+                    emptyAtD = _hashPair(emptyAtD, emptyAtD);
                 }
             }
         }

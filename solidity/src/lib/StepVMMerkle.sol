@@ -80,8 +80,12 @@ library StepVMMerkle {
     /// `proofData`) from canonical-empty siblings (`SmtCellVerifier`'s
     /// per-depth `H_d` table).
     ///
-    /// Cost: ≈ 25k gas per cell for typical paths; ≤ 50k for
-    /// pessimal paths (full set of non-canonical siblings).
+    /// Cost: ≈ 35-50k gas per cell when invoked directly from
+    /// another Solidity contract (within the SC.2 50k budget).
+    /// The verifier performs 511 keccak256 operations total
+    /// (256 for the walk + up to 255 to advance the canonical
+    /// empty-subtree chain) without any 8 KiB memory
+    /// allocations.
     ///
     /// Cross-stack soundness: under collision-resistance of
     /// `keccak256`, two verifying proofs for the same `(root,
