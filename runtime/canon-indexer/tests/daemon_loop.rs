@@ -267,6 +267,36 @@ fn multiple_complete_then_partial() {
     let _ = server.join().unwrap();
 }
 
+/// **seq=0 defense**: the wire protocol reserves seq=0 for the
+/// resume_from sentinel; events with seq=0 are a protocol
+/// violation.  Our defensive check catches this even though
+/// canon-event-subscribe's cache already rejects seq=0.
+#[test]
+fn seq_zero_event_protocol_violation() {
+    let (listener, addr) = bind_listener();
+    let frames = vec![event_frame(0, &balance_changed_bytes(0, 1, 0, 100))];
+    let server = thread::spawn(move || run_mock_server(listener, frames, false));
+
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    let mut indexer = Indexer::open(&storage).unwrap();
+
+    let mut client = SubscribeClient::connect(&addr, 0, 1024 * 1024).unwrap();
+    let outcome = consume_stream(&mut indexer, &mut client);
+    match outcome {
+        ConsumeOutcome::IndexerError(IndexerError::ProtocolViolation {
+            current_seq,
+            offending_seq,
+        }) => {
+            assert_eq!(current_seq, 0);
+            assert_eq!(offending_seq, 0);
+        }
+        other => panic!("expected ProtocolViolation for seq=0, got {other:?}"),
+    }
+    // Cursor unchanged.
+    assert_eq!(indexer.cursor(), 0);
+    let _ = server.join().unwrap();
+}
+
 /// **Out-of-order seq** triggers a ProtocolViolation; in-flight
 /// batch is discarded.
 #[test]

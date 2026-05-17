@@ -88,7 +88,24 @@ pub fn consume_stream(
         Err(e) => return ConsumeOutcome::ClientError(e),
     };
     match frame {
-        ServerFrame::Event { seq, payload } => consume_batched(indexer, client, seq, payload),
+        ServerFrame::Event { seq, payload } => {
+            // Defensive: per docs/abi.md §11.4, the canonical
+            // server emits events with seq ≥ 1.  seq=0 is the
+            // wire-protocol's "no resume" sentinel and MUST NOT
+            // appear in an EVENT frame.  A buggy or malicious
+            // server sending seq=0 is a protocol violation.
+            // (canon-event-subscribe's EventCache rejects seq=0
+            // on push, so a well-behaved server already prevents
+            // this; defence-in-depth on the client side.)
+            if seq == 0 {
+                tracing::error!("server delivered event with reserved seq=0");
+                return ConsumeOutcome::IndexerError(IndexerError::ProtocolViolation {
+                    current_seq: 0,
+                    offending_seq: 0,
+                });
+            }
+            consume_batched(indexer, client, seq, payload)
+        }
         ServerFrame::ServerShutdown { last_delivered_seq } => ConsumeOutcome::ServerShutdown {
             last_seq: last_delivered_seq,
         },

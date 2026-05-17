@@ -870,18 +870,19 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  913 tests at the RH-E
-audit-pass-2 landing (up from 702 at the RH-D landing —
-+211 tests across the two new crates: 67 in `canon-storage`
+**Rust-side test count.**  914 tests at the RH-E
+audit-pass-3 landing (up from 702 at the RH-D landing —
++212 tests across the two new crates: 67 in `canon-storage`
 (49 lib + 10 integration + 8 property — +1 integration test
-from the audit pass) and 137 in `canon-indexer` (108 lib +
-7 integration + 7 property + 12 wire-protocol + 8
+from the audit pass) and 138 in `canon-indexer` (108 lib +
+8 integration + 7 property + 12 wire-protocol + 9
 daemon-loop + 4 fault-injection — +8 audit-regression lib
 tests covering two-pass dispatch and credit overflow, +5
 encode_event_checked tests, +2 decoder fuzz property tests,
 +2 wire-protocol DoS / empty-payload tests, +4 fault-
 injection tests covering CursorRecoveryFailed / Poisoned /
-BatchTooLarge / commit-failure paths).  At the RH-D
+BatchTooLarge / commit-failure paths, +1 seq=0 protocol-
+violation test).  At the RH-D
 landing the breakdown was 702 tests
 across 26 non-empty test binaries
 (up from 526 at the RH-C landing —
@@ -2181,6 +2182,49 @@ and dispatch table.  Headlines:
     first audit pass's 900: 5 encode_event_checked tests,
     2 decoder fuzz, 2 wire-protocol DoS, 4 fault
     injection).  Clippy + fmt clean.
+
+  * **Third audit pass (self-review of the second
+    audit's fixes).**  A focused re-review of the
+    audit-pass-2 changes found one CRITICAL race
+    condition and two improvements; all addressed:
+    - **CRITICAL canon-storage**: the `is_autocommit`
+      defense added in audit-pass-2 used a buggy drop-
+      and-reacquire pattern: the trait method acquired
+      the mutex, called `recover_autocommit_if_needed`,
+      then DROPPED the mutex and re-acquired it inside
+      a separate `snapshot_inner` / `transaction_inner`
+      helper.  Between the drop and re-acquire,
+      another thread could acquire the mutex and wedge
+      the connection again — defeating the recovery's
+      purpose entirely.  Fix: inlined the recovery
+      directly into `snapshot` and `transaction` so the
+      mutex is held for the entire recovery + BEGIN
+      sequence (atomic).  Removed the `_inner` helpers.
+    - **HIGH canon-indexer**: `consume_stream` accepted
+      events with seq=0, which is the wire protocol's
+      reserved sentinel for "no resume".  Added an
+      explicit defensive check that returns
+      `IndexerError::ProtocolViolation` when seq=0 is
+      observed in an EVENT frame.  Regression test
+      `seq_zero_event_protocol_violation`.
+    - **MEDIUM canon-storage migration**: the migration
+      runner read `current_schema_version` OUTSIDE the
+      transaction.  For the v1 idempotent CREATE TABLE
+      migration this is harmless, but a future non-
+      idempotent migration (e.g., ALTER TABLE ADD
+      COLUMN) would corrupt under concurrent multi-
+      process migration.  Switched to BEGIN IMMEDIATE
+      (acquires the write lock at BEGIN itself) AND
+      re-read the version INSIDE the transaction.  Now
+      each migration sees an authoritative post-other-
+      processes' committed version when deciding what
+      to apply.
+    Final gates: 914 tests passing (+1 from the second
+    audit pass's 913: the new seq=0 regression).
+    Clippy + fmt clean.  End-to-end Python harness
+    against a release binary still passes (two-pass
+    dispatch correctness, partial-batch discard, and
+    new seq=0 defense all verified).
 
 **Workstream AR (Audit Remediation, see
 `docs/planning/audit_remediation_plan.md`)** is the most recent landing.

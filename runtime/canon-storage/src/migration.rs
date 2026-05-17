@@ -48,7 +48,7 @@
 //! intervene before retrying.
 
 use crate::storage::StorageError;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 
 /// Name of the metadata table that stores the schema version.
 ///
@@ -217,23 +217,49 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StorageError> {
     }
 
     while current < target {
-        // `current` is a u32 in [0, target); cast to usize is
-        // safe because `target <= u32::MAX` (enforced by
+        // Use BEGIN IMMEDIATE to acquire the write lock at the
+        // BEGIN itself rather than at the first write.  This
+        // closes a multi-process race window: with BEGIN
+        // DEFERRED, two processes could both read version=0
+        // before either tries to write; with BEGIN IMMEDIATE,
+        // only one can hold the write lock at a time, and the
+        // loser's read inside its eventual transaction sees the
+        // winner's committed version.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| StorageError::Backend(format!("migration BEGIN failed: {e}")))?;
+        // Re-read the version INSIDE the transaction.  Combined
+        // with BEGIN IMMEDIATE above, this provides
+        // serialisable migration semantics: each migration sees
+        // the actual on-disk version (post any earlier
+        // committed migration) when it decides what to apply.
+        let in_tx_version = current_schema_version(&tx)?;
+        if in_tx_version > target {
+            return Err(StorageError::MigrationMismatch {
+                expected: target,
+                found: in_tx_version,
+            });
+        }
+        if in_tx_version >= target {
+            // Another process applied every remaining migration
+            // while we were starting the transaction.  Nothing to
+            // do — let the transaction drop (auto-rollback) and
+            // exit the loop.
+            break;
+        }
+        // `in_tx_version` is a u32 in [0, target); cast to usize
+        // is safe because `target <= u32::MAX` (enforced by
         // `target_schema_version`) and `usize` is at least 32-bit
         // on every supported target.
-        let migration_index = current as usize;
+        let migration_index = in_tx_version as usize;
         let migration = &MIGRATIONS[migration_index];
-        let next_version = current + 1;
+        let next_version = in_tx_version + 1;
         tracing::debug!(
-            from = current,
+            from = in_tx_version,
             to = next_version,
             name = migration.name,
             "applying canon-storage migration"
         );
-
-        let tx = conn
-            .transaction()
-            .map_err(|e| StorageError::Backend(format!("migration BEGIN failed: {e}")))?;
         if let Err(e) = (migration.apply)(&tx) {
             // tx is dropped → automatic rollback.
             return Err(StorageError::MigrationFailed {

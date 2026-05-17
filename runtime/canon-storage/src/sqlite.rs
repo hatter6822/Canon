@@ -391,45 +391,22 @@ impl Storage for SqliteStorage {
     }
 
     fn snapshot(&self) -> Result<Box<dyn StorageSnapshot + '_>, StorageError> {
+        // Acquire the connection mutex ONCE for the entire
+        // recovery + BEGIN DEFERRED + warm-up sequence.  An
+        // earlier draft of this code released the lock between
+        // recovery and BEGIN, opening a race window where
+        // another thread could wedge the connection.  Holding
+        // the lock for the entire sequence makes the
+        // recovery+BEGIN atomic.
         let guard = self.lock();
-        // Defensive autocommit check: if a prior caller's
+        // Defensive autocommit recovery: if a prior caller's
         // commit-failure cleanup left the connection in a
-        // half-transaction state (mutex was released but the
-        // SQLite transaction wasn't), recover before we try
-        // BEGIN again.  This is the H-1 audit defense.
+        // half-transaction state, force a ROLLBACK before we
+        // try BEGIN again.  Per audit H-1.
         recover_autocommit_if_needed(&guard);
-        drop(guard);
-        // Re-acquire after recovery (we dropped to avoid the
-        // re-entrant-lock concern of nested guards).
-        self.snapshot_inner()
-    }
-
-    fn transaction(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
-        let guard = self.lock();
-        recover_autocommit_if_needed(&guard);
-        drop(guard);
-        self.transaction_inner()
-    }
-}
-
-impl SqliteStorage {
-    /// Internal helper: BEGIN DEFERRED + WAL-pin warmup, separated
-    /// from the trait method so it can be called after the
-    /// autocommit-recovery dance.
-    fn snapshot_inner(&self) -> Result<Box<dyn StorageSnapshot + '_>, StorageError> {
-        // Acquire the connection mutex and BEGIN a deferred read
-        // transaction.  The deferred mode means the transaction
-        // doesn't actually grab a lock until the first SQL
-        // statement that touches a real table.  We then force a
-        // touch of `sqlite_master` immediately to pin the WAL
-        // read-mark for the snapshot's lifetime.
-        //
-        // We use a manual `BEGIN DEFERRED` + `ROLLBACK` pair
-        // rather than rusqlite's `Transaction` wrapper because
-        // the wrapper's `commit()` consumes `self`, which is
-        // awkward when the transaction is owned by a `Box<dyn>`
-        // whose exact type is opaque to callers.
-        let guard = self.lock();
+        // BEGIN DEFERRED.  The deferred mode means the
+        // transaction doesn't actually grab a lock until the
+        // first SQL statement that touches a real table.
         guard
             .execute_batch("BEGIN DEFERRED;")
             .map_err(|e| StorageError::Backend(format!("snapshot BEGIN: {e}")))?;
@@ -446,19 +423,9 @@ impl SqliteStorage {
         // snapshot's first `get` / `scan` could leak its
         // post-write state into the snapshot's view.
         //
-        // The query may return zero rows (e.g. an empty schema,
-        // though our migrations ensure at least `kv` + `_meta`
-        // exist).  Zero rows is fine — the SELECT still ran,
-        // touching `sqlite_master` and pinning the read mark.
-        //
         // **Failure recovery.**  If this warm-up read fails
         // (e.g. transient I/O error), we MUST roll back the
-        // BEGIN DEFERRED before returning the error.  Otherwise
-        // the connection stays in a half-transaction state and
-        // the next caller's BEGIN fails with "cannot start a
-        // transaction within a transaction" until the mutex is
-        // dropped — at which point another caller inherits the
-        // same broken state.
+        // BEGIN DEFERRED before returning the error.
         match guard.query_row("SELECT 1 FROM sqlite_master LIMIT 1", [], |_| {
             Ok::<(), rusqlite::Error>(())
         }) {
@@ -469,7 +436,9 @@ impl SqliteStorage {
                 // Defensive ROLLBACK to leave the connection in
                 // autocommit mode.  We log if even the ROLLBACK
                 // fails so the operator can see the connection
-                // may be wedged.
+                // may be wedged.  Note: the next caller's
+                // `recover_autocommit_if_needed` will catch any
+                // residual wedge.
                 if let Err(rollback_err) = guard.execute_batch("ROLLBACK;") {
                     tracing::warn!(
                         rollback_error = %rollback_err,
@@ -486,11 +455,12 @@ impl SqliteStorage {
         }))
     }
 
-    /// Internal helper: BEGIN IMMEDIATE, separated from the trait
-    /// method so it can be called after the autocommit-recovery
-    /// dance.
-    fn transaction_inner(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
+    fn transaction(&self) -> Result<Box<dyn StorageTransaction + '_>, StorageError> {
+        // Acquire the connection mutex ONCE for the entire
+        // recovery + BEGIN sequence (avoiding the same race
+        // window discussed in `snapshot`).
         let guard = self.lock();
+        recover_autocommit_if_needed(&guard);
         // BEGIN IMMEDIATE acquires the write lock at the BEGIN
         // statement itself (no warm-up needed).  Either the BEGIN
         // succeeds and we own the write lock, or it fails and the

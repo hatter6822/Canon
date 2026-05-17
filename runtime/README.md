@@ -259,11 +259,11 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (913 tests at the RH-E
-# audit-pass-2 landing — +211 from RH-D: 67 in `canon-storage`
-# (49 unit + 10 integration + 8 property) and 137 in `canon-indexer`
-# (108 unit + 7 integration + 7 property + 12 wire-protocol +
-# 8 daemon-loop + 4 fault-injection); up from 702 at the RH-D
+# Run every member crate's tests (914 tests at the RH-E
+# audit-pass-3 landing — +212 from RH-D: 67 in `canon-storage`
+# (49 unit + 10 integration + 8 property) and 138 in `canon-indexer`
+# (108 unit + 8 integration + 7 property + 12 wire-protocol +
+# 9 daemon-loop + 4 fault-injection); up from 702 at the RH-D
 # landing).
 cargo test --workspace
 

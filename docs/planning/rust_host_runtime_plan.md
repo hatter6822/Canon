@@ -2907,6 +2907,29 @@ table.  Headline implementation notes:
       fuzz, 2 wire-protocol DoS, 4 fault-injection).
       Final test count: 913.
 
+  * **Third audit pass (self-review of second-audit fixes).**
+    Surfaced one CRITICAL race + 2 improvements; all
+    addressed:
+    - **CRITICAL race in audit-2's autocommit recovery**:
+      the trait methods acquired the mutex, called
+      `recover_autocommit_if_needed`, then DROPPED the
+      mutex and re-acquired it inside an `_inner` helper.
+      Between the drop and re-acquire, another thread
+      could wedge the connection.  Fix: inlined recovery
+      into `snapshot()` and `transaction()` so the mutex
+      is held for the entire recovery + BEGIN sequence.
+    - **seq=0 defensive check**: `consume_stream` now
+      rejects events with seq=0 (the wire protocol's
+      reserved sentinel for "no resume") as a typed
+      ProtocolViolation.
+    - **Migration runner race**: migration version read
+      now happens INSIDE the transaction (via BEGIN
+      IMMEDIATE) to provide serialisable migration
+      semantics under concurrent multi-process startup.
+      The v1 migration is idempotent so this was only
+      future-proofing.
+    - Final test count: 914 (+1 seq=0 regression).
+
   * **Workspace version bump.**  `0.1.3 → 0.2.0` (minor bump
     — RH-E ships two substantial new public APIs in
     `canon-storage` and `canon-indexer`; per the workspace
