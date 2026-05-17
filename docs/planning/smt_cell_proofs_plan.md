@@ -26,21 +26,71 @@ submissions off-chain until the SMT path is shipped"
 ## Status
 
   * **Workstream prefix:** `SC` (SMT Cells).  Three sub-units:
-    - **SC.1** Lean SMT spec + per-cell proof scheme.
-    - **SC.2** Solidity SMT verifier (gas-efficient).
-    - **SC.3** Cross-stack soundness theorem + corpus widening.
+    - **SC.1** Lean SMT spec + per-cell proof scheme — **Complete**.
+    - **SC.2** Solidity SMT verifier (gas-efficient) — Not started.
+    - **SC.3** Cross-stack soundness theorem + corpus widening —
+      Not started.
   * **Effort estimate:** 6–9 calendar weeks for one Lean-Solidity
     engineer.  Parallelisable into 4–6 weeks if Lean and Solidity
     are split between two engineers after SC.1.
   * **Build-posture target:** Lean side passes all existing gates
-    plus a new theorem `cellProof_sound_under_collision_free`;
-    Solidity side adds an `SmtVerifier` library and updates
-    `StepVMMerkle.sol` to call it; cross-stack corpus extends
-    with adversarial cell-proof attempts.
-  * **TCB delta:** zero.  The new theorem lives in
-    `LegalKernel/FaultProof/Cell.lean` (non-TCB).
+    plus the new headline theorems `smtCellProof_no_value_substitution`
+    and `smtCellProof_sound_under_collision_free` (the latter is
+    an alias of the former; see "Soundness-formulation note" at
+    SC.1.d below).  Solidity side adds an `SmtVerifier` library
+    and updates `StepVMMerkle.sol` to call it; cross-stack corpus
+    extends with adversarial cell-proof attempts.
+  * **TCB delta:** zero.  The new theorems live in
+    `LegalKernel/FaultProof/Smt.lean` (non-TCB).
   * **Trust-assumption delta:** zero.  Same `CollisionFree
     hashBytes` hypothesis as the existing chain.
+
+### SC.1 closeout (post-landing)
+
+  * **Module:** `LegalKernel/FaultProof/Smt.lean` (new) +
+    `LegalKernel/FaultProof/Cell.lean` (re-exports under the
+    `Cell` sub-namespace).
+  * **Tests:** `LegalKernel/Test/FaultProof/Smt.lean` ships 47
+    test cases covering BitsKey instances, empty-subtree-hash
+    canonicality, well-formedness predicates, verifier
+    completeness, non-trivial proofs (with set bitmask bits),
+    and term-level API-stability checks for every shipped
+    theorem.
+  * **Headline theorems shipped:**
+    - `smtStep_inj_under_collision_free` — backward
+      step-injectivity (the core SMT structural lemma).
+    - `walk_leaf_inj_under_collision_free` — inductive leaf-
+      injectivity for the full 256-level fold.
+    - `smtCellProof_no_value_substitution` — load-bearing
+      operational property: under CR + value-encoder
+      injectivity, no two valid proofs witness different
+      values.
+    - `smtCellProof_sound_under_collision_free` — alias of
+      `no_value_substitution` matching the plan's naming.
+    - `verifySmtCellProof_walks_to_root` — completeness: any
+      well-formed proof verifies against its own walked root.
+    - `verifySmtCellProof_empty_self_verifies` — specialisation:
+      the empty proof self-verifies for any (key, value).
+  * **Soundness-formulation note.**  The plan's §2.4
+    existential form `∃ m : TreeMap, smtRoot m = root ∧ m[key]?
+    = some v` is not provable under `CollisionFree hashBytes`
+    alone: constructing the witness map requires finding
+    pre-images of arbitrary `ByteArray` sibling hashes, which
+    is a hash-inversion problem that collision-resistance does
+    not solve.  We ship the operationally-meaningful
+    *uniqueness* form (`no_value_substitution`) — the standard
+    cryptographic "binding" property for commitments.  This is
+    exactly what the L1 contract relies on: two verifying
+    proofs for the same `(root, key)` cannot witness different
+    values, so an adversarial responder cannot substitute a
+    wrong cell-value via a forged proof.
+  * **Axiom posture:** `#print axioms` on every shipped
+    theorem returns a subset of `[propext, Classical.choice,
+    Quot.sound]`.  No custom axioms; no new opaques.
+  * **`Cell.lean:52` deferral marker:** retired.  The
+    docstring now points to `LegalKernel/FaultProof/Smt.lean`
+    as the SMT-form home; the two forms (witness-state and
+    SMT) ship side-by-side.
 
 ## Table of contents
 
