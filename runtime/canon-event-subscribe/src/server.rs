@@ -351,7 +351,16 @@ impl Server {
         //    cannot block shutdown indefinitely.  Poll
         //    is_finished + sleep instead of an unbounded join().
         if let Err(panic) = bounded_join(extractor_handle, EXTRACTOR_JOIN_TIMEOUT) {
-            tracing::warn!(error = ?panic, "extractor thread panicked or abandoned at shutdown");
+            // panic_message extracts a human-readable string from
+            // a panic payload OR the JoinTimeoutMarker (matching
+            // canon-host's convention).  Without this the
+            // `tracing::warn!(error = ?panic, ...)` would print
+            // an opaque `Box<dyn Any>` shape with no diagnostic
+            // value.
+            tracing::warn!(
+                reason = %panic_message(&panic),
+                "extractor thread panicked or abandoned at shutdown"
+            );
         }
 
         // 5. Wait for dispatch threads to drain (bounded).
@@ -1363,6 +1372,10 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
         (*s).to_string()
     } else if let Some(s) = panic.downcast_ref::<String>() {
         s.clone()
+    } else if let Some(m) = panic.downcast_ref::<JoinTimeoutMarker>() {
+        // `bounded_join` produces this on timeout; render via
+        // Display rather than the opaque "non-string payload".
+        m.to_string()
     } else {
         "<non-string panic payload>".to_string()
     }
