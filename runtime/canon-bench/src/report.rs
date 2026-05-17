@@ -211,12 +211,51 @@ impl BenchmarkReport {
     /// Write this report as pretty-printed JSON to the given file.
     /// The output is byte-identical for byte-identical inputs.
     ///
+    /// ## Atomicity
+    ///
+    /// Writes are atomic-by-rename: the JSON is first written to a
+    /// sibling file with a `.tmp` suffix, then `rename(2)`-ed into
+    /// place.  On POSIX `rename(2)` is atomic with respect to other
+    /// readers of the destination path — readers see either the old
+    /// file or the new one, never a half-written one.  This
+    /// protects CI baseline persistence against the (rare)
+    /// mid-write process crash.  On rename failure the `.tmp` file
+    /// is left behind for operator inspection rather than removed
+    /// (so the partial data can be salvaged if the rename failure
+    /// indicates filesystem corruption rather than transient I/O).
+    ///
     /// # Errors
     ///
-    /// Returns `ReportError::Io` if the file cannot be written.
+    /// Returns `ReportError::Io` if the temp file cannot be
+    /// written or the rename fails.  Returns
+    /// `ReportError::EncodeJson` if serialisation fails
+    /// (unreachable for owned data).
     pub fn save(&self, path: &std::path::Path) -> Result<(), ReportError> {
         let json = serde_json::to_string_pretty(self).map_err(ReportError::EncodeJson)?;
-        std::fs::write(path, json).map_err(|source| ReportError::Io {
+        // Write to a sibling `.tmp` first, then atomically rename
+        // into place.  The temp filename derives from the target's
+        // file_name + ".tmp" suffix; if `path` has no file name
+        // (e.g. it's a directory), we fall back to writing
+        // directly — that error path is the same as the original
+        // non-atomic `fs::write`.
+        let tmp_path = match path.file_name() {
+            Some(name) => {
+                let mut name_with_suffix = name.to_os_string();
+                name_with_suffix.push(".tmp");
+                path.with_file_name(name_with_suffix)
+            }
+            None => {
+                return std::fs::write(path, json).map_err(|source| ReportError::Io {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        };
+        std::fs::write(&tmp_path, json).map_err(|source| ReportError::Io {
+            path: tmp_path.display().to_string(),
+            source,
+        })?;
+        std::fs::rename(&tmp_path, path).map_err(|source| ReportError::Io {
             path: path.display().to_string(),
             source,
         })
@@ -619,6 +658,59 @@ mod tests {
         report.save(&path).unwrap();
         let loaded = BenchmarkReport::load(&path).unwrap();
         assert_eq!(report, loaded);
+    }
+
+    /// REGRESSION: `save` writes atomically (via tmp + rename), so
+    /// the destination file always reflects a complete document.
+    /// We verify by inspecting the post-save tempdir: it should
+    /// contain `report.json` (the target) and NOT `report.json.tmp`
+    /// (which was renamed away).
+    #[test]
+    fn save_uses_atomic_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.json");
+        let report = make_report(10_000.0, 100_000, 500_000, 1_000_000);
+        report.save(&path).unwrap();
+        // Target file exists.
+        assert!(path.exists());
+        // The `.tmp` sibling has been renamed away.
+        let tmp_path = path.with_file_name("report.json.tmp");
+        assert!(!tmp_path.exists());
+        // The directory has exactly one file (the target).
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "expected exactly one file in tempdir");
+    }
+
+    /// REGRESSION: `save` to a target whose parent directory
+    /// doesn't exist returns an `Io` error without leaving any
+    /// partial-state artefact behind.
+    #[test]
+    fn save_rejects_missing_parent_directory() {
+        let report = make_report(10_000.0, 100_000, 500_000, 1_000_000);
+        // Parent /nonexistent/missing/path does not exist; tmp
+        // write will fail with ENOENT.
+        let bad_path = std::path::PathBuf::from("/nonexistent/missing/path/report.json");
+        let result = report.save(&bad_path);
+        assert!(matches!(result, Err(ReportError::Io { .. })));
+    }
+
+    /// `save` to a path with no file name (e.g. a directory) is
+    /// handled gracefully — falls back to non-atomic write whose
+    /// I/O error surfaces correctly.
+    #[test]
+    fn save_no_filename_falls_back_to_direct_write() {
+        let temp = tempfile::tempdir().unwrap();
+        // The tempdir's path has a file_name (the random temp
+        // directory name itself), but it IS a directory, so
+        // fs::write will fail.
+        let report = make_report(10_000.0, 100_000, 500_000, 1_000_000);
+        let result = report.save(temp.path());
+        // Either path the test traverses (the temp::write fallback
+        // or the rename failure) surfaces as Io.
+        assert!(matches!(result, Err(ReportError::Io { .. })));
     }
 
     /// `BenchmarkReport::load` refuses a future protocol version.

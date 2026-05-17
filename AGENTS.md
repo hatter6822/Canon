@@ -870,14 +870,17 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  ~1024 tests at the RH-F + audit-1
-landing (+110 from the RH-E audit-pass-3 landing's 914: 103 lib
-unit tests + 8 smoke / integration tests in the new `canon-bench`
-crate; the audit pass added 14 unit tests + 2 smoke tests on top
-of RH-F's initial 95 (89 lib + 6 smoke) for the new contention-
-free measurement-end path, NaN/Inf validation, runner error-path
-coverage, and `read_exact_with_eof` typed-error semantics).
-RH-E landing breakdown carried below for posterity.
+**Rust-side test count.**  ~1036 tests at the RH-F + audit-2
+landing (+122 from the RH-E audit-pass-3 landing's 914: 113 lib
+unit tests + 10 smoke / integration tests in the new
+`canon-bench` crate; audit-pass-2 added 9 lib + 2 smoke tests
+on top of audit-pass-1's 14 + 2 for the new `MAX_REASON_BYTES`
+DoS-cap, `connect_with_timeout` timeout discipline, fixture
+`transfer_amount` overflow pre-validation, atomic
+report-save-via-rename, and a mock-server-driven coverage path
+for `SubmissionError::UnexpectedVerdict` and
+`SubmissionError::ResponseTooLarge`).  RH-E landing breakdown
+carried below for posterity.
 
 **RH-E test count.**  914 tests at the RH-E
 audit-pass-3 landing (up from 702 at the RH-D landing —
@@ -2446,13 +2449,66 @@ library + binary per `docs/planning/rust_host_runtime_plan.md`
       default.  Fix: re-cast the table as `(Flag, Default,
       Description)` so the default value is explicit.
 
+  * **Audit-pass-2 (deeper self-review).**  A second independent
+    pass surfaced 8 more correctness / security / best-practice
+    findings; all addressed in-PR:
+    - **HIGH (DoS surface in `--connect` mode)** `submit_once`
+      read the server-declared `reason_len` (up to `u32::MAX` =
+      4 GiB) and `vec![0u8; reason_len]`-ed the buffer without
+      a cap.  A hostile / misbehaving `--connect <ADDR>` target
+      could declare an absurd length and OOM the client.  Fix:
+      new `MAX_REASON_BYTES = 64 KiB` (mirrors canon-host's
+      `MAX_SUBPROCESS_OUTPUT`); declared lengths over the cap
+      surface as a typed `SubmissionError::ResponseTooLarge`
+      BEFORE allocation.
+    - **HIGH (TCP connect hang)** `Endpoint::connect()` used
+      `TcpStream::connect()` with no timeout, which would
+      block indefinitely against a non-responding host.  Fix:
+      new `Endpoint::connect_with_timeout(timeout)` that uses
+      `TcpStream::connect_timeout(addr, timeout)` for TCP; the
+      Unix-socket variant inherits the existing fast-fail
+      semantics.  `DEFAULT_CONNECT_TIMEOUT = 5 s`.
+    - **MEDIUM (hot-path allocation)** `submit_once` always
+      allocated `reason_bytes` + the reason String even on the
+      happy path (Ok verdict + empty reason).  Fix: short-circuit
+      after the cap check when verdict==0; skip the reason
+      read + allocation entirely.  The kernel discards
+      pending reason bytes when the connection closes (the
+      §10.5 wire format is one-shot).
+    - **MEDIUM (fixture overflow late-fail)**
+      `FixtureConfig::transfer_amount >= 2^64` previously
+      failed only at first-transfer-encoding inside `generate`,
+      AFTER the O(actor_count) key-derivation work.  Fix:
+      pre-validate in `FixtureConfig::validate` via
+      `TransferAmountTooLarge`.
+    - **MEDIUM (report-save atomicity)** `BenchmarkReport::save`
+      used `fs::write` which is `open + write + close` — a
+      mid-write crash leaves a partial JSON document that the
+      next baseline load would fail to parse.  Fix: write to a
+      sibling `.tmp` and `rename(2)` into place.  POSIX
+      guarantees rename is atomic w.r.t. concurrent readers.
+    - **LOW (defensive)** `percentile_nearest_rank` divides by
+      `denominator` without a non-zero check.  Private fn;
+      callers use literal 100/1000.  Fix: `debug_assert!` for
+      contract clarity.
+    - **LOW (docs)** `Cargo.toml` lint comment claimed
+      `SECP256K1_ORDER_BE` was the "half-order constant" —
+      actually it's the full curve order `n`.  Fix:
+      corrected comment.
+    - **LOW (test coverage)** No tests for
+      `SubmissionError::UnexpectedVerdict` or
+      `ResponseTooLarge` paths from `submit_once`.  Fix:
+      `smoke_unexpected_verdict_surfaces` and
+      `smoke_response_too_large_surfaces` spawn a mock TCP
+      server returning controlled wire-format bytes and
+      verify the typed errors surface correctly.
+
   * **Audit posture at landing.**
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — ~1024 tests
-      passing (+110 from RH-E's 914 landing; +16 from the
-      initial RH-F landing's 1008 via the audit-pass-1
-      additions).
+    - `cargo test --workspace --locked` — ~1036 tests
+      passing (+122 from RH-E's 914 landing; +12 from the
+      initial RH-F audit-pass-1's 1024 via audit-pass-2).
     - `cargo clippy --workspace --all-targets --locked -- -D
       warnings` — clean.
     - `cargo fmt --all -- --check` — clean.
@@ -2463,7 +2519,7 @@ library + binary per `docs/planning/rust_host_runtime_plan.md`
       `./target/release/canon-bench --help` lists every
       documented flag; a full default-workload run
       (1000 actors / 10000 transfers / 64 workers) sustains
-      ~7000-7500 ops/sec without errors.
+      ~6500-7500 ops/sec without errors.
 
 **Workstream AR (Audit Remediation, see
 `docs/planning/audit_remediation_plan.md`)** is the most recent landing.

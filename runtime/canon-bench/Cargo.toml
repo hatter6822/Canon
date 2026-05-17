@@ -120,9 +120,10 @@ cast_precision_loss = "allow"
 # `cast_sign_loss` fires on `i64 -> u64` and friends; bounded by
 # upstream invariants at the boundary.
 cast_sign_loss = "allow"
-# `unreadable_literal` fires on the secp256k1 half-order constant
-# and similar flat 32-byte representations (which we mirror from
-# canon-l1-ingest's `key.rs`).
+# `unreadable_literal` fires on the secp256k1 curve-order constant
+# (`SECP256K1_ORDER_BE` in `fixture.rs`) and similar flat 32-byte
+# representations.  The curve-order bytes are the canonical
+# representation; adding underscores wouldn't improve readability.
 unreadable_literal = "allow"
 # `doc_markdown` fires on prose words that look like type names but
 # lack backticks (e.g. "SignedAction" mentioned in narrative

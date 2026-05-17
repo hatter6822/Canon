@@ -180,7 +180,19 @@ impl Histogram {
 ///
 /// for non-zero numerator; `s[0]` for zero.  Saturates the index
 /// to `N - 1` if the computed rank exceeds the array length.
+///
+/// # Panics
+///
+/// Debug-builds panic if `denominator == 0`.  In release builds the
+/// caller's contract (callers must pass a non-zero denominator)
+/// would result in integer division-by-zero behaviour; the
+/// debug-assertion surfaces the contract violation at test time.
+/// Production callers in this crate pass literal `100` and `1000`.
 fn percentile_nearest_rank(sorted: &[u64], numerator: u64, denominator: u64) -> u64 {
+    debug_assert!(
+        denominator > 0,
+        "percentile_nearest_rank: denominator must be non-zero"
+    );
     let n = sorted.len();
     if n == 0 {
         return 0;

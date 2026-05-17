@@ -118,6 +118,13 @@ pub enum FixtureError {
     /// `transfer_count` is zero.  At least one transfer is required.
     #[error("transfer_count must be >= 1, got 0")]
     NoTransfers,
+    /// `transfer_amount` exceeds the CBE-encoder canonical bound
+    /// (`< 2^64`).  Surfaces upfront at validation rather than
+    /// late at encoding time (where the error would surface only on
+    /// the first transfer encoding, after we've already paid the
+    /// secp256k1 key-derivation cost).
+    #[error("transfer_amount {0} exceeds the 2^64 canonical-encoding bound")]
+    TransferAmountTooLarge(u128),
     /// `deployment_id.len()` exceeds the CBE byte-string canonical
     /// bound.  Unreachable on 64-bit hosts.
     #[error("deployment_id length {0} exceeds canonical-encoding bound")]
@@ -176,13 +183,24 @@ impl FixtureConfig {
     /// # Errors
     ///
     /// Returns `FixtureError::NoActors` /
-    /// `FixtureError::NoTransfers` for empty counts.
+    /// `FixtureError::NoTransfers` for empty counts,
+    /// `FixtureError::TransferAmountTooLarge` if `transfer_amount`
+    /// would overflow CBE's `< 2^64` canonical bound, and
+    /// `FixtureError::DeploymentIdTooLarge` for oversized
+    /// `deployment_id`.
     pub fn validate(&self) -> Result<(), FixtureError> {
         if self.actor_count == 0 {
             return Err(FixtureError::NoActors);
         }
         if self.transfer_count == 0 {
             return Err(FixtureError::NoTransfers);
+        }
+        // Pre-check the transfer amount against CBE's `< 2^64`
+        // canonical bound.  Without this, the failure would surface
+        // only at first-transfer-encoding time inside `generate`,
+        // AFTER we've spent O(actor_count) on key derivation.
+        if self.transfer_amount >= 1u128 << 64 {
+            return Err(FixtureError::TransferAmountTooLarge(self.transfer_amount));
         }
         if self.deployment_id.len() > (1usize << 32) {
             return Err(FixtureError::DeploymentIdTooLarge(self.deployment_id.len()));
@@ -429,6 +447,35 @@ mod tests {
         let mut cfg = FixtureConfig::default();
         cfg.transfer_count = 0;
         assert!(matches!(cfg.validate(), Err(FixtureError::NoTransfers)));
+    }
+
+    /// REGRESSION: `validate` rejects `transfer_amount >= 2^64`
+    /// upfront, before fixture generation pays the per-actor
+    /// key-derivation cost.  CBE's canonical-encoding contract
+    /// bounds Amount at `< 2^64`; passing a larger value used to
+    /// fail late at first-transfer-encoding inside `generate`.
+    #[test]
+    fn validate_rejects_oversize_transfer_amount() {
+        let mut cfg = FixtureConfig::default();
+        cfg.transfer_amount = 1u128 << 64;
+        assert!(matches!(
+            cfg.validate(),
+            Err(FixtureError::TransferAmountTooLarge(_))
+        ));
+        cfg.transfer_amount = u128::MAX;
+        assert!(matches!(
+            cfg.validate(),
+            Err(FixtureError::TransferAmountTooLarge(_))
+        ));
+    }
+
+    /// `validate` accepts `transfer_amount = 2^64 - 1` (the
+    /// largest legal value).
+    #[test]
+    fn validate_accepts_max_transfer_amount() {
+        let mut cfg = FixtureConfig::default();
+        cfg.transfer_amount = (1u128 << 64) - 1;
+        assert!(cfg.validate().is_ok());
     }
 
     /// `scalar_in_range` accepts a known-good scalar (the

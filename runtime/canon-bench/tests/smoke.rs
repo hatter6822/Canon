@@ -12,6 +12,10 @@
 //! integration check that the runner / fixture / report / server
 //! modules compose correctly.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use canon_bench::fixture::{generate, FixtureConfig};
@@ -20,7 +24,7 @@ use canon_bench::report::{
     compare_against_baseline, BenchmarkReport, RegressionVerdict, ReportFixtureConfig,
     TransportKind,
 };
-use canon_bench::runner::{run, Endpoint, RunnerConfig};
+use canon_bench::runner::{run, Endpoint, RunnerConfig, RunnerError, SubmissionError};
 use canon_bench::server::StandaloneServer;
 use canon_host::listener::HandlerConfig;
 
@@ -303,6 +307,150 @@ fn smoke_elapsed_brackets_workload() {
         elapsed_ns >= max_latency_ns,
         "elapsed {elapsed_ns} ns must be >= max latency {max_latency_ns} ns",
     );
+}
+
+/// Spawn a tiny mock TCP server that accepts each connection, reads
+/// a length-prefixed request payload, and writes a configurable
+/// response.  Returns the bound `SocketAddr` + a stop flag.  Used
+/// by the UnexpectedVerdict and ResponseTooLarge tests below.
+fn spawn_mock_response_server(
+    response_bytes: Vec<u8>,
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener bind");
+    let addr = listener.local_addr().expect("mock local_addr");
+    listener
+        .set_nonblocking(true)
+        .expect("mock set_nonblocking");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                    // Read 4-byte BE length, then `length` payload
+                    // bytes (and discard them).
+                    let mut header = [0u8; 4];
+                    if stream.read_exact(&mut header).is_err() {
+                        continue;
+                    }
+                    let len = u32::from_be_bytes(header) as usize;
+                    let mut payload = vec![0u8; len];
+                    let _ = stream.read_exact(&mut payload);
+                    // Write the configured response.
+                    let _ = stream.write_all(&response_bytes);
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    // Give the listener a beat.
+    std::thread::sleep(Duration::from_millis(50));
+    (addr, stop, handle)
+}
+
+/// REGRESSION: a mock server returning a non-Ok verdict (verdict
+/// byte = 1, with a reason string) surfaces as
+/// `SubmissionError::UnexpectedVerdict` carrying both the verdict
+/// byte and the reason text.  Validates that the runner correctly
+/// surfaces non-zero verdicts as typed errors (rather than silently
+/// counting them as successes).
+#[test]
+fn smoke_unexpected_verdict_surfaces() {
+    // Build a response: verdict byte = 1 (NotAdmissible), reason
+    // length = 8, reason = "rejected".
+    let reason = b"rejected";
+    let mut response = Vec::with_capacity(5 + reason.len());
+    response.push(1u8); // verdict
+    response.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+    response.extend_from_slice(reason);
+
+    let (addr, stop, handle) = spawn_mock_response_server(response);
+
+    let fixture_cfg = FixtureConfig {
+        actor_count: 2,
+        transfer_count: 4,
+        ..Default::default()
+    };
+    let fixture = generate(&fixture_cfg).expect("generate fixture");
+
+    let mut runner_cfg = RunnerConfig::defaults_for(Endpoint::Tcp(addr));
+    runner_cfg.worker_count = 1;
+    runner_cfg.warmup_requests = 0;
+    runner_cfg.request_timeout = Duration::from_secs(2);
+
+    let result = run(&fixture, &runner_cfg);
+
+    // Shut down the mock server cleanly.
+    stop.store(true, Ordering::Release);
+    let _ = handle.join();
+
+    match result {
+        Err(RunnerError::SubmissionFailed(SubmissionError::UnexpectedVerdict {
+            verdict_byte,
+            reason,
+        })) => {
+            assert_eq!(verdict_byte, 1);
+            assert_eq!(reason, "rejected");
+        }
+        Ok(_) => panic!("expected UnexpectedVerdict error"),
+        Err(other) => panic!("expected UnexpectedVerdict, got {other:?}"),
+    }
+}
+
+/// REGRESSION: a mock server declaring a reason length above the
+/// `MAX_REASON_BYTES` cap surfaces as
+/// `SubmissionError::ResponseTooLarge` BEFORE allocating the
+/// payload.  Without the cap, a hostile server could cause an OOM
+/// via `vec![0u8; declared_length]`.
+#[test]
+fn smoke_response_too_large_surfaces() {
+    // Response header: verdict byte 0, declared reason length =
+    // u32::MAX.  We don't actually send 4 GiB of payload (we just
+    // declare it); the client should reject upfront on the
+    // declared-length check.
+    let mut response = Vec::with_capacity(5);
+    response.push(0u8);
+    response.extend_from_slice(&u32::MAX.to_be_bytes());
+
+    let (addr, stop, handle) = spawn_mock_response_server(response);
+
+    let fixture_cfg = FixtureConfig {
+        actor_count: 2,
+        transfer_count: 4,
+        ..Default::default()
+    };
+    let fixture = generate(&fixture_cfg).expect("generate fixture");
+
+    let mut runner_cfg = RunnerConfig::defaults_for(Endpoint::Tcp(addr));
+    runner_cfg.worker_count = 1;
+    runner_cfg.warmup_requests = 0;
+    runner_cfg.request_timeout = Duration::from_secs(2);
+
+    let result = run(&fixture, &runner_cfg);
+
+    // Shut down the mock server cleanly.
+    stop.store(true, Ordering::Release);
+    let _ = handle.join();
+
+    match result {
+        Err(RunnerError::SubmissionFailed(SubmissionError::ResponseTooLarge { declared, max })) => {
+            assert_eq!(declared, u32::MAX as usize);
+            assert_eq!(max, 64 * 1024);
+        }
+        Ok(_) => panic!("expected ResponseTooLarge error"),
+        Err(other) => panic!("expected ResponseTooLarge, got {other:?}"),
+    }
 }
 
 /// REGRESSION: per-worker last-completion reduce-on-join MUST

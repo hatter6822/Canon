@@ -280,13 +280,14 @@ cd runtime/
 # downloads the pinned 1.83 stable channel via rustup.
 cargo build --workspace --all-targets
 
-# Run every member crate's tests (~1024 tests at the RH-F +
-# audit-pass-1 landing — +110 from the RH-E audit-pass-3 landing's
-# 914: 103 lib unit tests + 8 smoke / integration tests in the new
-# `canon-bench` crate.  Audit-pass-1 added 14 unit + 2 smoke tests
-# on top of RH-F's initial 89 + 6 for NaN/Inf validation, runner
-# error-path coverage, contention-free measurement-end correctness,
-# and `read_exact_with_eof` typed-error semantics).
+# Run every member crate's tests (~1036 tests at the RH-F +
+# audit-pass-2 landing — +122 from the RH-E audit-pass-3 landing's
+# 914: 113 lib unit tests + 10 smoke / integration tests in the new
+# `canon-bench` crate.  Audit-pass-2 added 9 lib + 2 smoke tests
+# on top of audit-pass-1's 14 + 2 for the new MAX_REASON_BYTES DoS
+# cap, connect_with_timeout discipline, fixture transfer_amount
+# overflow pre-validation, atomic report-save-via-rename, and
+# mock-server-driven UnexpectedVerdict / ResponseTooLarge coverage).
 cargo test --workspace
 
 # Lint gate: every clippy warning is promoted to a hard error.

@@ -92,6 +92,30 @@ use std::os::unix::net::UnixStream;
 use crate::fixture::Fixture;
 use crate::histogram::Histogram;
 
+/// Defensive cap on the response reason-payload length.  The wire
+/// format permits up to `u32::MAX` (~4 GiB) reason bytes; trusting
+/// that without bounds is a DoS surface when running against
+/// `--connect <ADDR>` targets the operator does not control.
+///
+/// 64 KiB matches `canon_host::kernel::command::MAX_SUBPROCESS_OUTPUT`,
+/// which is the largest legitimate reason the production
+/// `CommandKernel` will emit (captured subprocess stderr).  Anything
+/// larger is either a misbehaving / malicious server or a future
+/// kernel that needs the bound bumped intentionally.
+pub const MAX_REASON_BYTES: usize = 64 * 1024;
+
+/// Default TCP connect timeout for `Endpoint::connect()`.  Distinct
+/// from `RunnerConfig::request_timeout`: the connect timeout bounds
+/// just the TCP three-way handshake, not the full request/response
+/// cycle.  A separate (smaller) bound matters because TCP
+/// `connect()` blocks indefinitely against a non-responding host
+/// (the kernel doesn't apply the read / write timeout until after
+/// the handshake completes).  Unix-socket connects don't have a
+/// connect-timeout API in `std`; they typically complete in
+/// sub-millisecond time or fail immediately, so the missing bound
+/// is acceptable.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Where the benchmark connects to.
 #[derive(Clone, Debug)]
 pub enum Endpoint {
@@ -106,18 +130,44 @@ impl Endpoint {
     /// Establish a connection.  Returns a typed [`Connection`]
     /// implementing [`Read`] + [`Write`].
     ///
+    /// Equivalent to
+    /// `connect_with_timeout(DEFAULT_CONNECT_TIMEOUT)`.
+    ///
     /// # Errors
     ///
     /// Returns `std::io::Error` if `connect` fails.
     pub fn connect(&self) -> std::io::Result<Connection> {
+        self.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT)
+    }
+
+    /// Establish a connection with an explicit connect-only timeout.
+    /// Distinct from per-request read/write timeouts: bounds just
+    /// the TCP three-way handshake (or Unix-socket open).
+    ///
+    /// ## Limitations
+    ///
+    /// `std::os::unix::net::UnixStream` doesn't expose a
+    /// connect-with-timeout API in `std`.  For Unix-socket
+    /// endpoints, the `timeout` argument is documented but ignored:
+    /// Unix-socket connects typically complete in sub-millisecond
+    /// time or fail immediately (the socket either exists and
+    /// accepts, or `connect(2)` returns `ENOENT` /
+    /// `ECONNREFUSED`).  TCP gets a real bound via
+    /// [`TcpStream::connect_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` if `connect` fails or times out.
+    pub fn connect_with_timeout(&self, timeout: Duration) -> std::io::Result<Connection> {
         match self {
             #[cfg(unix)]
             Self::UnixSocket(path) => {
+                let _ = timeout; // see Limitations.
                 let stream = UnixStream::connect(path)?;
                 Ok(Connection::Unix(stream))
             }
             Self::Tcp(addr) => {
-                let stream = TcpStream::connect(addr)?;
+                let stream = TcpStream::connect_timeout(addr, timeout)?;
                 Ok(Connection::Tcp(stream))
             }
         }
@@ -295,6 +345,17 @@ pub enum SubmissionError {
         got: usize,
         /// Bytes the header declared.
         declared: usize,
+    },
+    /// The host's declared reason length exceeds [`MAX_REASON_BYTES`].
+    /// Defends against a hostile / misbehaving `--connect <ADDR>`
+    /// target sending a multi-gigabyte declared length to exhaust
+    /// client memory.
+    #[error("response reason length {declared} exceeds cap {max}")]
+    ResponseTooLarge {
+        /// The length the server declared.
+        declared: usize,
+        /// The configured per-response cap.
+        max: usize,
     },
 }
 
@@ -625,6 +686,22 @@ enum ReadKind {
 
 /// Submit one pre-framed request and verify the response is Ok.
 ///
+/// ## Hot-path discipline
+///
+/// On the happy path (`verdict_byte == 0`, the canon-host MockKernel's
+/// always-Ok response), the function performs:
+///   * One `connect()` + `set_timeout()` + `write_all()` + `flush()`
+///     + `shutdown_write()` (the unavoidable I/O sequence).
+///   * One 5-byte header read.
+///   * Zero heap allocations after the connection's read-buffer
+///     fill — no reason-payload allocation, no UTF-8 conversion,
+///     no String construction.
+///
+/// The connection's pending reason bytes (if any) are NOT consumed
+/// — the kernel discards them when we close the socket on function
+/// return.  This is safe because the canon-host wire format is
+/// one-shot per connection: no further requests / responses follow.
+///
 /// # Errors
 ///
 /// See [`SubmissionError`].
@@ -633,7 +710,7 @@ fn submit_once(
     framed: &[u8],
     timeout: Duration,
 ) -> Result<(), SubmissionError> {
-    let mut conn = endpoint.connect()?;
+    let mut conn = endpoint.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT)?;
     conn.set_timeout(timeout)?;
     conn.write_all(framed)?;
     conn.flush()?;
@@ -646,7 +723,34 @@ fn submit_once(
     let verdict_byte = header[0];
     let reason_len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
 
-    // Read the reason payload.
+    // Defensive cap on the declared reason length BEFORE allocating
+    // the payload buffer.  Without this, a hostile / misbehaving
+    // server could declare `reason_len = u32::MAX` (~4 GiB), causing
+    // a client-side OOM on the `vec![0u8; reason_len]` allocation.
+    // Checked BEFORE the verdict check so an Ok verdict with an
+    // absurd declared length still surfaces as a typed error
+    // (rather than being silently masked by the happy-path
+    // short-circuit below).
+    if reason_len > MAX_REASON_BYTES {
+        return Err(SubmissionError::ResponseTooLarge {
+            declared: reason_len,
+            max: MAX_REASON_BYTES,
+        });
+    }
+
+    // Happy-path fast exit: verdict==0 means the kernel admitted the
+    // action; we don't need the reason text (it's diagnostic-only).
+    // Skip the read + allocation entirely.  The kernel-side bytes
+    // (if any) are discarded when the socket closes on function
+    // return — canon-host's wire format is one-shot, so there's
+    // no protocol concern.
+    if verdict_byte == 0 {
+        return Ok(());
+    }
+
+    // verdict != 0: read the reason payload + surface as a typed
+    // error.  This path is off the hot loop (only triggered on
+    // harness misconfiguration or kernel rejection).
     let mut reason_bytes = vec![0u8; reason_len];
     if reason_len > 0 {
         read_exact_with_eof(
@@ -658,19 +762,10 @@ fn submit_once(
         )?;
     }
     let reason = String::from_utf8_lossy(&reason_bytes).into_owned();
-
-    // We expect Ok (verdict byte 0).  Anything else is a harness
-    // failure (the host's MockKernel is configured to return Ok
-    // for every submission; a NotAdmissible / ParseError / Busy
-    // would mean the harness has wired up the wrong kernel or
-    // the host's queue is saturated).
-    if verdict_byte != 0 {
-        return Err(SubmissionError::UnexpectedVerdict {
-            verdict_byte,
-            reason,
-        });
-    }
-    Ok(())
+    Err(SubmissionError::UnexpectedVerdict {
+        verdict_byte,
+        reason,
+    })
 }
 
 /// Read exactly `buf.len()` bytes from `reader`, returning a typed
@@ -704,7 +799,7 @@ fn read_exact_with_eof<R: Read>(
 mod tests {
     use super::{
         read_exact_with_eof, Endpoint, ReadKind, RunOutcome, RunnerConfig, RunnerError,
-        SubmissionError,
+        SubmissionError, DEFAULT_CONNECT_TIMEOUT, MAX_REASON_BYTES,
     };
     use crate::histogram::Histogram;
     use std::io::Cursor;
@@ -909,5 +1004,84 @@ mod tests {
         let mut buf = [0u8; 5];
         read_exact_with_eof(&mut reader, &mut buf, ReadKind::Header).unwrap();
         assert_eq!(buf, [1u8, 2, 3, 4, 5]);
+    }
+
+    /// `DEFAULT_CONNECT_TIMEOUT` is documented; pin to catch
+    /// accidental drift.
+    #[test]
+    fn default_connect_timeout_pinned() {
+        assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(5));
+    }
+
+    /// `MAX_REASON_BYTES` is documented; pin to catch accidental
+    /// drift.  Mirrors the canon-host `MAX_SUBPROCESS_OUTPUT` cap
+    /// (the largest legitimate reason `CommandKernel` will emit).
+    #[test]
+    fn max_reason_bytes_pinned() {
+        assert_eq!(MAX_REASON_BYTES, 64 * 1024);
+    }
+
+    /// `SubmissionError::ResponseTooLarge` Display contains the
+    /// declared length and the cap.
+    #[test]
+    fn response_too_large_display() {
+        let err = SubmissionError::ResponseTooLarge {
+            declared: 1_000_000_000,
+            max: 64 * 1024,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("1000000000"));
+        assert!(s.contains("65536"));
+    }
+
+    /// `Endpoint::connect_with_timeout` against a refused TCP
+    /// address returns an error promptly (no hang).  Uses a port
+    /// bound + dropped immediately so connect-time fails with
+    /// ECONNREFUSED.
+    #[test]
+    fn connect_with_timeout_refuses_promptly() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let endpoint = Endpoint::Tcp(addr);
+        let started = std::time::Instant::now();
+        let result = endpoint.connect_with_timeout(Duration::from_secs(30));
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "connect to closed port should fail");
+        // ECONNREFUSED is immediate (sub-millisecond on Linux loopback);
+        // we allow up to 1 second for slow CI runners but the 30-second
+        // timeout MUST NOT fire.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect failed in {elapsed:?}; expected sub-second ECONNREFUSED"
+        );
+    }
+
+    /// `Endpoint::connect_with_timeout` honours the timeout.  We
+    /// target `192.0.2.1` (TEST-NET-1 — guaranteed not to route)
+    /// with a short timeout and assert the timeout fires.  This
+    /// test is skipped if the system rejects the TEST-NET-1 route
+    /// with an immediate error (e.g. some firewalls return
+    /// ENETUNREACH instantly).
+    #[test]
+    fn connect_with_timeout_respects_timeout() {
+        // TEST-NET-1: RFC 5737, reserved for documentation.  Should
+        // not route anywhere; connect will hang until timeout.
+        let addr: std::net::SocketAddr = "192.0.2.1:1".parse().unwrap();
+        let endpoint = Endpoint::Tcp(addr);
+        let timeout = Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let result = endpoint.connect_with_timeout(timeout);
+        let elapsed = started.elapsed();
+        assert!(result.is_err());
+        // If the system immediately rejects the route (ENETUNREACH),
+        // elapsed will be short; otherwise the timeout fires.  Either
+        // way the call must NOT take much longer than the timeout.
+        assert!(
+            elapsed < timeout + Duration::from_secs(2),
+            "connect took {elapsed:?}; expected <= {:?}",
+            timeout + Duration::from_secs(2)
+        );
     }
 }

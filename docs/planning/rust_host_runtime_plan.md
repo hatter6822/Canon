@@ -3059,35 +3059,42 @@ through it, and emits a human-readable + JSON report.
 
 #### Test mass at landing
 
-After audit-pass-1: 103 lib unit tests + 8 smoke / integration
-tests = 111 new tests bringing the workspace total from ~914
-(post-RH-E audit-pass-3) to ~1024.  Coverage:
+After audit-pass-2: 113 lib unit tests + 10 smoke / integration
+tests = 123 new tests bringing the workspace total from ~914
+(post-RH-E audit-pass-3) to ~1036.  Coverage:
 
-  * `fixture` — 18 tests: scalar-in-range edge cases (zero,
+  * `fixture` — 20 tests: scalar-in-range edge cases (zero,
     `n`, `n ± 1`), deterministic derivation (seed-independence,
     index-independence), small-scale fixture generation,
     payload-byte layout (the Transfer-tag layout is pinned),
     per-actor nonce monotonicity (decoded back from the
     Encoded bytes for round-trip verification),
     `MAX_SCALAR_ATTEMPT_INDEX` / `MAX_SCALAR_ATTEMPTS` invariant
-    pin.
+    pin, `transfer_amount >= 2^64` upfront validation,
+    boundary `transfer_amount = 2^64 - 1` acceptance.
   * `histogram` — 17 tests: percentile correctness on
     known input (1..=100), summary idempotency, merge,
     constant-sample / two-sample stddev (textbook formula),
     JSON round-trip, all-zero stddev for constant samples.
-  * `report` — 18 tests: baseline regression direction-
+  * `report` — 21 tests: baseline regression direction-
     awareness (improvement never regresses; only worse-
     direction drift), multi-metric regression aggregation,
     protocol-version drift detection, JSON malformed /
     missing-file error paths, human-summary format
-    correctness.
-  * `runner` — 13 tests: zero-workers / oversize-warmup
+    correctness, atomic save-via-rename mechanics
+    (post-save filesystem state pinning), missing-parent-
+    directory error path, directory-target-as-path graceful
+    handling.
+  * `runner` — 18 tests: zero-workers / oversize-warmup
     validation, Endpoint cloning, `RunOutcome::throughput_
     ops_per_sec` zero / typical / sub-second cases,
     `read_exact_with_eof` happy-path / truncated-header /
     truncated-reason / zero-length / fragmented-reader,
-    `SpawnFailed` / `UnexpectedVerdict` Display format
-    pinning.
+    `SpawnFailed` / `UnexpectedVerdict` / `ResponseTooLarge`
+    Display format pinning,
+    `DEFAULT_CONNECT_TIMEOUT` / `MAX_REASON_BYTES`
+    constants pin, `connect_with_timeout` prompt refusal
+    + timeout-respect verification.
   * `config` — 22 tests: every flag's happy path + every
     documented error path (unknown flag, missing value,
     invalid value, mutually-exclusive flags), CLI mode
@@ -3098,13 +3105,16 @@ tests = 111 new tests bringing the workspace total from ~914
     Inf-rejection for the same fields.
   * `server` — 3 tests: spawn + stop on Unix + TCP, stop
     idempotency.
-  * `tests/smoke.rs` — 8 end-to-end smoke tests: Unix-socket
+  * `tests/smoke.rs` — 10 end-to-end smoke tests: Unix-socket
     benchmark, TCP benchmark, complete report round-trip
     (save + load + compare), refused-connection error path,
     histogram-merge integration, deterministic fixture
     byte-equality across runs, elapsed-brackets-workload
     (reduce-on-join correctness), elapsed-consistent-across-
-    runs (run-to-run stability).
+    runs (run-to-run stability), mock-server-driven
+    `UnexpectedVerdict` surfacing (verdict=1+reason="rejected"),
+    mock-server-driven `ResponseTooLarge` surfacing
+    (reason_len = u32::MAX caps before allocation).
   * Crate-level — 4 tests: crate-name / identifier /
     protocol-version constants don't drift; default-constants
     match the plan §RH-F specification.
@@ -3237,12 +3247,72 @@ best-practice / documentation findings; all addressed in-PR:
     default.  Fix: re-cast the table as `(Flag, Default,
     Description)` so the default value is explicit.
 
+#### Audit-pass-2 (deeper self-review)
+
+A second independent audit pass surfaced 8 more correctness /
+security / best-practice findings; all addressed in-PR:
+
+  * **HIGH (DoS surface in `--connect` mode)** `submit_once`
+    read the server-declared `reason_len` (up to `u32::MAX` =
+    4 GiB) and `vec![0u8; reason_len]`-ed the buffer without
+    a cap.  A hostile / misbehaving `--connect <ADDR>` target
+    could declare an absurd length and OOM the client.  Fix:
+    new `MAX_REASON_BYTES = 64 KiB` (mirrors canon-host's
+    `MAX_SUBPROCESS_OUTPUT`); declared lengths over the cap
+    surface as a typed `SubmissionError::ResponseTooLarge`
+    BEFORE allocation.  Smoke test pins the behaviour via a
+    mock server declaring `reason_len = u32::MAX`.
+  * **HIGH (TCP connect hang)** `Endpoint::connect()` used
+    `TcpStream::connect()` with no timeout, which would
+    block indefinitely against a non-responding host (the
+    OS-level connect timeout is typically 60+ seconds).
+    Fix: new `Endpoint::connect_with_timeout(timeout)` using
+    `TcpStream::connect_timeout(addr, timeout)` for TCP; the
+    Unix-socket variant inherits fast-fail semantics (Unix
+    `connect(2)` either succeeds immediately or returns
+    ENOENT/ECONNREFUSED).  `DEFAULT_CONNECT_TIMEOUT = 5 s`.
+  * **MEDIUM (hot-path allocation)** `submit_once` allocated
+    `reason_bytes` + the UTF-8 reason String even on the
+    happy path (Ok verdict).  Fix: short-circuit after the
+    cap check when `verdict_byte == 0`; skip the reason read
+    + allocation entirely.  The kernel discards pending
+    reason bytes when the connection closes (the §10.5 wire
+    format is one-shot, so no protocol concern).
+  * **MEDIUM (fixture overflow late-fail)**
+    `FixtureConfig::transfer_amount >= 2^64` previously
+    failed only at first-transfer-encoding inside `generate`,
+    AFTER the O(actor_count) key-derivation cost.  Fix:
+    pre-validate in `FixtureConfig::validate` via the new
+    `FixtureError::TransferAmountTooLarge`.
+  * **MEDIUM (report-save atomicity)** `BenchmarkReport::save`
+    used `fs::write` which is non-atomic.  A mid-write
+    process crash leaves a partial JSON document that the
+    next baseline-load would fail to parse.  Fix: write to a
+    sibling `.tmp` and `rename(2)` into place.  POSIX
+    guarantees `rename(2)` is atomic w.r.t. concurrent
+    readers — they see either the old file or the new one,
+    never a half-written intermediate.
+  * **LOW (defensive)** `percentile_nearest_rank` divides by
+    `denominator` without a non-zero check.  Private fn;
+    callers use literal 100 / 1000 so unreachable in
+    practice.  Fix: `debug_assert!(denominator > 0)` for
+    contract clarity.
+  * **LOW (docs)** `Cargo.toml` lint comment claimed
+    `SECP256K1_ORDER_BE` was the "half-order constant" —
+    actually it's the full curve order `n`.  Fix: corrected
+    comment.
+  * **LOW (test coverage)** No tests for
+    `SubmissionError::UnexpectedVerdict` or `ResponseTooLarge`
+    paths from `submit_once`.  Fix: two new mock-TCP-server-
+    driven smoke tests in `tests/smoke.rs` verify both error
+    variants surface correctly with the right payload.
+
 #### Audit posture at landing
 
   * `cargo build --workspace --all-targets --locked` — green.
-  * `cargo test --workspace --locked` — ~1024 tests passing
-    (+110 from RH-E's 914 landing; +16 from the initial
-    RH-F landing's 1008 via audit-pass-1).
+  * `cargo test --workspace --locked` — ~1036 tests passing
+    (+122 from RH-E's 914 landing; +12 from audit-pass-1's
+    1024 via audit-pass-2).
   * `cargo clippy --workspace --all-targets --locked -- -D
     warnings` — clean.
   * `cargo fmt --all -- --check` — clean.
