@@ -870,14 +870,15 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  692 tests across 26 non-empty test
+**Rust-side test count.**  694 tests across 26 non-empty test
 binaries at the RH-D landing (up from 526 at the RH-C landing —
-+166 tests across the new `canon-event-subscribe` crate: 143 lib
-+ 15 integration + 8 property, including 4 audit-regression
-tests for the C-1 duplicate-delivery race, C-2 multi-event-per-
-frame cache, C-3 slow-reader write-timeout, and M-4 symlinked
-log-path defence).  `cargo test --workspace` from `runtime/` is
-the canonical query.  Test mass breakdown:
++168 tests across the new `canon-event-subscribe` crate: 143 lib
++ 17 integration + 8 property, including 5 audit-regression
+tests for the C-1 / C-NEW-1 duplicate-delivery + multi-event-per-
+frame races, C-2 multi-event-per-frame cache, C-3 slow-reader
+write-timeout, M-4 symlinked log-path defence, and H-4 laggy
+shutdown).  `cargo test --workspace` from `runtime/` is the
+canonical query.  Test mass breakdown:
 
   * `canon-cross-stack` — 31 tests (29 unit + 2 integration);
     unchanged since RH-H.
@@ -963,7 +964,7 @@ the canonical query.  Test mass breakdown:
     + prefix layout + length matches payload, bounded queue
     admits exactly N before Busy, drain dispatches every
     enqueue.
-  * `canon-event-subscribe` — 166 tests (143 lib + 15
+  * `canon-event-subscribe` — 168 tests (143 lib + 17
     integration + 8 property).  Lib tests cover: wire-frame
     parser (SUBSCRIBE / EVENT / LAG_EXCEEDED / TRUNCATED /
     SERVER_SHUTDOWN / INVALID_REQUEST round-trip; truncated /
@@ -1648,11 +1649,60 @@ Closeout for the full per-sub-unit breakdown.  Headlines:
     - **M-8** Lag-counter atomic ordering bumped to `AcqRel`
       so a dispatch thread seeing `disconnected=true` reads a
       consistent `lag` value.
+    A second independent audit pass surfaced 4 additional
+    critical findings (all introduced by the first audit's
+    fixes) plus 6 high + 9 medium.  All criticals and highs
+    are now addressed:
+    - **C-NEW-1** (Critical) The first-pass C-1 fix had a
+      regression: when a multi-event-per-frame batch was split
+      across the cache snapshot and channel state, the
+      drain-on-startup logic silently dropped channel events
+      mis-classified as duplicates.  Fix: `extractor_loop`
+      now holds the cache lock across BOTH the entire batch
+      push AND broadcast, making the snapshot+channel state
+      atomically consistent.  Regression test:
+      `multi_event_per_frame_no_silent_drops_under_load`.
+    - **C-NEW-3** (Critical) `accept_loop`'s `.expect("spawn
+      dispatch thread")` panicked the daemon on `EAGAIN` /
+      `ENOMEM`, defeating the `max_concurrent_connections`
+      DoS cap.  Fix: replaced with an explicit match that
+      logs the failure and continues; the slot RAII releases
+      the counter via the consumed closure.
+    - **C-NEW-4** (Critical) `dispatch_handles.retain(|h|
+      !h.is_finished())` silently dropped finished JoinHandles
+      without joining them, swallowing panic info.  Fix: new
+      `reap_finished_dispatch_handles` joins finished handles
+      and logs panics.
+    - **H-NEW-6** (High) `shutdown_emits_shutdown_frame_to_all
+      _subscribers` test used `>= 1` instead of `== 3`,
+      meaning the test passed even if H-4 was reverted.  Fix:
+      assertion strengthened to `== 3`; new
+      `laggy_subscriber_receives_shutdown_not_lag_exceeded`
+      regression test covers the H-4 fix directly.
+    - **M-NEW-2** Subprocess respawn backoff now bumps on
+      extract-time errors too (not just spawn-time), preventing
+      tight loops if subprocess crashes on every input.
+    - **M-NEW-5** TailReader's TOCTOU between
+      `symlink_metadata` and `File::open` closed via post-open
+      inode verification on Unix (`(dev, ino)` match).
+    - **M-NEW-7** Acceptor backoff now resets on `WouldBlock`
+      success and on `Ok`, not just on `Ok`.
+    - **M-NEW-8** Rejection-write deadline tightened from 2s
+      to 250ms to bound acceptor-thread tie-up.
+    - **L-NEW-1** / **L-NEW-6** `is_connected` now skips the
+      probe entirely if `read_timeout()` fails (defensive),
+      and treats `Interrupted` errno as "still connected"
+      (signal-delivery transient).
+    - Extractor thread now wraps its body in `catch_unwind`
+      so panics still trigger `broadcast_shutdown` + stop=true.
+    - EventCache tracks `last_evicted_seq` for future
+      partial-batch detection (helper API exposed; range
+      semantics unchanged for backwards compatibility).
     Final gates:
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — 692 tests passing
-      (+166 from the RH-C landing's 526).
+    - `cargo test --workspace --locked` — 694 tests passing
+      (+168 from the RH-C landing's 526).
     - `cargo clippy --workspace --all-targets --locked -- -D
       warnings` — clean.
     - `cargo fmt --all -- --check` — clean.

@@ -255,20 +255,41 @@ impl Server {
         //    (log corruption, subprocess unavailable).  Without
         //    this, the acceptor keeps accepting connections that
         //    can never be served.
+        //
+        //    Additional defence (post-second-audit): wrap the
+        //    extractor body in `catch_unwind` so that a panic
+        //    in the extractor still sets the stop flag.  Without
+        //    this, a panicking extractor would unwind silently
+        //    and the acceptor would keep running forever.
         let extractor_stop = Arc::clone(&stop);
         let extractor_cache = Arc::clone(&cache);
         let extractor_registry = Arc::clone(&registry);
         let extractor_handle = thread::Builder::new()
             .name("canon-event-subscribe-extractor".into())
             .spawn(move || {
-                extractor_loop(
-                    &mut tail,
-                    extractor.as_ref(),
-                    &extractor_cache,
-                    &extractor_registry,
-                    poll_interval,
-                    &extractor_stop,
-                );
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    extractor_loop(
+                        &mut tail,
+                        extractor.as_ref(),
+                        &extractor_cache,
+                        &extractor_registry,
+                        poll_interval,
+                        &extractor_stop,
+                    );
+                }));
+                if let Err(panic) = result {
+                    // Ensure stop is set + subscribers notified
+                    // even on panic.  AssertUnwindSafe is correct
+                    // because the data we touch on panic (registry,
+                    // stop atomic) are themselves Sync and resilient
+                    // to partial-update.
+                    tracing::error!(
+                        "extractor thread panicked; halting daemon: {:?}",
+                        panic_message(&panic)
+                    );
+                    extractor_registry.broadcast_shutdown();
+                    extractor_stop.store(true, Ordering::Release);
+                }
             })
             .expect("spawn extractor thread");
 
@@ -381,8 +402,12 @@ fn wait_for_dispatch_drain(
 
 /// Default maximum simultaneous active dispatch-thread count.
 /// Caps spawn-storm DoS independently of the subscriber-registry
-/// cap (`max_subscribers`).  Mirrors canon-host's
-/// `DEFAULT_MAX_CONCURRENT_CONNECTIONS = 1024`.
+/// cap (`max_subscribers`).  Per H-NEW-3 audit: kept at 4× the
+/// subscriber cap to allow for in-flight handshake +
+/// post-shutdown drain, but no further multiplier — operators
+/// who tune `max_subscribers` get a tighter implied
+/// concurrent-connection cap.  Config validation enforces
+/// `max_concurrent_connections >= max_subscribers`.
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 
 /// Hard ceiling on operator-configurable simultaneous active
@@ -515,7 +540,13 @@ fn accept_loop(
                 let registry_clone = Arc::clone(registry);
                 let stop_clone = Arc::clone(stop);
                 let cfg = dispatch_cfg;
-                let handle = thread::Builder::new()
+                // C-NEW-3 audit fix: don't panic on spawn failure
+                // (EAGAIN / ENOMEM / RLIMIT_NPROC).  An attacker
+                // exhausting the OS thread budget could otherwise
+                // crash the entire daemon.  Log, drop the slot
+                // (closure consumed `slot`; Drop runs on Err),
+                // and continue accepting.
+                let spawn_result = thread::Builder::new()
                     .name(format!("canon-event-subscribe-dispatch-{peer}"))
                     .spawn(move || {
                         // `slot` is moved into the closure so its
@@ -532,12 +563,27 @@ fn accept_loop(
                         ) {
                             tracing::warn!(error = ?e, peer = %peer, "subscriber connection ended with error");
                         }
-                    })
-                    .expect("spawn dispatch thread");
-                dispatch_handles.push(handle);
-                // Reap any completed dispatch threads to keep the
-                // handles vec bounded.
-                dispatch_handles.retain(|h| !h.is_finished());
+                    });
+                match spawn_result {
+                    Ok(handle) => dispatch_handles.push(handle),
+                    Err(e) => {
+                        // Slot is dropped via the consumed closure;
+                        // counter decrements automatically.
+                        tracing::error!(
+                            error = ?e,
+                            peer = %peer,
+                            "failed to spawn dispatch thread; backing off"
+                        );
+                        // Briefly back off to avoid spin-looping
+                        // on persistent thread-budget exhaustion.
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                // C-NEW-4 audit fix: explicitly join finished
+                // handles instead of silently dropping them, so
+                // panics in dispatch threads surface in operator
+                // logs.
+                reap_finished_dispatch_handles(dispatch_handles);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No connection waiting; sleep a short interval
@@ -553,9 +599,33 @@ fn accept_loop(
     }
 }
 
+/// Reap dispatch threads that have already finished by joining
+/// them (so panics surface) and removing them from the handle
+/// vector.  Per C-NEW-4 audit: the prior `retain(|h|
+/// !h.is_finished())` silently dropped JoinHandles without
+/// joining, swallowing any panic info.
+fn reap_finished_dispatch_handles(handles: &mut Vec<JoinHandle<()>>) {
+    let drained: Vec<JoinHandle<()>> = std::mem::take(handles);
+    for h in drained {
+        if h.is_finished() {
+            if let Err(panic) = h.join() {
+                tracing::error!(panic = ?panic, "dispatch thread panicked");
+            }
+        } else {
+            // Still running — re-park.
+            handles.push(h);
+        }
+    }
+}
+
 /// Write a `LagExceeded` rejection frame on a connection that
 /// was refused at capacity.  Best-effort; the client may have
 /// already disconnected.
+///
+/// Per M-NEW-8 audit fix: deadline is 250ms (down from 2s) so a
+/// stalled client cannot tie up the acceptor thread on this
+/// best-effort write.  The acceptor is single-threaded; long
+/// rejection-writes are a DoS amplifier.
 fn write_capacity_rejection(
     stream: &TcpStream,
     max_frame_size: usize,
@@ -567,9 +637,7 @@ fn write_capacity_rejection(
         max_frame_size,
     )?;
     let mut stream = stream;
-    // Brief write deadline so a stalled client can't tie up the
-    // acceptor on this best-effort write.
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
     std::io::Write::write_all(&mut stream, &bytes)?;
     Ok(())
 }
@@ -714,6 +782,27 @@ fn handle_connection(
         }
     }
 
+    // 3.5. Race-window check: between `registry.register` and
+    // `Server::run`'s second `broadcast_shutdown`, a subscriber
+    // can be registered AFTER `halt_extractor`'s first
+    // `broadcast_shutdown` but BEFORE the second one.  If
+    // `stop` is set right now, the second broadcast_shutdown
+    // will set our `shutdown_requested` shortly.  We could
+    // proactively check `stop` here and emit ServerShutdown
+    // immediately, but doing so would race against
+    // `broadcast_shutdown` which also sets the flag.  Letting
+    // `dispatch_live` poll the shutdown flag handles both
+    // cases uniformly with a single source of truth.  We do
+    // check `stop` here to short-circuit the dispatch_live
+    // setup costs (cheap optimization; safe because
+    // `dispatch_live` would observe the flag via
+    // broadcast_shutdown anyway).
+    if stop.load(Ordering::Acquire) && !sub.is_shutdown_requested() {
+        // Trigger our own shutdown without waiting for
+        // broadcast_shutdown to reach us.
+        let _ = sub.request_shutdown();
+    }
+
     // 4. Live mode: drain the subscriber's receiver, writing
     //    each event as it arrives.  Loop until disconnect.
     dispatch_live(&mut stream, peer, &sub, &rx, max_frame_size, &stop);
@@ -736,32 +825,35 @@ fn handle_connection(
 /// `max_backfilled` due to the registration→backfill race:
 ///
 ///   1. Subscriber is registered in `registry` (Time T1).
-///   2. Extractor pushes event K to cache AND broadcasts K to
-///      every subscriber's channel (Time T2 > T1).  Subscriber
-///      is registered, so K goes into this subscriber's channel.
-///   3. Subscriber's `handle_connection` acquires the cache
-///      lock and reads `cache.range(resume_from)` (Time T3 >
-///      T2).  Backfill includes K.
-///   4. Subscriber writes K to stream via backfill.
+///   2. Extractor begins a batch: acquires the cache lock,
+///      pushes every event in the batch to the cache, broadcasts
+///      every event to every subscriber's channel (including this
+///      one), and releases the cache lock.  This entire phase is
+///      atomic under the cache lock (Time T2 > T1).
+///   3. Subscriber's `handle_connection` acquires the cache lock
+///      (blocking if the extractor is mid-batch), reads
+///      `cache.range(resume_from)` (Time T3 ≥ T2's release).
+///      Backfill includes the entire batch from T2.
+///   4. Subscriber writes the batch to stream via backfill.
 ///   5. Subscriber enters `dispatch_live`.
-///   6. **Without the drain below**: the channel still holds K
-///      from step 2.  Dispatch would deliver K AGAIN.
+///   6. **Without the drain below**: the channel still holds the
+///      events from T2.  Dispatch would deliver them AGAIN.
 ///
 /// The one-time drain at the top of this function discards every
-/// pending channel event with `seq ≤ max_backfilled`.  After the
-/// drain, the channel only holds events broadcast AFTER the
-/// backfill cache snapshot, all of which have seq strictly
-/// greater than `max_backfilled` (the extractor pushes in
-/// non-decreasing seq order under the cache lock).
+/// pending channel event with `seq ≤ max_backfilled`.  Per
+/// C-NEW-1 audit fix: this works correctly only because
+/// `extractor_loop` holds the cache lock across BOTH the entire
+/// batch push AND the entire batch broadcast.  Without that
+/// atomicity, a subscriber could see a partial batch in cache
+/// while the channel held additional events at the same seq —
+/// the drain would incorrectly suppress those events as
+/// "duplicates".
 ///
-/// This invariant fixes the duplicate-delivery race that would
-/// otherwise violate the wire-protocol's "every event delivered
-/// exactly once" promise.  Multi-event-per-frame (events sharing
-/// a seq) is handled correctly because we compare seqs, not
-/// event identities — a multi-event batch backfilled at seq=K
-/// has `max_backfilled = K`, and any duplicate of that batch
-/// remaining in the channel (also at seq=K) is filtered out by
-/// `seq <= K`.
+/// Post-fix invariant: any event with `seq ≤ max_backfilled`
+/// found in the channel during the drain is GUARANTEED to be a
+/// duplicate of a backfilled event, because the cache snapshot
+/// at handle_connection time captured the entire batch atomically
+/// with respect to the broadcast.
 fn dispatch_live(
     stream: &mut TcpStream,
     peer: SocketAddr,
@@ -923,7 +1015,14 @@ fn dispatch_live(
 /// (closed) in that case so the dispatch loop emits the proper
 /// shutdown sequence rather than silently dropping bytes.
 fn is_connected(stream: &TcpStream) -> bool {
-    let prev_timeout = stream.read_timeout().ok().flatten();
+    // L-NEW-1 audit: if read_timeout() itself fails, the stream
+    // is in a weird state — assume connected and skip the probe
+    // to avoid corrupting timeout state.  The next iteration's
+    // recv_timeout will surface any real disconnect.
+    let prev_timeout = match stream.read_timeout() {
+        Ok(t) => t,
+        Err(_) => return true,
+    };
     if stream
         .set_read_timeout(Some(Duration::from_millis(1)))
         .is_err()
@@ -942,8 +1041,11 @@ fn is_connected(stream: &TcpStream) -> bool {
             false
         }
         Err(e)
+            // L-NEW-6 audit: Interrupted is a transient
+            // signal-delivery; treat as "still connected".
             if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
+                || e.kind() == std::io::ErrorKind::TimedOut
+                || e.kind() == std::io::ErrorKind::Interrupted =>
         {
             true
         }
@@ -978,18 +1080,39 @@ fn extractor_loop(
                 match extractor.extract(frame.seq, &frame.payload) {
                     Ok(events) => {
                         let event_count = events.len();
-                        for event in events {
-                            // Push to cache.
-                            let mut cache_guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+                        // C-NEW-1 audit fix: push the entire batch
+                        // AND broadcast it under a single cache
+                        // lock hold.  This makes the cache snapshot
+                        // and channel state mutually consistent
+                        // for any subscriber acquiring the cache
+                        // lock: they will see either the full
+                        // batch in cache + all corresponding
+                        // channel events, OR none of this batch.
+                        // A partial-batch snapshot is no longer
+                        // possible.
+                        //
+                        // Without this atomicity, a subscriber's
+                        // cache snapshot could see (event1) but
+                        // channel could carry (event1, event2,
+                        // event3), and the dispatch_live drain
+                        // (suppressing seq ≤ max_backfilled)
+                        // would incorrectly suppress event2 and
+                        // event3 — silently dropping events.
+                        //
+                        // Trade-off: while we hold the cache
+                        // lock, subscribers acquiring it for
+                        // backfill snapshot block.  For typical
+                        // small batches (1-3 events × ≤256
+                        // subscribers × non-blocking try_send),
+                        // this is fast (sub-ms).  For pathological
+                        // batches (e.g. 100-event distributeOthers
+                        // × 256 subscribers), it can reach ~25ms;
+                        // still acceptable for a deployment-rare
+                        // action.
+                        let mut cache_guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+                        // Phase A: push entire batch to cache.
+                        for event in &events {
                             if let Err(e) = cache_guard.push(event.clone()) {
-                                // Should never happen post-C-2 fix
-                                // (equal seqs are now allowed for
-                                // multi-event-per-frame).  If we
-                                // see this in production, the
-                                // extractor produced strictly
-                                // decreasing seqs — a real bug.
-                                // Halt loudly so the operator
-                                // catches it.
                                 tracing::error!(
                                     error = ?e,
                                     seq = event.seq,
@@ -999,17 +1122,32 @@ fn extractor_loop(
                                 halt_extractor(registry, stop);
                                 return;
                             }
-                            drop(cache_guard);
-                            // Broadcast.
+                        }
+                        // Phase B: broadcast every event in the
+                        // batch, still under the cache lock.
+                        // Each `registry.broadcast` takes its own
+                        // (registry-mutex-protected) snapshot of
+                        // the subscribers; the cache lock here
+                        // does NOT deadlock with the registry
+                        // mutex (they are independent).
+                        let mut total_evicted = 0usize;
+                        let mut total_enqueued = 0usize;
+                        let mut total_lagging = 0usize;
+                        for event in events {
                             let summary = registry.broadcast(event);
-                            if summary.evicted > 0 {
-                                tracing::warn!(
-                                    evicted = summary.evicted,
-                                    enqueued = summary.enqueued,
-                                    lagging = summary.lagging,
-                                    "subscribers evicted for lag"
-                                );
-                            }
+                            total_evicted += summary.evicted;
+                            total_enqueued += summary.enqueued;
+                            total_lagging += summary.lagging;
+                        }
+                        drop(cache_guard);
+                        if total_evicted > 0 {
+                            tracing::warn!(
+                                evicted = total_evicted,
+                                enqueued = total_enqueued,
+                                lagging = total_lagging,
+                                seq = frame.seq,
+                                "subscribers evicted for lag during batch broadcast"
+                            );
                         }
                         if event_count == 0 {
                             tracing::trace!(seq = frame.seq, "log frame produced no events");
@@ -1100,6 +1238,18 @@ fn extractor_loop(
 fn halt_extractor(registry: &Arc<SubscriberRegistry>, stop: &Arc<AtomicBool>) {
     registry.broadcast_shutdown();
     stop.store(true, Ordering::Release);
+}
+
+/// Best-effort extraction of a panic payload's text content.
+/// Matches `canon-host`'s `panic_message` for consistency.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 #[cfg(test)]

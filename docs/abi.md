@@ -1007,18 +1007,32 @@ successfully `resume_from` on a retry.
 
 Sequence numbers are assigned by the tail reader in strictly
 monotonic order starting at `1` for the first log frame in the
-file.  Across any subscription, the seqs the server emits are
-strictly increasing — a client receiving seqs `[a, b, c]`
-satisfies `a < b < c`.  There are no duplicate seqs and no gaps
-beyond what the keep-history window discards.
+file.
 
-Within a single log frame, the extractor may produce multiple
-events (e.g. a `transfer` action emits both a sender and
-receiver `balanceChanged` event).  All such events share the
-same seq number.  This is intentional: the seq number identifies
-the **causal step**, not the **logical event index**.  Clients
-that need event ordering within a seq inherit the order from
-the Lean `Events.extractEvents` function (deterministic).
+**Across log frames**, seqs are strictly increasing — events
+from frame N have a seq strictly less than events from frame
+N+1.
+
+**Within a single log frame**, the extractor may produce
+multiple events (e.g. a `transfer` action emits both a sender
+and receiver `balanceChanged` event).  All such events share
+the same seq number.  This is intentional: the seq number
+identifies the **causal step**, not the **logical event
+index**.  Clients that need event ordering within a seq
+inherit the push order from the Lean
+`Events.extractEvents` function (deterministic).
+
+So the wire stream's seq sequence is **non-decreasing** (equal
+seqs within a frame, strictly increasing across frames).
+Clients can rely on:
+
+  * No event is delivered twice.
+  * For any two events received in order `(a, b)`, `a.seq ≤
+    b.seq`.
+  * If `a.seq < b.seq`, all events at seq=a.seq have already
+    been delivered before any event at seq=b.seq.
+  * No gaps in seqs (other than what the keep-history window
+    discards on resume — see §11.3).
 
 ### 11.5 Transport
 

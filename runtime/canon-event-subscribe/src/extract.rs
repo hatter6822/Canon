@@ -658,7 +658,18 @@ pub mod subprocess {
                     let mut bad = state_slot.take().expect("just present");
                     let _ = bad.child.kill();
                     let _ = bad.child.wait();
-                    // Drop state_slot here so next call respawns.
+                    // M-NEW-2 audit fix: increment the
+                    // consecutive-failure counter on
+                    // extract-time errors too, not just
+                    // spawn-time.  Without this, a subprocess
+                    // that crashes on every input would
+                    // respawn-immediately in a tight loop with
+                    // no backoff.  The extractor_loop's H-5 halt
+                    // catches this in production (any
+                    // ExtractError halts the daemon), but
+                    // defence-in-depth is cheap here.
+                    self.consecutive_spawn_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     Err(e)
                 }
             }

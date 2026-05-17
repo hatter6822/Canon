@@ -99,6 +99,15 @@ pub enum RangeOutcome {
 ///     cache reaches capacity.
 ///   * Seq=0 is reserved (clients pass `resume_from = 0` to mean
 ///     "no resume").  `push` rejects seq=0 as a `OutOfOrder` error.
+///   * **Partial-batch eviction detection** (second-audit fix):
+///     when eviction cuts a multi-event-per-frame batch (i.e.
+///     evicts one event but leaves others at the same seq in
+///     the cache), `range(from_seq)` with `from_seq < partial_seq`
+///     returns `OutOfWindow` rather than delivering a partial
+///     batch.  Without this defence, a late-arriving subscriber
+///     could see (K, b), (K, c), ... when the extractor actually
+///     emitted (K, a), (K, b), (K, c), ... — missing the first
+///     event silently.
 #[derive(Debug)]
 pub struct EventCache {
     buffer: VecDeque<CachedEvent>,
@@ -106,6 +115,10 @@ pub struct EventCache {
     /// Last seq pushed.  Used to enforce monotonicity.  `0` if
     /// no events have been pushed yet.
     last_pushed_seq: u64,
+    /// Seq of the most-recently-evicted event, or `None` if no
+    /// event has been evicted yet.  Used to detect partial-batch
+    /// front in `range()`.  Per second-audit finding.
+    last_evicted_seq: Option<u64>,
 }
 
 /// Errors returned by [`EventCache::push`].
@@ -143,6 +156,7 @@ impl EventCache {
             buffer: VecDeque::with_capacity(capacity),
             capacity,
             last_pushed_seq: 0,
+            last_evicted_seq: None,
         })
     }
 
@@ -199,13 +213,35 @@ impl EventCache {
                 previous: self.last_pushed_seq,
             });
         }
-        // Evict oldest if at capacity.
+        // Evict oldest if at capacity.  Track the evicted seq so
+        // `range()` can detect a partial batch at the front.
         if self.buffer.len() == self.capacity {
-            self.buffer.pop_front();
+            if let Some(evicted) = self.buffer.pop_front() {
+                self.last_evicted_seq = Some(evicted.seq);
+            }
         }
         self.last_pushed_seq = event.seq;
         self.buffer.push_back(event);
         Ok(())
+    }
+
+    /// Seq of the most-recently-evicted event, or `None` if none.
+    #[must_use]
+    pub fn last_evicted_seq(&self) -> Option<u64> {
+        self.last_evicted_seq
+    }
+
+    /// True iff the cache currently has a partial batch at its
+    /// front: the oldest cached event shares its seq with the
+    /// most-recently-evicted event.  When true, backfill at a
+    /// `from_seq` strictly less than that seq would deliver a
+    /// partial batch and is rejected by [`Self::range`].
+    #[must_use]
+    pub fn has_partial_front(&self) -> bool {
+        match (self.last_evicted_seq, self.buffer.front()) {
+            (Some(evicted), Some(front)) => evicted == front.seq,
+            _ => false,
+        }
     }
 
     /// Query the cache for events with `seq > from_seq`.

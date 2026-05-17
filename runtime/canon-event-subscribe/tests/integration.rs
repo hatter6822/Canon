@@ -449,6 +449,13 @@ fn zero_length_event_payload_delivered() {
 
 /// Server shutdown propagates a `ServerShutdown` frame to every
 /// live subscriber before closing the socket.
+///
+/// **H-4 audit regression:** prior to the H-4 fix
+/// (`shutdown_requested` flag decoupled from queue capacity),
+/// some subscribers could be silently mis-evicted with
+/// `LagExceeded` instead of `ServerShutdown`.  This test
+/// asserts ALL 3 subscribers receive the explicit ServerShutdown
+/// frame.
 #[test]
 fn shutdown_emits_shutdown_frame_to_all_subscribers() {
     let log = tempfile::NamedTempFile::new().unwrap();
@@ -472,16 +479,85 @@ fn shutdown_emits_shutdown_frame_to_all_subscribers() {
             Err(_) => {
                 // Acceptable: connection closed before the frame
                 // was delivered.  Some shutdown timings have this
-                // race; the test verifies "≥ 1 subscriber got the
-                // frame OR the server closed cleanly".
+                // race; the test verifies all subscribers EITHER
+                // got the frame OR the server closed cleanly.
             }
         }
     }
-    // At least one subscriber should have received the explicit
-    // shutdown frame (race with connection close).
+    // Post-H-4, all three subscribers should receive the
+    // ServerShutdown frame (no more silent mis-eviction).
+    assert_eq!(
+        shutdown_count, 3,
+        "expected 3 ServerShutdown frames, got {shutdown_count}"
+    );
+}
+
+/// **H-4 regression test: laggy subscriber still receives
+/// ServerShutdown on graceful shutdown.**  Prior to the H-4
+/// fix, a subscriber whose channel was full at shutdown time
+/// would be silently mis-evicted with `LagExceeded`.  Verify
+/// the new `shutdown_requested` flag path catches them.
+#[test]
+fn laggy_subscriber_receives_shutdown_not_lag_exceeded() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let log_path = log.path().to_path_buf();
+    let extractor = Box::new(MockExtractor::new());
+    extractor.set_responses(vec![MockResponse::Ok(vec![b"e".to_vec()])]);
+    let listener = Server::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Tiny send queue so the subscriber's channel fills quickly.
+    // Very high lag threshold so the subscriber is NOT lag-evicted
+    // before we shut down.
+    let mut cfg = ServerConfig::with_defaults(
+        listener,
+        TailReader::open(&log_path).unwrap(),
+        extractor,
+        Arc::new(SubscriberRegistry::with_max_subscribers(64)),
+        Arc::new(Mutex::new(EventCache::new(64).unwrap())),
+    );
+    cfg.send_queue_depth = 1;
+    cfg.max_subscriber_lag = 1_000_000; // very high; will not evict
+    cfg.poll_interval = Duration::from_millis(20);
+    let (stop, addr, handle) = start_server(cfg, addr);
+
+    // Connect; don't read.
+    let mut s = connect_subscribe(addr, 0);
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Produce many events to fill the subscriber's channel.
+    for _ in 0..20 {
+        append_log_frame(&log_path, b"frame");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Now shut down.  Subscriber's channel is full; under the
+    // old `enqueue_shutdown` it would be marked Disconnected
+    // and mis-evicted.  Post-fix, the `shutdown_requested`
+    // flag is set even though the channel is full.
+    stop_server(&stop, handle);
+
+    // Drain events until we see ServerShutdown or LagExceeded.
+    let mut got_shutdown = false;
+    let mut got_lag_exceeded = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match read_outbound(&mut s, DEFAULT_MAX_FRAME_SIZE) {
+            Ok(OutboundFrame::Event { .. }) => continue,
+            Ok(OutboundFrame::ServerShutdown { .. }) => {
+                got_shutdown = true;
+                break;
+            }
+            Ok(OutboundFrame::LagExceeded { .. }) => {
+                got_lag_exceeded = true;
+                break;
+            }
+            Ok(other) => panic!("unexpected frame: {other:?}"),
+            Err(_) => break, // connection closed
+        }
+    }
     assert!(
-        shutdown_count >= 1,
-        "expected ≥ 1 ServerShutdown frame, got {shutdown_count}"
+        got_shutdown,
+        "expected ServerShutdown frame; got_lag_exceeded={got_lag_exceeded}"
     );
 }
 
@@ -752,6 +828,78 @@ fn no_duplicate_delivery_under_load() {
     assert_eq!(
         prev_seq, n as u64,
         "received {prev_seq} of {n} expected events"
+    );
+
+    stop_server(&stop, handle);
+}
+
+/// **C-NEW-1 audit regression test: multi-event-per-frame events
+/// are not silently dropped at the snapshot/broadcast boundary.**
+///
+/// The original C-1 channel-drain fix had a regression: when a
+/// multi-event batch was split across the subscriber's cache
+/// snapshot and the channel state, the drain would suppress
+/// channel events that weren't actually duplicates of backfilled
+/// events, silently dropping them.
+///
+/// The second-audit fix (push + broadcast under a single cache
+/// lock) makes the snapshot+channel state mutually consistent.
+/// This test exercises the scenario by producing many
+/// multi-event-per-frame batches under load and verifying that
+/// every event reaches subscribers exactly once.
+#[test]
+fn multi_event_per_frame_no_silent_drops_under_load() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let log_path = log.path().to_path_buf();
+    let frames: usize = 10;
+    let events_per_frame: usize = 5;
+    let extractor = Box::new(MockExtractor::new());
+    // Each frame produces `events_per_frame` events.
+    let responses: Vec<MockResponse> = (1..=frames)
+        .map(|i| {
+            MockResponse::Ok(
+                (0..events_per_frame)
+                    .map(|j| format!("frame-{i}-event-{j}").into_bytes())
+                    .collect(),
+            )
+        })
+        .collect();
+    extractor.set_responses(responses);
+    let (cfg, addr) = make_server(&log_path, extractor, 128, 64);
+    let (stop, addr, handle) = start_server(cfg, addr);
+
+    let mut s = connect_subscribe(addr, 0);
+    std::thread::sleep(Duration::from_millis(80));
+
+    // Produce all frames rapidly.
+    for i in 0..frames {
+        append_log_frame(&log_path, format!("frame-{i}").as_bytes());
+    }
+
+    // Read every expected event (frames * events_per_frame).
+    let total_expected = frames * events_per_frame;
+    let mut received: Vec<Vec<u8>> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while received.len() < total_expected && Instant::now() < deadline {
+        match read_outbound(&mut s, DEFAULT_MAX_FRAME_SIZE) {
+            Ok(OutboundFrame::Event { payload, .. }) => received.push(payload),
+            Ok(other) => panic!("expected Event, got {other:?}"),
+            Err(e) => panic!("read failed at {} events: {e:?}", received.len()),
+        }
+    }
+    assert_eq!(
+        received.len(),
+        total_expected,
+        "expected {total_expected} events, got {}",
+        received.len()
+    );
+    // Verify uniqueness: every event's payload should appear once.
+    let mut sorted = received.clone();
+    sorted.sort();
+    let unique_count = sorted.windows(2).filter(|w| w[0] != w[1]).count() + 1;
+    assert_eq!(
+        unique_count, total_expected,
+        "received duplicate events (expected {total_expected} unique, got {unique_count})"
     );
 
     stop_server(&stop, handle);

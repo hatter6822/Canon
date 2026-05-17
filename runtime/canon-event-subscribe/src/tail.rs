@@ -238,30 +238,41 @@ impl TailReader {
     /// Open the log file at `path` and seek to the beginning.
     /// Subsequent `poll` calls walk the file from byte 0.
     ///
-    /// ## Symlink policy (M-4 audit fix)
+    /// ## Symlink + TOCTOU policy (M-4 audit fix, second pass)
     ///
-    /// The path is verified to point at a **regular file** via
-    /// `Metadata::file_type().is_file()` (which follows symlinks).
-    /// We then additionally check via
-    /// `symlink_metadata().file_type().is_symlink()` that the
-    /// path itself is NOT a symlink; if it is, we refuse to
-    /// proceed.  This defends multi-tenant operator scenarios
-    /// where an attacker could symlink the configured
-    /// `--log-path` to a different file, causing the daemon to
-    /// emit events from the wrong source.
+    /// Two-step defence:
+    ///
+    ///   1. `symlink_metadata` rejects a path that IS a symlink
+    ///      at its leaf, AND rejects non-regular files (FIFOs,
+    ///      devices, etc.).
+    ///   2. On Unix, after `File::open` succeeds, we re-stat the
+    ///      open handle via `Metadata` and verify the
+    ///      `(dev, ino)` pair matches the pre-open metadata.  An
+    ///      attacker swapping the file between the check and the
+    ///      open is detected (the inode would differ) and the
+    ///      open is refused.
+    ///
+    /// This closes the TOCTOU window between the symlink check
+    /// and the open.  On Windows, the inode check is not
+    /// available (different file-identity model); only the
+    /// pre-open check applies.  Operators on multi-tenant
+    /// Windows hosts should ensure the parent directory is
+    /// non-writable by other users.
     ///
     /// # Errors
     ///
-    /// Returns `TailError::Io` if the file cannot be opened or
-    /// is not a regular file.
+    /// Returns `TailError::Io` if the file cannot be opened, is
+    /// not a regular file, is a symlink, or was swapped between
+    /// the pre-open check and the open.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, TailError> {
         let path_owned = path.as_ref().to_path_buf();
-        // Refuse symlinks (M-4 defence).
-        let sym_meta = std::fs::symlink_metadata(&path_owned).map_err(|e| TailError::Io {
+        // Step 1: pre-open metadata check.  Refuses symlinks and
+        // non-regular files at the leaf.
+        let pre_meta = std::fs::symlink_metadata(&path_owned).map_err(|e| TailError::Io {
             offset: 0,
             source: e,
         })?;
-        if sym_meta.file_type().is_symlink() {
+        if pre_meta.file_type().is_symlink() {
             return Err(TailError::Io {
                 offset: 0,
                 source: std::io::Error::new(
@@ -274,8 +285,7 @@ impl TailReader {
                 ),
             });
         }
-        // Refuse non-regular files (FIFOs, devices, etc).
-        if !sym_meta.file_type().is_file() {
+        if !pre_meta.file_type().is_file() {
             return Err(TailError::Io {
                 offset: 0,
                 source: std::io::Error::new(
@@ -284,10 +294,15 @@ impl TailReader {
                 ),
             });
         }
+        // Step 2: open + post-open inode verification (Unix
+        // only).  Closes the TOCTOU race between symlink_metadata
+        // and File::open.
         let file = File::open(&path_owned).map_err(|e| TailError::Io {
             offset: 0,
             source: e,
         })?;
+        #[cfg(unix)]
+        verify_inode_match(&file, &pre_meta, &path_owned)?;
         Ok(Self {
             file,
             path: path_owned,
@@ -490,6 +505,43 @@ impl TailReader {
         self.next_seq = 1;
         Ok(())
     }
+}
+
+/// On Unix, verify that the opened file's (dev, ino) matches
+/// the pre-open `symlink_metadata` result.  Closes the TOCTOU
+/// race window between the symlink check and `File::open`.
+///
+/// An attacker swapping the path with a different file (or
+/// symlink to a different file) between the pre-check and the
+/// open would result in inode mismatch.  We refuse the open in
+/// that case.
+#[cfg(unix)]
+fn verify_inode_match(
+    file: &File,
+    pre_meta: &std::fs::Metadata,
+    path: &Path,
+) -> Result<(), TailError> {
+    use std::os::unix::fs::MetadataExt;
+    let post_meta = file.metadata().map_err(|e| TailError::Io {
+        offset: 0,
+        source: e,
+    })?;
+    if post_meta.dev() != pre_meta.dev() || post_meta.ino() != pre_meta.ino() {
+        return Err(TailError::Io {
+            offset: 0,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "log path {} was swapped between pre-open check and open \
+                     (pre-open ino={}, post-open ino={}); refusing to proceed",
+                    path.display(),
+                    pre_meta.ino(),
+                    post_meta.ino()
+                ),
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// FNV-1a-64 of the supplied bytes.  Mirrors Lean's
