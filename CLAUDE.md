@@ -870,19 +870,23 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  698 tests across 26 non-empty test
+**Rust-side test count.**  702 tests across 26 non-empty test
 binaries at the RH-D landing (up from 526 at the RH-C landing —
-+172 tests across the new `canon-event-subscribe` crate: 146 lib
-+ 18 integration + 8 property, including 9 audit-regression
-tests for the C-1 / C-NEW-1 / C-3R-1 duplicate-delivery +
-multi-event-per-frame races, C-2 multi-event-per-frame cache,
-C-3 slow-reader write-timeout, M-4 symlinked log-path defence,
-H-4 laggy shutdown, H-NEW-3 max-concurrent-vs-subscribers
-validation, partial-batch-eviction detection in
-`EventCache::range`, and a stress test exercising concurrent
-subscribers + multi-event-per-frame batches).  `cargo test
---workspace` from `runtime/` is the canonical query.  Test mass
-breakdown:
++176 tests across the new `canon-event-subscribe` crate: 150
+lib + 18 integration + 8 property, including 13 audit-regression
+tests covering: C-1 / C-NEW-1 / C-3R-1 duplicate-delivery +
+multi-event-per-frame races (incl. deterministic unit-level
+snapshot-atomicity tests `broadcast_to_snapshot_excludes_post
+_snapshot_registrants` + `broadcast_to_snapshot_multi_event
+_uniform_exclusion`); C-2 multi-event-per-frame cache; C-3
+slow-reader write-timeout; M-4 symlinked log-path defence; H-4
+laggy shutdown; H-NEW-3 max-concurrent-vs-subscribers
+validation; H-NEW-4 bounded_join (`bounded_join_abandons_wedged
+_thread` + `bounded_join_returns_clean_for_finished_thread`);
+partial-batch-eviction detection in `EventCache::range`; stress
+test exercising concurrent subscribers + multi-event-per-frame
+batches.  `cargo test --workspace` from `runtime/` is the
+canonical query.  Test mass breakdown:
 
   * `canon-cross-stack` — 31 tests (29 unit + 2 integration);
     unchanged since RH-H.
@@ -968,7 +972,7 @@ breakdown:
     + prefix layout + length matches payload, bounded queue
     admits exactly N before Busy, drain dispatches every
     enqueue.
-  * `canon-event-subscribe` — 172 tests (146 lib + 18
+  * `canon-event-subscribe` — 176 tests (150 lib + 18
     integration + 8 property).  Lib tests cover: wire-frame
     parser (SUBSCRIBE / EVENT / LAG_EXCEEDED / TRUNCATED /
     SERVER_SHUTDOWN / INVALID_REQUEST round-trip; truncated /
@@ -1758,8 +1762,27 @@ Closeout for the full per-sub-unit breakdown.  Headlines:
     Final gates:
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — 698 tests passing
-      (+172 from the RH-C landing's 526).
+    - `cargo test --workspace --locked` — 702 tests passing
+      (+176 from the RH-C landing's 526).
+    Fourth audit pass: surfaced 2 medium + 1 low + test-coverage
+    gaps; all addressed:
+    - **M-3R-4** `docs/abi.md` §11 missing entries for
+      `--write-timeout-ms` / `--handshake-read-timeout-ms` /
+      `--max-concurrent-connections`.  Added §11.5.1 (Transport
+      timeouts) and §11.5.2 (DoS bounds) with full coverage.
+    - **M-3R-5** TailReader's test-only `reopen` bypassed the
+      symlink + inode TOCTOU check.  Now delegates to
+      `Self::open` for uniform safety.
+    - **L-3R-1** Race-window-check `request_shutdown` outcome
+      now logs at `tracing::debug` for observability instead
+      of silently discarding.
+    - Deterministic unit tests for `broadcast_to_snapshot`
+      atomicity (C-3R-1 regression catch):
+      `broadcast_to_snapshot_excludes_post_snapshot_registrants`
+      + `broadcast_to_snapshot_multi_event_uniform_exclusion`.
+    - Unit tests for `bounded_join` (H-NEW-4 regression catch):
+      `bounded_join_abandons_wedged_thread` +
+      `bounded_join_returns_clean_for_finished_thread`.
     - `cargo clippy --workspace --all-targets --locked -- -D
       warnings` — clean.
     - `cargo fmt --all -- --check` — clean.

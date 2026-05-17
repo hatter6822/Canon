@@ -61,7 +61,9 @@ use crate::extract::{ExtractError, Extractor};
 use crate::frame::{
     encode_outbound, read_inbound, write_outbound, InboundFrame, OutboundFrame, WriteFrameError,
 };
-use crate::subscription::{DeliveryEvent, RegisterError, Subscriber, SubscriberRegistry};
+use crate::subscription::{
+    DeliveryEvent, EnqueueOutcome, RegisterError, Subscriber, SubscriberRegistry,
+};
 use crate::tail::{PollOutcome, TailError, TailReader};
 
 /// How long the extractor thread waits for the subscribe to
@@ -868,8 +870,30 @@ fn handle_connection(
     // broadcast_shutdown anyway).
     if stop.load(Ordering::Acquire) && !sub.is_shutdown_requested() {
         // Trigger our own shutdown without waiting for
-        // broadcast_shutdown to reach us.
-        let _ = sub.request_shutdown();
+        // broadcast_shutdown to reach us.  L-3R-1 audit: log
+        // on Disconnected outcome (subscriber already gone, but
+        // we noticed the shutdown signal) for observability.
+        match sub.request_shutdown() {
+            EnqueueOutcome::Enqueued | EnqueueOutcome::Lagging { .. } => {
+                tracing::debug!(
+                    peer = %peer,
+                    "race-window shutdown trigger sent"
+                );
+            }
+            EnqueueOutcome::Disconnected => {
+                tracing::debug!(
+                    peer = %peer,
+                    "race-window shutdown trigger: subscriber already gone"
+                );
+            }
+            EnqueueOutcome::LagExceeded => {
+                // request_shutdown never returns LagExceeded.
+                tracing::warn!(
+                    peer = %peer,
+                    "race-window shutdown trigger: unexpected LagExceeded"
+                );
+            }
+        }
     }
 
     // 4. Live mode: drain the subscriber's receiver, writing
@@ -1398,6 +1422,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         handle.join().unwrap();
+    }
+
+    /// **Unit test for `bounded_join`: a wedged thread is
+    /// abandoned after the timeout.**  Verifies the H-NEW-4
+    /// audit fix.
+    #[test]
+    fn bounded_join_abandons_wedged_thread() {
+        use std::sync::atomic::AtomicBool;
+        let release = Arc::new(AtomicBool::new(false));
+        let release_clone = Arc::clone(&release);
+        let handle = std::thread::spawn(move || {
+            // Wait until released — far longer than the join
+            // timeout below.
+            while !release_clone.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let start = Instant::now();
+        let result = bounded_join(handle, Duration::from_millis(100));
+        let elapsed = start.elapsed();
+        // Should have abandoned after ~100ms.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "bounded_join took {elapsed:?}, expected ~100ms"
+        );
+        match result {
+            Err(_) => {} // expected: JoinTimeoutMarker (or panic)
+            Ok(()) => panic!("expected timeout, got Ok"),
+        }
+        // Release the wedged thread so it cleans up.
+        release.store(true, Ordering::Release);
+    }
+
+    /// **Unit test for `bounded_join`: a finished thread is
+    /// joined cleanly.**
+    #[test]
+    fn bounded_join_returns_clean_for_finished_thread() {
+        let handle = std::thread::spawn(|| {
+            // Exits immediately.
+        });
+        // Give it a moment to finish.
+        std::thread::sleep(Duration::from_millis(50));
+        let result = bounded_join(handle, Duration::from_secs(1));
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
     /// Empty log + subscribe → server starts, subscribe handshake

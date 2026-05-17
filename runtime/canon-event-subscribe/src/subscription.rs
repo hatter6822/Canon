@@ -844,6 +844,103 @@ mod tests {
         assert_eq!(reg.len(), 10);
     }
 
+    /// **C-3R-1 audit regression: `broadcast_to_snapshot`
+    /// delivers ONLY to subscribers in the snapshot, never to
+    /// subscribers added afterwards.**
+    ///
+    /// Deterministic unit-level test of the snapshot-atomicity
+    /// invariant.  Without this guarantee, a subscriber
+    /// registering between broadcasts of a multi-event batch
+    /// would receive only the tail of the batch (silent
+    /// partial-batch delivery).
+    #[test]
+    fn broadcast_to_snapshot_excludes_post_snapshot_registrants() {
+        let reg = SubscriberRegistry::new();
+        // Register subscriber A FIRST.
+        let (sub_a, rx_a) = reg.register(8, 100).unwrap();
+        // Take a snapshot at this point.  A is in it.
+        let snapshot = reg.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id(), sub_a.id());
+        // Now register subscriber B AFTER the snapshot.
+        let (sub_b, rx_b) = reg.register(8, 100).unwrap();
+        assert_eq!(reg.len(), 2);
+        // Broadcast event to the snapshot.  Only A should get it.
+        let summary = SubscriberRegistry::broadcast_to_snapshot(&snapshot, make_event(42));
+        assert_eq!(summary.enqueued, 1);
+        // A receives.
+        match rx_a.try_recv().unwrap() {
+            DeliveryEvent::Live(e) => assert_eq!(e.seq, 42),
+            DeliveryEvent::Shutdown => panic!("expected Live"),
+        }
+        // B did NOT receive (was not in snapshot).
+        match rx_b.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            other => panic!("B should not have received any event; got {other:?}"),
+        }
+        let _ = sub_b;
+    }
+
+    /// **C-3R-1 audit regression: multi-event batch via
+    /// `broadcast_to_snapshot` delivers all events to all
+    /// snapshot subscribers, with no leakage to post-snapshot
+    /// subscribers.**
+    ///
+    /// This simulates the extractor's Phase B: snapshot, then
+    /// broadcast each event of a multi-event batch using the
+    /// SAME snapshot.  A subscriber registering between
+    /// snapshot and the last broadcast must receive ZERO
+    /// events from this batch (uniform exclusion).
+    #[test]
+    fn broadcast_to_snapshot_multi_event_uniform_exclusion() {
+        let reg = SubscriberRegistry::new();
+        let (sub_a, rx_a) = reg.register(8, 100).unwrap();
+        let snapshot = reg.snapshot();
+        // Register B during the "batch broadcast window".
+        let (sub_b, rx_b) = reg.register(8, 100).unwrap();
+        // Broadcast 3 events at seq=5 using the SNAPSHOT.
+        let events = [
+            CachedEvent {
+                seq: 5,
+                payload: b"event-a".to_vec(),
+            },
+            CachedEvent {
+                seq: 5,
+                payload: b"event-b".to_vec(),
+            },
+            CachedEvent {
+                seq: 5,
+                payload: b"event-c".to_vec(),
+            },
+        ];
+        for ev in events.iter().cloned() {
+            SubscriberRegistry::broadcast_to_snapshot(&snapshot, ev);
+        }
+        // A receives all 3 events at seq=5.
+        let mut a_count = 0;
+        while let Ok(d) = rx_a.try_recv() {
+            match d {
+                DeliveryEvent::Live(e) => {
+                    assert_eq!(e.seq, 5);
+                    a_count += 1;
+                }
+                DeliveryEvent::Shutdown => break,
+            }
+        }
+        assert_eq!(a_count, 3, "A should receive all 3 events of the batch");
+        // B receives ZERO events from this batch.
+        let mut b_count = 0;
+        while rx_b.try_recv().is_ok() {
+            b_count += 1;
+        }
+        assert_eq!(
+            b_count, 0,
+            "B should receive ZERO events (not in snapshot); got {b_count}"
+        );
+        let _ = sub_a;
+        let _ = sub_b;
+    }
+
     /// Registry: broadcast enqueues to all live subscribers.
     #[test]
     fn registry_broadcast_enqueues_all() {

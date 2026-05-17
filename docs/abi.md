@@ -1045,6 +1045,56 @@ Clients can rely on:
     forward-extension; the listener layer is identical to
     `canon-host`'s and can be ported when needed.
 
+### 11.5.1 Transport timeouts
+
+The daemon enforces two TCP-level timeouts on every accepted
+connection to mitigate slowloris-style DoS:
+
+  * `--handshake-read-timeout-ms <N>` (default `10000` / 10 s):
+    maximum time the server waits for a complete `SUBSCRIBE`
+    handshake frame.  A client that opens the socket but never
+    sends the 9-byte handshake is dropped after this window.
+    Hard ceiling: 60 000 ms (60 s).
+  * `--write-timeout-ms <N>` (default `30000` / 30 s): maximum
+    time a single outbound frame write may take.  A client that
+    refuses to drain its TCP receive buffer (causing the
+    server's `write_all` to block on backpressure) is dropped
+    after this window.  Hard ceiling: 300 000 ms (5 min).
+
+When either timeout fires, the dispatch thread marks the
+subscriber disconnected and closes the TCP socket WITHOUT a
+final wire frame (no LagExceeded / ServerShutdown — the client
+is presumed unable to read it).
+
+A capacity-rejection write (when the server's connection-slot
+cap is reached) uses a separate, tighter deadline of 250 ms so
+a stalled rejected client cannot tie up the acceptor thread.
+
+### 11.5.2 DoS bounds
+
+The daemon enforces multiple bounds beyond the timeouts:
+
+  * `--max-subscribers <N>` (default 256, hard ceiling 65 536):
+    cap on registered subscribers.  The (N+1)-th SUBSCRIBE
+    handshake receives a `LagExceeded { last_delivered_seq: 0 }`
+    frame and is closed.
+  * `--max-concurrent-connections <N>` (default 1024, hard
+    ceiling 65 536): cap on simultaneously-spawned dispatch
+    threads.  Larger than `max_subscribers` to allow handshake-
+    in-progress + about-to-drain windows.  Validation rejects
+    `max_concurrent_connections < max_subscribers`.
+  * `--send-queue-depth <N>` (default 64, hard ceiling 65 536):
+    per-subscriber outbound queue depth.  Combined with
+    `max_subscribers`, bounds total queued event memory.
+  * `--max-subscriber-lag <N>` (default 256, hard ceiling
+    1 000 000): per-subscriber lag-counter threshold.  When
+    the queue fills and the counter exceeds this, the
+    subscriber is evicted with `LagExceeded`.
+  * `--max-frame-size <N>` (default 1 MiB, hard ceiling 16 MiB):
+    per-event payload cap.  An event whose CBE-encoded payload
+    exceeds this is dropped at extraction time (the wire
+    protocol cannot represent it).
+
 ### 11.6 Backpressure: bounded-lag eviction
 
 Each subscriber holds a bounded outbound queue (default depth

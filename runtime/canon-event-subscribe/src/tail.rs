@@ -491,16 +491,21 @@ impl TailReader {
         })
     }
 
-    /// **Test-only helper.**  Reset the cursor and reopen the file.
-    /// Lets tests verify re-read semantics without dropping the
-    /// reader.
+    /// **Test-only helper.**  Reset the cursor and reopen the
+    /// file.  Lets tests verify re-read semantics without
+    /// dropping the reader.
+    ///
+    /// M-3R-5 audit: delegates to `Self::open` so the symlink +
+    /// inode TOCTOU defence is re-run on reopen.  Otherwise a
+    /// test that swaps the file between open and reopen would
+    /// silently follow the swap.  Even though this is test-only,
+    /// the audit caught it as a defence-in-depth regression risk
+    /// if the function were ever promoted to production (e.g.
+    /// for log-rotation handling).
     #[cfg(test)]
     fn reopen(&mut self) -> Result<(), TailError> {
-        let file = File::open(&self.path).map_err(|e| TailError::Io {
-            offset: 0,
-            source: e,
-        })?;
-        self.file = file;
+        let fresh = Self::open(&self.path)?;
+        self.file = fresh.file;
         self.offset = 0;
         self.next_seq = 1;
         Ok(())
