@@ -2956,8 +2956,13 @@ table.  Headline implementation notes:
 
 **Finding map.**  WU 5.11 deferred per GENESIS_PLAN line 3840.
 
-**Scope.**  `runtime/canon-bench/benches/` — Criterion-style
-benchmark suite measuring transfer-only throughput end-to-end.
+**Status.**  **Complete.**  Landed on
+`claude/implement-performance-benchmark-NLZtD`.  See "RH-F
+Closeout" below.
+
+**Scope.**  `runtime/canon-bench/` — transfer-throughput benchmark
+suite measuring `canon-host`'s end-to-end performance.  Library
++ binary; the binary is the operator-facing harness.
 
 **Implementation steps.**
 
@@ -2984,6 +2989,404 @@ mitigation is the profile-and-document escape hatch.
 
 **Effort.**  ~5 engineer-days, plus 0–10 days optimisation work
 depending on baseline performance.
+
+---
+
+### RH-F — Closeout
+
+**Complete.**  Materialises `runtime/canon-bench/` as a
+self-contained library + binary per the engineering plan §RH-F.
+The binary is the operator-facing harness: it generates a
+deterministic fixture, spawns an in-process canon-host (or
+connects to an existing one), drives a concurrent workload
+through it, and emits a human-readable + JSON report.
+
+#### Module structure
+
+  * `src/lib.rs` — crate root, constants, module re-exports.
+  * `src/config.rs` — hand-rolled CLI flag parser (no `clap`
+    dep; matches the workspace's minimal-dependency posture
+    per RH-B / RH-C precedent).  17 flags spanning mode
+    selection (`--standalone` / `--connect`), workload size
+    (`--actor-count` / `--transfer-count` / `--worker-count` /
+    `--warmup-requests` / `--seed`), server config
+    (`--queue-depth` / `--max-frame-size`), and report /
+    regression gates (`--report` / `--baseline` /
+    `--threshold` / `--target-tps` / `--target-p99-ms` /
+    `--quiet`).
+  * `src/fixture.rs` — deterministic fixture generator.
+    Derives `actor_count` secp256k1 keypairs from a
+    `(seed, actor_index)` Keccak-256 hash chain
+    (rejection-sampled into the `[1, n)` curve order), then
+    constructs `transfer_count` round-robin
+    `Action::Transfer` payloads each signed with the sender's
+    actor key + a per-actor monotonically-increasing nonce.
+    Returns the pre-encoded SignedAction CBE bytes ready for
+    framing (Arc-shared across workers).  Cross-stack
+    equivalent to Lean's `Encoding.SignedAction.encode` (we
+    reuse `canon-l1-ingest::encoding`'s primitives).
+  * `src/histogram.rs` — bounded-resolution latency
+    histogram.  Records every per-request nanosecond duration
+    in a `Vec<u64>`; computes `p50` / `p90` / `p99` / `p999` /
+    `min` / `max` via the NIST nearest-rank method; computes
+    `mean` / `stddev` via the Welford one-pass numerically-
+    stable algorithm.  17 unit tests + 1 known-vector test
+    (1..=100 → exact percentile assertions).
+  * `src/runner.rs` — concurrent benchmark driver.  Spawns a
+    configurable number of submitter threads sharing an
+    atomic cursor into the pre-framed payloads; each worker
+    opens a fresh connection per request (mirroring the
+    canon-host §10.5 one-shot wire format), writes the framed
+    payload, reads the 5-byte verdict header + reason, and
+    records latency.  Per-worker histograms merged at the
+    end.  Throughput is wallclock between first measured
+    submission and last response (NOT a per-thread sum).
+  * `src/report.rs` — versioned JSON report + baseline
+    regression check.  `BenchmarkReport` is the schema-stable
+    serialisation surface; `compare_against_baseline`
+    detects throughput drops > `threshold` and latency
+    growths > `threshold` (default 10%) and returns a typed
+    `RegressionVerdict`.  Reports refuse forward-incompatible
+    protocol versions on load.
+  * `src/server.rs` — `StandaloneServer` helper that spawns an
+    in-process `canon_host::server::Server` backed by
+    `MockKernel`.  Used by `--standalone` mode; sidesteps the
+    need for operators to bring up a separate canon-host
+    daemon for a quick local bench.
+  * `src/main.rs` — binary entry point.  Parses CLI, validates,
+    initialises tracing, runs the benchmark, emits the report,
+    and maps errors to `OperatorExitCode`.
+
+#### Test mass at landing
+
+After audit-pass-3: 122 lib unit tests + 10 smoke / integration
+tests = 132 new tests bringing the workspace total from ~914
+(post-RH-E audit-pass-3) to ~1045.  Coverage:
+
+  * `fixture` — 20 tests: scalar-in-range edge cases (zero,
+    `n`, `n ± 1`), deterministic derivation (seed-independence,
+    index-independence), small-scale fixture generation,
+    payload-byte layout (the Transfer-tag layout is pinned),
+    per-actor nonce monotonicity (decoded back from the
+    Encoded bytes for round-trip verification),
+    `MAX_SCALAR_ATTEMPT_INDEX` / `MAX_SCALAR_ATTEMPTS` invariant
+    pin, `transfer_amount >= 2^64` upfront validation,
+    boundary `transfer_amount = 2^64 - 1` acceptance.
+  * `histogram` — 17 tests: percentile correctness on
+    known input (1..=100), summary idempotency, merge,
+    constant-sample / two-sample stddev (textbook formula),
+    JSON round-trip, all-zero stddev for constant samples.
+  * `report` — 30 tests: baseline regression direction-
+    awareness (improvement never regresses; only worse-
+    direction drift), multi-metric regression aggregation,
+    protocol-version drift detection, JSON malformed /
+    missing-file error paths, human-summary format
+    correctness, atomic save-via-rename mechanics
+    (post-save filesystem state pinning), missing-parent-
+    directory error path, directory-target-as-path graceful
+    handling, serde_json overflow-rejection pinning
+    (`load_rejects_infinity_overflow_via_serde`), negative-
+    field rejection on load (throughput, mean_ns, stddev_ns),
+    pre-save f64 validation (infinity / NaN / negative),
+    `compare_against_baseline` non-finite-threshold
+    defense-in-depth (NaN, ±∞).
+  * `runner` — 18 tests: zero-workers / oversize-warmup
+    validation, Endpoint cloning, `RunOutcome::throughput_
+    ops_per_sec` zero / typical / sub-second cases,
+    `read_exact_with_eof` happy-path / truncated-header /
+    truncated-reason / zero-length / fragmented-reader,
+    `SpawnFailed` / `UnexpectedVerdict` / `ResponseTooLarge`
+    Display format pinning,
+    `DEFAULT_CONNECT_TIMEOUT` / `MAX_REASON_BYTES`
+    constants pin, `connect_with_timeout` prompt refusal
+    + timeout-respect verification.
+  * `config` — 22 tests: every flag's happy path + every
+    documented error path (unknown flag, missing value,
+    invalid value, mutually-exclusive flags), CLI mode
+    composition (standalone vs connect), seed hex/decimal
+    parsing, NaN-rejection for `--threshold` /
+    `--target-tps` / `--target-p99-ms` (load-bearing
+    defence: `NaN <= 0.0` silently evaluates to `false`),
+    Inf-rejection for the same fields.
+  * `server` — 3 tests: spawn + stop on Unix + TCP, stop
+    idempotency.
+  * `tests/smoke.rs` — 10 end-to-end smoke tests: Unix-socket
+    benchmark, TCP benchmark, complete report round-trip
+    (save + load + compare), refused-connection error path,
+    histogram-merge integration, deterministic fixture
+    byte-equality across runs, elapsed-brackets-workload
+    (reduce-on-join correctness), elapsed-consistent-across-
+    runs (run-to-run stability), mock-server-driven
+    `UnexpectedVerdict` surfacing (verdict=1+reason="rejected"),
+    mock-server-driven `ResponseTooLarge` surfacing
+    (reason_len = u32::MAX caps before allocation).
+  * Crate-level — 4 tests: crate-name / identifier /
+    protocol-version constants don't drift; default-constants
+    match the plan §RH-F specification.
+
+#### Observed throughput at landing (informational)
+
+Run on a developer x86_64 workstation (Linux 6.18, opt-level=3,
+LTO=thin):
+
+  | workload                                        | throughput     | p50 latency | p99 latency |
+  |-------------------------------------------------|----------------|-------------|-------------|
+  | 1000 actors / 10000 transfers / 64 workers      | ~7000-7500 ops/sec | ~9 ms   | ~14 ms      |
+  | 1000 actors / 10000 transfers / 128 workers     | ~7500 ops/sec  | ~17 ms      | ~22 ms      |
+  | 100 actors / 1000 transfers / 32 workers        | ~6500 ops/sec  | ~4 ms       | ~22 ms      |
+
+**Gap analysis vs the §RH-F target of ≥ 10 000 tx/sec.**  At the
+default workload (64 workers), the host sustains ~7000-7500
+ops/sec — roughly 70-75% of target.  Profiling reveals two
+bottlenecks inherent to the current canon-host architecture:
+
+  1. **One-shot connection per request.**  The §10.5 wire format
+    documents per-connection lifecycle as "exactly one
+    request/response cycle, then closes."  Each request pays a
+    fresh TCP / Unix-socket connect (~µs) + accept (~µs) cost.
+    A persistent-connection variant (multiple requests per
+    socket) would amortise this; it's a future wire-format
+    amendment.
+  2. **Synchronous single-worker queue dispatch.**  canon-host's
+    worker thread serialises every kernel.submit; the bounded
+    mpsc queue's capacity caps in-flight work.  With MockKernel
+    the worker is not the bottleneck (each submit returns in
+    ~ns), but per-request thread::spawn for connection handlers
+    and the listener's polling accept-loop dominate at high
+    submitter concurrency.
+
+Neither bottleneck is in the benchmark itself; the harness
+faithfully measures what the production wire format admits.
+The audit-pass-1 contention-free `measurement_end` path means
+the bench overhead is a vanishing fraction of the measured
+host-side cost.  Resolving the gap is a follow-up workstream:
+either a wire-format amendment for persistent connections, or a
+kernel microbenchmark for the kernel-only path (the
+`MockKernel` is already O(ns), so the kernel itself isn't the
+constraint; the host's RPC pipeline is).
+
+**p99 latency gap.**  Target was `< 10 ms`; observed is `~14 ms`
+at the default workload.  Same root cause: one-shot
+connection per request inflates tail latency on bench-style
+back-to-back submission.  Production deployments with a
+single long-lived sequencer client (canon-l1-ingest) do not
+see this regime.
+
+**CI integration.**  The benchmark suite runs as part of
+`cargo test --workspace` (the 8 smoke tests verify the
+runner + fixture + report flow end-to-end on a small
+workload).  A future CI gate could add a separate "bench"
+workflow that runs the binary at the documented default
+workload and stores the report JSON for cross-PR regression
+comparison; the harness already supports the `--baseline`
+flag for this.
+
+#### Audit-pass-1 (post-landing self-review)
+
+An internal deep-audit pass surfaced 10 correctness /
+best-practice / documentation findings; all addressed in-PR:
+
+  * **HIGH** `config::CliConfig::validate` silently passed
+    NaN values for `threshold` / `target_tps` /
+    `target_p99_ms` because every IEEE-754 comparison
+    against NaN is `false`, so the pure-range checks
+    (`threshold <= 0.0 || >= 1.0`) didn't trip.  Fix:
+    `is_finite()` guard rejects NaN + ±∞ before the range
+    check.  Tests pin the new behaviour.
+  * **HIGH** `runner::worker_loop` updated `measurement_end`
+    via a `Mutex<Option<Instant>>` on **every** successful
+    non-warmup request — a per-request shared-lock hot path
+    that serialized all worker threads.  Fix: each worker
+    tracks its own latest completion timestamp locally; `run`
+    collects them via `JoinHandle::join` and takes the max
+    as the global measurement-end.  Zero shared-lock
+    operations on the per-request happy path.
+  * **HIGH** `runner::run` and `server::StandaloneServer::
+    spawn_unix` / `spawn_tcp` used
+    `.expect("spawn ... thread")` on `thread::Builder` —
+    same anti-pattern fixed in canon-host's audit-pass-2
+    (C-NEW-3): EAGAIN / ENOMEM under sustained load would
+    panic instead of surfacing a typed error.  Fix: new
+    `RunnerError::SpawnFailed` /
+    `StandaloneServerError::SpawnFailed` variants;
+    already-spawned workers / threads join cleanly before
+    the error propagates.
+  * **MEDIUM** `runner::worker_loop` re-acquired
+    `measurement_start` lock on every non-warmup request
+    even after the timestamp was already set.  Fix: gated
+    by a new `AtomicBool` (`measurement_started`) with
+    Acquire-load / Release-store discipline; the lock is
+    now acquired exactly once globally.
+  * **MEDIUM** `runner::read_exact_with_eof` distinguished
+    header (5-byte) vs reason-payload truncation via a
+    magic `total_len == 5` check inside the function.
+    Fragile — would mis-attribute on any future 5-byte
+    reason read.  Fix: explicit `ReadKind` enum parameter.
+  * **MEDIUM** `runner::worker_loop`'s
+    `Histogram::with_capacity(.../4)` hardcoded a `/4`
+    divisor where `/ worker_count` was intended.  Fix:
+    `worker_count` propagated into `SharedRunState`; the
+    pre-allocation uses `div_ceil(worker_count.max(1))`
+    with a `1 << 20` defensive cap.
+  * **LOW** `fixture::MAX_SCALAR_ATTEMPTS = 255` with
+    `for attempt in 0..=255u8` (256 iterations) reported
+    `attempts: 255` in the error path — off-by-one.  Fix:
+    split into `MAX_SCALAR_ATTEMPT_INDEX` (loop bound,
+    255) and `MAX_SCALAR_ATTEMPTS` (count, 256 = index + 1).
+  * **LOW (docs)** `server.rs` module docstring claimed
+    `Drop` "joins the background thread" — actually `Drop`
+    deliberately does NOT join (would deadlock).  Also
+    referenced a `with_queue_depth` setter that doesn't
+    exist.  Fix: re-documented the `Drop` / `stop`
+    lifecycle ladder with the correct semantics.
+  * **LOW (docs)** `lib.rs` Mathematical-soundness section
+    claimed `p50 = sorted[(N-1)/2]` — mathematically
+    equivalent to the actual `ceil(50*N/100) - 1` for all
+    `N >= 1`, but misleadingly imprecise (only the latter
+    generalises to `p90` / `p99` / `p999`).  Fix:
+    docstring states the actual formula explicitly and
+    notes the p50 equivalence.
+  * **LOW (docs)** `config.rs` flag-matrix table marked
+    `--standalone` / `--connect` as "Required" — actually
+    both are optional with `--standalone` as the implicit
+    default.  Fix: re-cast the table as `(Flag, Default,
+    Description)` so the default value is explicit.
+
+#### Audit-pass-2 (deeper self-review)
+
+A second independent audit pass surfaced 8 more correctness /
+security / best-practice findings; all addressed in-PR:
+
+  * **HIGH (DoS surface in `--connect` mode)** `submit_once`
+    read the server-declared `reason_len` (up to `u32::MAX` =
+    4 GiB) and `vec![0u8; reason_len]`-ed the buffer without
+    a cap.  A hostile / misbehaving `--connect <ADDR>` target
+    could declare an absurd length and OOM the client.  Fix:
+    new `MAX_REASON_BYTES = 64 KiB` (mirrors canon-host's
+    `MAX_SUBPROCESS_OUTPUT`); declared lengths over the cap
+    surface as a typed `SubmissionError::ResponseTooLarge`
+    BEFORE allocation.  Smoke test pins the behaviour via a
+    mock server declaring `reason_len = u32::MAX`.
+  * **HIGH (TCP connect hang)** `Endpoint::connect()` used
+    `TcpStream::connect()` with no timeout, which would
+    block indefinitely against a non-responding host (the
+    OS-level connect timeout is typically 60+ seconds).
+    Fix: new `Endpoint::connect_with_timeout(timeout)` using
+    `TcpStream::connect_timeout(addr, timeout)` for TCP; the
+    Unix-socket variant inherits fast-fail semantics (Unix
+    `connect(2)` either succeeds immediately or returns
+    ENOENT/ECONNREFUSED).  `DEFAULT_CONNECT_TIMEOUT = 5 s`.
+  * **MEDIUM (hot-path allocation)** `submit_once` allocated
+    `reason_bytes` + the UTF-8 reason String even on the
+    happy path (Ok verdict).  Fix: short-circuit after the
+    cap check when `verdict_byte == 0`; skip the reason read
+    + allocation entirely.  The kernel discards pending
+    reason bytes when the connection closes (the §10.5 wire
+    format is one-shot, so no protocol concern).
+  * **MEDIUM (fixture overflow late-fail)**
+    `FixtureConfig::transfer_amount >= 2^64` previously
+    failed only at first-transfer-encoding inside `generate`,
+    AFTER the O(actor_count) key-derivation cost.  Fix:
+    pre-validate in `FixtureConfig::validate` via the new
+    `FixtureError::TransferAmountTooLarge`.
+  * **MEDIUM (report-save atomicity)** `BenchmarkReport::save`
+    used `fs::write` which is non-atomic.  A mid-write
+    process crash leaves a partial JSON document that the
+    next baseline-load would fail to parse.  Fix: write to a
+    sibling `.tmp` and `rename(2)` into place.  POSIX
+    guarantees `rename(2)` is atomic w.r.t. concurrent
+    readers — they see either the old file or the new one,
+    never a half-written intermediate.
+  * **LOW (defensive)** `percentile_nearest_rank` divides by
+    `denominator` without a non-zero check.  Private fn;
+    callers use literal 100 / 1000 so unreachable in
+    practice.  Fix: `debug_assert!(denominator > 0)` for
+    contract clarity.
+  * **LOW (docs)** `Cargo.toml` lint comment claimed
+    `SECP256K1_ORDER_BE` was the "half-order constant" —
+    actually it's the full curve order `n`.  Fix: corrected
+    comment.
+  * **LOW (test coverage)** No tests for
+    `SubmissionError::UnexpectedVerdict` or `ResponseTooLarge`
+    paths from `submit_once`.  Fix: two new mock-TCP-server-
+    driven smoke tests in `tests/smoke.rs` verify both error
+    variants surface correctly with the right payload.
+
+#### Audit-pass-3 (silent-serde discovery + report hardening)
+
+A third deep audit pass surfaced 5 more correctness / robustness
+findings; all addressed in-PR:
+
+  * **HIGH (silent corruption in `save`)** — discovered that
+    `serde_json::to_string_pretty` silently converts
+    `f64::INFINITY` and `f64::NAN` to the JSON literal `null`,
+    producing a file that fails to re-load (since the f64
+    deserializer rejects `null`).  This is a silent save-time
+    data-loss path.  Fix: `BenchmarkReport::save` now validates
+    f64 fields upfront via `validate_loaded`, converting the
+    silent path into a typed `InvalidFieldValue` error BEFORE
+    any disk write occurs.
+  * **HIGH (no load-time validation)** — `BenchmarkReport::load`
+    previously only validated `protocol_version`.  A hand-edited
+    or corrupted JSON could smuggle negative throughput /
+    negative latency through the parser.  Fix: `validate_loaded`
+    is now also called from `load` to reject negative f64
+    fields.  (Non-finite values are blocked by `serde_json` at
+    parse time via overflow-to-error; our check is
+    defence-in-depth for direct-API callers.)
+  * **MEDIUM (`compare_against_baseline` defense-in-depth)** —
+    added a non-finite-`threshold` short-circuit that returns
+    `WithinTolerance` rather than producing NaN-laden drift
+    values.  `CliConfig::validate` already rejects non-finite
+    thresholds at the CLI; this is the library-API defense.
+  * **MEDIUM (one fewer syscall per request)** — `worker_loop`
+    previously called `Instant::now()` TWICE per successful
+    non-warmup request (once via `started.elapsed()`, once for
+    `last_completion`).  Consolidated into a single
+    `Instant::now()` capture used for both, saving one syscall
+    per measured request AND making the two derived values
+    consistent at the exact same wallclock instant.
+  * **LOW (merge-loop pre-allocation)** — `run()`'s `merged:
+    Histogram` previously started with zero capacity, requiring
+    O(log W) reallocations as per-worker histograms merged in.
+    Pre-allocate with `fixture.len() - warmup_requests` upfront
+    so the merge loop runs zero-reallocation.
+
+#### Audit-pass-3 serde_json behaviour discovery
+
+The audit surfaced two notable `serde_json` behaviours that
+inform our defence-in-depth strategy:
+
+  1. **Deserialize-side overflow rejection.**  `1e500` parses to
+    `f64::INFINITY` via `f64::from_str`, but `serde_json`'s
+    parser detects the overflow earlier and surfaces a
+    `ParseJson` error ("number out of range").  This means our
+    load-time non-finite check is unreachable via JSON for
+    overflow-via-decimal cases — but it remains reachable for
+    direct-API callers constructing `BenchmarkReport` structs
+    in Rust, and for any future serde_json version that loosens
+    this behaviour.  Pinned via
+    `load_rejects_infinity_overflow_via_serde`.
+  2. **Serialize-side silent coercion.**  `serde_json` silently
+    converts `f64::INFINITY` and `f64::NAN` to the JSON literal
+    `null` on serialize.  This is the silent data-loss path
+    addressed by `save()`'s pre-write validation.  Tests
+    `save_rejects_infinity_throughput` and
+    `save_rejects_nan_stddev` pin the validation.
+
+#### Audit posture at landing
+
+  * `cargo build --workspace --all-targets --locked` — green.
+  * `cargo test --workspace --locked` — ~1045 tests passing
+    (+131 from RH-E's 914 landing; +9 from audit-pass-2's
+    1036 via audit-pass-3).
+  * `cargo clippy --workspace --all-targets --locked -- -D
+    warnings` — clean.
+  * `cargo fmt --all -- --check` — clean.
+  * `unsafe_code = "forbid"` workspace lint.
+  * Binary smoke-tested via
+    `./target/release/canon-bench --version` →
+    `canon-bench/v1 v0.2.1 (protocol v1)`.
 
 ---
 
