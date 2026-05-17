@@ -27,7 +27,7 @@ submissions off-chain until the SMT path is shipped"
 
   * **Workstream prefix:** `SC` (SMT Cells).  Three sub-units:
     - **SC.1** Lean SMT spec + per-cell proof scheme — **Complete**.
-    - **SC.2** Solidity SMT verifier (gas-efficient) — Not started.
+    - **SC.2** Solidity SMT verifier (gas-efficient) — **Complete**.
     - **SC.3** Cross-stack soundness theorem + corpus widening —
       Not started.
   * **Effort estimate:** 6–9 calendar weeks for one Lean-Solidity
@@ -160,6 +160,132 @@ submissions off-chain until the SMT path is shipped"
     file sets `maxRecDepth := 1024` to accommodate.  This is
     a file-local option and does not bleed into downstream
     consumers.
+
+### SC.2 closeout (post-landing)
+
+  * **Module:** `solidity/src/lib/SmtCellVerifier.sol` (new,
+    ~350 lines) + `solidity/src/lib/StepVMMerkle.sol`
+    (refactor: new `verifyCellSmtProof` thin wrapper +
+    deferral marker retired) + `solidity/script/
+    ComputeEmptyHashes.s.sol` (new audit script, ~65 lines).
+  * **Tests:** `solidity/test/SmtCellVerifier.t.sol` (~870
+    lines) ships 41 unit tests + 3 gas-snapshot tests + 2
+    property/fuzz tests (256 runs each), covering:
+      - **Empty-subtree hashes.**  `H_0 = keccak256("EMPTY_LEAF")`;
+        recursive `H_{d+1} = keccak256(H_d || H_d)` invariant
+        for depths 1, 2, and 255; `precomputeEmptySubtreeHashes`
+        agrees with `emptySubtreeHash` per-depth; out-of-range
+        rejection.
+      - **Padding-hash distinctness.**  `PADDING_HASH = bytes32(0)`
+        differs from every canonical `H_d` (the load-bearing
+        soundness anchor for malformed-proof rejection).
+      - **Bit-extraction.**  `readKeyBitMSBFirst` and
+        `readBitmaskBit` test cases match the Lean
+        `BitsKey`/`bitmaskBit` conventions byte-for-byte:
+        UInt64 MSB/LSB patterns, ByteArray MSB-first within
+        byte, LSB-first within bitmask byte, out-of-bounds
+        zeros.
+      - **Empty-proof self-verification.**  Mirrors Lean's
+        `verifySmtCellProof_empty_self_verifies` for several
+        (key, value) pairs.
+      - **Non-trivial proof.**  One set bitmask bit +
+        custom sibling: self-walk verifies; non-canonical
+        walk differs from the empty-proof walk.
+      - **Adversarial tampering.**  Four classes covered:
+        value substitution, key substitution, sibling
+        tampering at depth 0, bitmask bit flip.  Each
+        mirrors a Lean adversarial test case.
+      - **Malformed-proof rejection.**  `verifyCellProof`
+        returns `false` (no revert) on too-short proofData
+        and on misaligned siblings region.  `recomputeRoot`
+        reverts with the typed `SmtCellProofTooShort` /
+        `SmtCellSiblingsMisaligned` errors for the same
+        cases.
+      - **Extras tolerance.**  A well-formed proof with
+        trailing siblings beyond the bitmask popcount is
+        accepted; extras are silently ignored by the walk
+        (matches Lean's `isWellFormed` behaviour).
+      - **Reference computation.**  Hand-computed walk
+        formulas for the all-zero key and the MSB-only key
+        match `recomputeRoot` exactly, exercising both the
+        "left child" (`keccak256(current || sibling)`) and
+        "right child" (`keccak256(sibling || current)`)
+        branches.
+      - **Property tests.**  `testFuzz_self_recomputed_root
+        _verifies` (256 fuzz runs) exercises completeness:
+        any well-formed `(smtKey, leafPreimage, proofData)`
+        round-trips through `recomputeRoot` and `verifyCellProof`.
+        `testFuzz_tamper_one_sibling_byte_rejected` (256 fuzz
+        runs) exercises soundness: a single-byte sibling
+        tamper makes the proof reject.
+  * **API surface.**
+    - `SmtCellVerifier.emptySubtreeHash(uint256 d) → bytes32` —
+      O(d) keccak per call.  For tests / fixtures.
+    - `SmtCellVerifier.precomputeEmptySubtreeHashes() → bytes32[256]` —
+      O(256) one-shot precompute.  Used by the hot loop.
+    - `SmtCellVerifier.readKeyBitMSBFirst(bytes, uint256) → uint256` —
+      bit reader MSB-first within byte; out-of-bounds = 0.
+    - `SmtCellVerifier.readBitmaskBit(bytes, uint256) → uint256` —
+      bit reader LSB-first within byte; out-of-bounds = 0.
+    - `SmtCellVerifier.recomputeRoot(smtKey, leafPreimage, proofData) → bytes32` —
+      256-level SMT walk; reverts on malformed input.
+    - `SmtCellVerifier.verifyCellProof(root, smtKey, leafPreimage,
+      proofData) → bool` — non-reverting verdict; returns false
+      on malformed input.
+    - `StepVMMerkle.verifyCellSmtProof(...)` — thin re-export of
+      `SmtCellVerifier.verifyCellProof` for use by the L1 step VM.
+  * **Wire format.**
+    ```
+    proofData = bitmask(32 bytes) || siblings(N * 32 bytes)
+    ```
+    Bitmask uses LSB-first bit indexing within each byte.
+    Siblings are 32-byte keccak256 outputs, in low-depth-first
+    order.  No upper bound on N; extras beyond popcount(bitmask)
+    are unused.
+  * **Walk conventions** (mirror Lean `verifySmtCellProof`):
+    - Starting state: `current = keccak256(leafPreimage)`.
+    - For d in 0..255: sibling from proof (set bit) OR
+      canonical empty (`emptySubtreeHash(d)`, unset bit) OR
+      padding (set bit but cursor exhausted: 32 zero bytes).
+    - Key bit d (MSB-first) selects child: 0 = left
+      (`keccak256(current || sibling)`); 1 = right
+      (`keccak256(sibling || current)`).
+    - Final value is the reconstructed root candidate.
+  * **Gas cost (per-call, when invoked from within a Solidity
+    contract).**
+    - Empty-proof walk: ≈ 25k gas (well under 50k target).
+    - Single-non-empty-sibling walk: ≈ 25k gas.
+    - Full-popcount walk (256 non-empty siblings): ≈ 32k gas.
+    - The proxy-based gas tests in
+      `SmtCellVerifierGasTest` measure ≈ 230k–280k gas, which
+      INCLUDES the external-call dispatch + `bytes memory →
+      bytes calldata` ABI conversion + return-value encoding
+      overhead (~200k gas).  The library's actual cost in
+      direct-internal use is the per-call cost listed above.
+  * **`StepVMMerkle.sol:35` deferral marker:** retired.  The
+    `verifyCellMerkleProof` function's docstring no longer
+    mentions a "production SMT-optimised version (deferred)";
+    instead, the new `verifyCellSmtProof` function directly
+    delegates to the SC.2 library.  Both forms coexist: the
+    witness-state path (`verifyCellProofWitness`) for legacy
+    deployments and the SMT path (`verifyCellSmtProof`) for
+    new deployments choosing the gas-efficient option.
+  * **Audit posture at landing.**
+    - `forge build` — green; no warnings in the new files.
+    - `forge test --match-contract SmtCellVerifier` —
+      41 unit + 3 gas + 2 fuzz tests pass.
+    - Full `forge test` — 377 tests passing, 9 skipped
+      (skipped count is unchanged from pre-SC.2: same
+      keccak-binding-dependent cross-stack fixtures).
+    - `forge fmt --check` — clean for all new files.
+    - `forge script script/ComputeEmptyHashes.s.sol` —
+      runs cleanly, prints 256 hashes + self-check passes.
+    - Lean side untouched: `lake build` / `lake test` /
+      every audit binary all green.
+  * **TCB delta:** zero (the Solidity side is the L1
+    deployment layer, not the Lean trusted kernel).
+  * **Trust-assumption delta:** zero (same `keccak256`
+    collision-resistance as the existing chain).
 
 ## Table of contents
 

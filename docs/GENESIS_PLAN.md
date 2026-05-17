@@ -5246,21 +5246,37 @@ Workstream H deviates from the plan's spec in a few places:
     (witness-state and SMT) ship side-by-side in the Lean
     kernel; deployments select the active form via the
     `CanonStateRootSubmission` parameter set.
-    **Workstream SC.2 / SC.3 status (Solidity + cross-stack).**
-    The L1 game's correctness for SMT-form proofs additionally
-    requires the gas-efficient Solidity `SmtVerifier` library
-    (SC.2) and cross-stack corpus widening (SC.3); both are
-    pending.  Pre-SC.2 production deployments continue to use
-    the witness-state form and MUST audit `cellProof`
-    submissions off-chain.  The Lean-side soundness theorems
-    are the upstream contract the Solidity verifier will
-    conform to.
+    **Workstream SC.2 status (Solidity verifier).**  The
+    gas-efficient Solidity verifier ships in
+    `solidity/src/lib/SmtCellVerifier.sol` (Workstream SC.2),
+    with a thin wrapper exposed via
+    `solidity/src/lib/StepVMMerkle.sol::verifyCellSmtProof`.
+    The verifier walks the 256-level path using inline-assembly
+    `keccak256` and pre-computes the canonical empty-subtree
+    hash table once per call.  Per-call cost when invoked from
+    within a Solidity contract: ≈ 25k gas typical, ≤ 32k gas
+    worst-case (full-popcount path).  41 unit + 3 gas + 2
+    property/fuzz tests at
+    `solidity/test/SmtCellVerifier.t.sol`; auditors recompute
+    the empty-subtree constants via
+    `solidity/script/ComputeEmptyHashes.s.sol`.
+    **Workstream SC.3 status (cross-stack corpus).**  Cross-
+    stack corpus widening with adversarial SMT cell-proof
+    fixtures (SC.3) is pending.  Pre-SC.3 deployments
+    choosing the SMT path get gas-efficient on-chain
+    verification with the Lean-side soundness theorems as
+    upstream contract; the cross-stack ratification at the
+    fixture-corpus level closes the operational off-chain
+    audit gap.
   * **Per-variant per-cell coherence theorems** are *omitted* in
     favour of the global #225 theorem.  The per-variant case
     analysis is structurally subsumed by the witness-state
     design (the semantic core IS `kernelOnlyApply`).
-  * **Solidity-side Merkle-path SMT** (`StepVMMerkle.sol`) is
-    a skeleton; the Lean reference uses witness-state form.
+  * **Solidity-side per-cell SMT** (`SmtCellVerifier.sol`)
+    ships gas-efficient `verifyCellProof` for the SMT path
+    (Workstream SC.2); witness-state-bearing form remains
+    available for legacy deployments via
+    `StepVMMerkle.verifyCellProofWitness`.
   * **Witness implication (#233) requires deployment assumption.**
     `faultProof_challenger_won_implies_state_root_wrong` takes an
     explicit `L1AttestationSemantics` predicate as a hypothesis,

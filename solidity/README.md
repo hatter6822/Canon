@@ -37,17 +37,18 @@ solidity/
 │   └── lib/
 │       ├── CanonEip712.sol      — EIP-712 domain + struct-hash helpers
 │       ├── CBEDecode.sol        — CBE byte decoder (mirrors Lean)
-│       ├── SmtVerifier.sol      — SMT verifier (mirrors Lean D.1)
+│       ├── SmtVerifier.sol      — withdrawal-tree SMT verifier (D.1, depth 64)
+│       ├── SmtCellVerifier.sol  — state-cell SMT verifier (SC.2, depth 256)
 │       ├── CREATE3.sol          — proxy-factory deploy for cyclic refs
-│       └── StepVMMerkle.sol     — sub-state Merkle helpers (H)
+│       └── StepVMMerkle.sol     — per-cell proof helpers (H + SC.2)
 └── test/
-    ├── *.t.sol                  — 13 unit suites (per-contract)
+    ├── *.t.sol                  — 14 unit suites (per-contract + SmtCellVerifier)
     ├── CrossCheck/*.t.sol       — 11 cross-stack suites (Lean ↔ Solidity)
     └── utils/                   — Deployer.sol (CREATE3 harness),
                                     MockERC20.sol
 ```
 
-Total: **~340 forge tests across 24 suites** (per-suite counts in
+Total: **~386 forge tests across 26 suites** (per-suite counts in
 each `*.t.sol`). A subset is conditionally skipped when the
 production keccak256 binding is not linked (the cross-check
 suites probe `isKeccak256Linked` on the Lean side and skip on

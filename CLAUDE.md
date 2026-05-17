@@ -780,7 +780,7 @@ work units.  Status:
 | RH-F      | Rust host: 10k tx/sec benchmark    | Complete (harness ships; observed throughput ~7.5k ops/sec under default workload — gap documented in plan §RH-F closeout) |
 | RH-G      | Rust host: fault-proof observer    | Not started (skeleton landed under RH-H) |
 | SC.1      | SMT cell proofs: Lean spec + soundness | Complete |
-| SC.2      | SMT cell proofs: Solidity verifier | Not started |
+| SC.2      | SMT cell proofs: Solidity verifier | Complete |
 | SC.3      | SMT cell proofs: cross-stack soundness + corpus | Not started |
 | E-G       | Ethereum: documentation + amendment | Not started |
 | 7         | Advanced capabilities              | Not started |
