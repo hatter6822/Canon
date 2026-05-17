@@ -532,8 +532,11 @@ pub fn run(fixture: &Fixture, config: &RunnerConfig) -> Result<RunOutcome, Runne
     //    timestamp.  We merge histograms and take the max of
     //    per-worker last-completion timestamps as the
     //    measurement-end wallclock.  No per-request lock contention
-    //    on the hot path.
-    let mut merged = Histogram::new();
+    //    on the hot path.  Pre-allocate `merged` with the expected
+    //    measurable-sample capacity (`total - warmup`) so the merge
+    //    loop's `extend_from_slice` calls don't reallocate.
+    let expected_samples = fixture.len().saturating_sub(config.warmup_requests);
+    let mut merged = Histogram::with_capacity(expected_samples);
     let mut measurement_end: Option<Instant> = None;
     let mut any_panicked = false;
     for handle in handles {
@@ -645,14 +648,25 @@ fn worker_loop(shared: &SharedRunState, endpoint: &Endpoint, timeout: Duration) 
         let started = Instant::now();
         match submit_once(endpoint, framed, timeout) {
             Ok(()) => {
-                let elapsed = started.elapsed();
                 if !is_warmup {
+                    // Capture the completion instant ONCE and use it
+                    // for both the per-request latency (`completion -
+                    // started`) and the worker-local
+                    // `last_completion` track.  Previously we called
+                    // `Instant::now()` twice (once via
+                    // `started.elapsed()`, once for the completion
+                    // track); consolidating saves one syscall per
+                    // measured request AND makes the two derived
+                    // values consistent at the exact same wallclock
+                    // instant.
+                    let completion = Instant::now();
+                    let elapsed = completion.duration_since(started);
                     local_hist.record(elapsed);
                     shared.measured_count.fetch_add(1, Ordering::AcqRel);
                     // Track this worker's last successful completion
                     // locally — no shared lock.  The runner's join
                     // path reduces these into a global max.
-                    last_completion = Some(Instant::now());
+                    last_completion = Some(completion);
                 }
             }
             Err(e) => {

@@ -870,17 +870,17 @@ monotonic growth is
 enforced by individual regression tests landing alongside new
 theorems.
 
-**Rust-side test count.**  ~1036 tests at the RH-F + audit-2
-landing (+122 from the RH-E audit-pass-3 landing's 914: 113 lib
+**Rust-side test count.**  ~1045 tests at the RH-F + audit-3
+landing (+131 from the RH-E audit-pass-3 landing's 914: 122 lib
 unit tests + 10 smoke / integration tests in the new
-`canon-bench` crate; audit-pass-2 added 9 lib + 2 smoke tests
-on top of audit-pass-1's 14 + 2 for the new `MAX_REASON_BYTES`
-DoS-cap, `connect_with_timeout` timeout discipline, fixture
-`transfer_amount` overflow pre-validation, atomic
-report-save-via-rename, and a mock-server-driven coverage path
-for `SubmissionError::UnexpectedVerdict` and
-`SubmissionError::ResponseTooLarge`).  RH-E landing breakdown
-carried below for posterity.
+`canon-bench` crate).  Audit-pass-3 added 9 more lib tests on
+top of audit-pass-2 for: pre-save validation of f64 fields
+(defends against `serde_json` silently coercing
+`f64::INFINITY` / `NaN` to JSON `null`), load-time field
+validation, `compare_against_baseline` defense-in-depth
+against non-finite thresholds, and the `Histogram::merge`
+pre-allocation optimization at the merge boundary.  RH-E
+landing breakdown carried below for posterity.
 
 **RH-E test count.**  914 tests at the RH-E
 audit-pass-3 landing (up from 702 at the RH-D landing —
@@ -2503,12 +2503,67 @@ library + binary per `docs/planning/rust_host_runtime_plan.md`
       server returning controlled wire-format bytes and
       verify the typed errors surface correctly.
 
+  * **Audit-pass-3 (silent-serde discovery + report hardening).**
+    A third deep audit pass surfaced 5 more correctness / robustness
+    findings; all addressed in-PR:
+    - **HIGH (silent corruption in `save`)** — discovered that
+      `serde_json::to_string_pretty` silently converts
+      `f64::INFINITY` and `f64::NAN` to the JSON literal `null`,
+      producing a file that fails to re-load (since the f64
+      deserializer rejects `null`).  This is a silent
+      save-time data-loss path.  Fix: `BenchmarkReport::save`
+      now validates f64 fields upfront via the new
+      `validate_loaded` helper, converting the silent path
+      into a typed `InvalidFieldValue` error BEFORE any disk
+      write occurs.  Three new tests pin this behaviour for
+      infinity-throughput, NaN-stddev, and negative-mean
+      cases.
+    - **HIGH (no load-time validation)** — `BenchmarkReport::load`
+      previously only validated `protocol_version`.  A
+      hand-edited or corrupted JSON could smuggle negative
+      throughput / negative latency through the parser.  Fix:
+      `validate_loaded` is now also called from `load` to
+      reject negative f64 fields.  Three new tests pin this.
+    - **MEDIUM (`compare_against_baseline` defense-in-depth)**
+      — added a non-finite-`threshold` short-circuit that
+      returns `WithinTolerance` rather than producing NaN-laden
+      drift values.  `CliConfig::validate` already rejects
+      non-finite thresholds at the CLI; this is the
+      library-API defense.  Two tests pin NaN-threshold and
+      ±∞-threshold behaviour.
+    - **MEDIUM (one fewer syscall per request)** —
+      `worker_loop` previously called `Instant::now()` TWICE
+      per successful non-warmup request (once via
+      `started.elapsed()`, once for `last_completion`).
+      Consolidated into a single `Instant::now()` capture used
+      for both, saving one syscall per measured request AND
+      making the two derived values consistent at the exact
+      same wallclock instant.
+    - **LOW (merge-loop pre-allocation)** —
+      `run()`'s `merged: Histogram` previously started with
+      zero capacity, requiring O(log W) reallocations as
+      per-worker histograms merged in.  Pre-allocate with
+      `fixture.len() - warmup_requests` upfront so the merge
+      loop runs zero-reallocation.
+
+  * **Audit-pass-3 serde_json behaviour discovery.**  Pinned via
+    `load_rejects_infinity_overflow_via_serde`: `serde_json`'s
+    parser rejects `1e500` (decimal overflow to f64::INFINITY)
+    as a `ParseJson` error before our `validate_loaded` check
+    fires.  Our load-time non-finite check is therefore
+    defence-in-depth for JSON-load paths but reachable for
+    direct-API callers that construct a `BenchmarkReport`
+    struct in Rust.  The complementary `save()` pre-write
+    validation IS reachable because the OTHER serde_json
+    behaviour (silent `INFINITY`-to-`null` coercion on
+    serialize) is fully active.
+
   * **Audit posture at landing.**
     - `cargo build --workspace --all-targets --locked` —
       green.
-    - `cargo test --workspace --locked` — ~1036 tests
-      passing (+122 from RH-E's 914 landing; +12 from the
-      initial RH-F audit-pass-1's 1024 via audit-pass-2).
+    - `cargo test --workspace --locked` — ~1045 tests
+      passing (+131 from RH-E's 914 landing; +9 from
+      audit-pass-2's 1036 via audit-pass-3).
     - `cargo clippy --workspace --all-targets --locked -- -D
       warnings` — clean.
     - `cargo fmt --all -- --check` — clean.
