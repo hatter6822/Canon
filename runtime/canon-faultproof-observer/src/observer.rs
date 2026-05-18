@@ -116,6 +116,14 @@ pub struct Observer<S: L1Source, Sub: Submitter, T: TruthOracle> {
     submitter: Sub,
     oracle: T,
     games: HashMap<u128, GameRecord>,
+    /// In-memory cache of `(game_id, pivot_idx)` pairs the
+    /// observer has already submitted a response for.  Populated
+    /// at startup from the persisted response records; updated
+    /// atomically with each `commit_batch`.  Replaces the
+    /// previous O(N)-per-call `list_responses` scan with a
+    /// constant-time lookup, defending against unbounded growth
+    /// over the daemon's lifetime.
+    submitted_pivots: std::collections::HashSet<(u128, Option<u64>)>,
     /// Stop signal — when `true`, the run loop exits cleanly.
     stop: Arc<AtomicBool>,
 }
@@ -150,9 +158,20 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         for rec in game_records {
             games.insert(rec.game_id, rec);
         }
+        // Populate the in-memory pivot-dedup cache from the
+        // persisted response records.  This is the O(N) cost
+        // paid once at startup; subsequent dedup checks are O(1).
+        let response_records = persistence.list_responses().map_err(|e| {
+            ObserverError::Storage(canon_storage::storage::StorageError::Other(e.to_string()))
+        })?;
+        let submitted_pivots: std::collections::HashSet<(u128, Option<u64>)> = response_records
+            .iter()
+            .map(|r| (r.game_id, r.pivot_idx))
+            .collect();
         info!(
             cursor = ?cursor,
             game_count = games.len(),
+            submitted_pivot_count = submitted_pivots.len(),
             "observer initialised; resumed from persistence"
         );
         Ok(Self {
@@ -162,6 +181,7 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             submitter,
             oracle,
             games,
+            submitted_pivots,
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -213,18 +233,20 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         &mut self.watcher
     }
 
-    /// Seed the watcher's last-confirmed-block.  Useful for
-    /// integration tests that need to drive the watcher to
-    /// process specific block ranges synthetically.  Production
-    /// code's startup path uses [`Self::new`] which seeds from
-    /// the persisted cursor; this accessor is the
-    /// integration-test counterpart.
+    /// Override the watcher's resume point with the operator-
+    /// supplied `--start-block` value.  Production callers
+    /// (`main.rs`) use this after `Observer::new` to override
+    /// the persisted-cursor recovery; the watcher will start
+    /// fetching events from `block + 1` on the next iteration.
     ///
-    /// **NOT for production use.**  Overriding the cursor
-    /// outside the startup path bypasses the
-    /// persistence-recovered position and can re-process events.
-    #[doc(hidden)]
-    pub fn seed_watcher_last_confirmed(&mut self, block: u64) {
+    /// **Operator-only escape hatch.**  Overriding the cursor
+    /// outside startup bypasses the persisted-cursor resume
+    /// path; specifying a value LOWER than the persisted cursor
+    /// causes the observer to re-process events (idempotent at
+    /// the event-dispatch boundary); specifying a value HIGHER
+    /// causes the observer to silently skip events.  Use with
+    /// care and document operator decisions in your runbook.
+    pub fn set_start_block(&mut self, block: u64) {
         self.watcher.set_last_confirmed(Some(block));
     }
 
@@ -377,12 +399,23 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             // ignore.
             return Ok(EventHandling::Skipped);
         }
-        // Synthesise a skeleton game state.  The actual range
-        // bounds are not in the event payload; we initialise
-        // with placeholders and rely on subsequent events for
-        // the true shape.  In a fully-integrated deployment the
-        // orchestrator would `eth_call` the contract's
-        // `games(uint256)` getter at this point.
+        // Synthesise a skeleton game state.  The
+        // `FaultProofGameOpened` event carries the disputed +
+        // challenger state roots but NOT the full game state
+        // (low.idx / high.idx range bounds, sequencer /
+        // challenger actor ids, bond amounts).  Production
+        // deployments learn the full state via an `eth_call` to
+        // `games(uint256)` on the contract — deferred RH-G
+        // follow-up work tracked in CLAUDE.md.
+        //
+        // Until the contract-state read lands, we mark the
+        // skeleton as `state_known = false` so the orchestrator's
+        // `maybe_play_move` refuses to compute or submit moves
+        // for this game.  The skeleton IS still persisted +
+        // updated from observed events, but no calldata is
+        // submitted in the interim.  This defends against the
+        // observer broadcasting wrong-shape calldata derived
+        // from placeholder range bounds.
         let synthesised_state = GameState {
             sequencer: 0,  // placeholder
             challenger: 0, // placeholder
@@ -404,6 +437,14 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             sequencer_bond: 0,
             challenger_bond: 0,
             status: GameStatus::InProgress,
+            // **Cross-deployment-replay defence is INCOMPLETE.**
+            // The `FaultProofGameOpened` event does NOT carry the
+            // contract's `deploymentId`.  We tag the skeleton
+            // with `self.config.deployment_id` so downstream code
+            // sees the expected value, but until the contract
+            // read lands we cannot actually verify that this
+            // game's deploymentId matches.  See lib.rs's
+            // "Security properties" §3 for the deferral note.
             deployment_id: self.config.deployment_id,
         };
         let _ = challenger_state_root; // recorded for future use; the
@@ -414,10 +455,14 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             state: synthesised_state,
             me: self.config.play_as,
             last_updated_block: block_number,
+            state_known: false,
         };
         self.games.insert(game_id, rec.clone());
         batch.upsert_game(rec);
-        info!(game_id = %game_id, "game opened; adopted");
+        info!(
+            game_id = %game_id,
+            "game opened; adopted (state_known=false until contract read lands)",
+        );
         Ok(EventHandling::Recorded)
     }
 
@@ -437,20 +482,32 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             );
             return Ok(EventHandling::Skipped);
         };
-        // The on-chain submitter is the party whose previous
-        // `turn` was set; the contract flips `turn` after
-        // submission.  So in the IN-MEMORY model, we apply the
-        // transition that mirrors the contract's behaviour.
-        let mp = Claim { idx, commit };
-        let mut state = rec.state.clone();
-        // Defensive: if the new midpoint's `idx` is outside the
-        // current range, expand the high bound first (cold-
-        // start games may have an incorrect placeholder high
-        // bound from the synthesis at `GameOpened` time).
-        if state.range.high.idx == 0 && state.range.low.idx == 0 && idx > 0 {
-            state.range.high.idx = idx.saturating_mul(2);
+        // If we don't know the full game state yet (no
+        // contract-state read has happened), we cannot validate
+        // the midpoint against the true range bounds.  Record
+        // the pending midpoint into the skeleton state directly
+        // (without going through `apply_transition`, which would
+        // reject `idx > high.idx = 0` for a cold-start game) so
+        // we have an audit trail, but DO NOT call
+        // `maybe_play_move` — we'd otherwise compute calldata
+        // against placeholder bounds.
+        if !rec.state_known {
+            let mut new_rec = rec.clone();
+            new_rec.state.pending_midpoint = Some(Claim { idx, commit });
+            new_rec.state.turn = rec.state.turn.flip();
+            new_rec.last_updated_block = block_number;
+            self.games.insert(game_id, new_rec.clone());
+            batch.upsert_game(new_rec);
+            debug!(
+                game_id = %game_id,
+                idx = idx,
+                "midpoint recorded for unknown-state game; no move computed",
+            );
+            return Ok(EventHandling::Recorded);
         }
-        match apply_transition(&state, GameTransition::SubmitMidpoint(mp)) {
+        // Full state is known: drive the state machine.
+        let mp = Claim { idx, commit };
+        match apply_transition(&rec.state, GameTransition::SubmitMidpoint(mp)) {
             Ok(new_state) => {
                 let mut new_rec = rec.clone();
                 new_rec.state = new_state;
@@ -496,6 +553,25 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             );
             return Ok(EventHandling::Skipped);
         };
+        // Unknown-state games: clear the pending midpoint (the
+        // L1 contract did so) and flip the turn.  We CAN'T
+        // narrow the range without knowing the bounds.  No move
+        // computed.
+        if !rec.state_known {
+            let mut new_rec = rec.clone();
+            new_rec.state.pending_midpoint = None;
+            new_rec.state.turn = rec.state.turn.flip();
+            new_rec.state.depth = new_rec.state.depth.saturating_add(1);
+            new_rec.last_updated_block = block_number;
+            self.games.insert(game_id, new_rec.clone());
+            batch.upsert_game(new_rec);
+            debug!(
+                game_id = %game_id,
+                agree = agree,
+                "response recorded for unknown-state game; no move computed",
+            );
+            return Ok(EventHandling::Recorded);
+        }
         let transition = if agree {
             GameTransition::RespondAgree
         } else {
@@ -586,7 +662,7 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
     // propagate as typed errors rather than panics.
     #[allow(clippy::unnecessary_wraps)]
     fn maybe_play_move(
-        &self,
+        &mut self,
         rec: &GameRecord,
         block_number: u64,
         batch: &mut PersistBatch,
@@ -596,6 +672,24 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         }
         if rec.state.turn != rec.me {
             return Ok(None);
+        }
+        // Critical safety gate: refuse to compute or submit
+        // moves for games whose full state we haven't learned.
+        // The `handle_game_opened` synthesises a skeleton with
+        // placeholder `low.idx = 0, high.idx = 0` because the
+        // `FaultProofGameOpened` event doesn't carry the range
+        // bounds; learning the true bounds requires an `eth_call`
+        // to `games(uint256)` on the contract (deferred RH-G
+        // follow-up).  Without the bounds, any computed midpoint
+        // would be a fiction and the resulting calldata would be
+        // rejected on-chain at best, or accepted-but-wrong at
+        // worst.  Defer until the full state is known.
+        if !rec.state_known {
+            debug!(
+                game_id = %rec.game_id,
+                "skipping move: state_known=false (cold-start game; eth_call follow-up pending)",
+            );
+            return Ok(Some(false));
         }
         let mv = match compute_next_move(&self.oracle, &rec.state, rec.me) {
             Ok(m) => m,
@@ -614,6 +708,20 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         }
         let calldata = match encode_calldata(rec.game_id, mv) {
             Ok(c) => c,
+            Err(crate::submitter::SubmitError::TerminateNotImplemented) => {
+                // The full-form terminate calldata builder is
+                // deferred RH-G follow-up work.  Loudly log so
+                // the operator knows the observer cannot finish
+                // the game without intervention.
+                error!(
+                    game_id = %rec.game_id,
+                    pivot_idx = ?pivot_for_move(&rec.state, mv),
+                    "TerminateOnSingleStep calldata builder is RH-G follow-up work; \
+                     operator must manually submit the full-form transaction or \
+                     wait for the canon subprocess pipeline to land",
+                );
+                return Ok(Some(false));
+            }
             Err(e) => {
                 error!(
                     game_id = %rec.game_id,
@@ -646,6 +754,16 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
                     pivot_idx,
                 };
                 batch.upsert_response(resp);
+                // Insert into the in-memory pivot-dedup cache
+                // immediately so a subsequent move within the
+                // same iteration cannot duplicate-submit.
+                // Persistence is committed atomically at the end
+                // of `run_iteration`; on commit failure the
+                // in-memory cache will be slightly ahead of the
+                // persisted store until the next restart, which
+                // is benign (we'd just over-defer on the next
+                // iteration, never under-defer).
+                self.submitted_pivots.insert((rec.game_id, pivot_idx));
                 info!(
                     game_id = %rec.game_id,
                     move_kind = ?mv,
@@ -667,18 +785,11 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
 
     /// Check whether we've already submitted a response for the
     /// given (`game_id`, `pivot_idx`) pair.  Used by the
-    /// deduplication discipline.
+    /// deduplication discipline.  Constant-time lookup against
+    /// the in-memory cache, populated at startup from persisted
+    /// response records.
     fn has_submitted_for_pivot(&self, game_id: u128, pivot_idx: Option<u64>) -> bool {
-        // Scan the persisted response records.  In practice the
-        // number of responses per game is small (≤
-        // MAX_BISECTION_DEPTH × 2 = 128), so a linear scan is
-        // fine.
-        match self.persistence.list_responses() {
-            Ok(responses) => responses
-                .iter()
-                .any(|r| r.game_id == game_id && r.pivot_idx == pivot_idx),
-            Err(_) => false, // best-effort
-        }
+        self.submitted_pivots.contains(&(game_id, pivot_idx))
     }
 
     /// Run the orchestrator loop until the stop signal is set.
@@ -726,16 +837,15 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
 /// Convenience helper for the integration-test crate to seed
 /// the watcher's last-confirmed-block.  Mirrors the test-only
 /// crate-private accessor at the `Observer::watcher_mut` level.
-///
-/// This is `#[doc(hidden)]` because production code should never
-/// override the cursor outside of the [`Observer::new`] startup
-/// path — see `seed_watcher_last_confirmed`'s docstring.
+/// Production code uses [`Observer::set_start_block`] directly;
+/// this helper exists so the integration-test crate doesn't
+/// have to know about the public method's full type signature.
 #[doc(hidden)]
 pub fn seed_watcher_for_tests<S: L1Source, Sub: Submitter, T: TruthOracle>(
     observer: &mut Observer<S, Sub, T>,
     last_confirmed: u64,
 ) {
-    observer.seed_watcher_last_confirmed(last_confirmed);
+    observer.set_start_block(last_confirmed);
 }
 
 /// Sleep for `duration`, but check the stop signal periodically
@@ -952,22 +1062,57 @@ mod tests {
     /// Pivot dedup: submitting the same pivot twice doesn't
     /// re-record.
     #[test]
-    fn pivot_dedup_helper_works() {
-        let (obs, _dir) = fresh_observer();
-        // Direct persistence write — bypass orchestration to
-        // verify the dedup helper.
-        let resp = ResponseRecord {
-            tx_hash_hex: format!("0x{}", "ab".repeat(32)),
-            game_id: 7,
-            status: ResponseStatus::Pending,
-            submitted_at_block: 100,
-            depth: 0,
-            pivot_idx: Some(32),
+    fn pivot_dedup_helper_populates_from_persistence_at_startup() {
+        // The in-memory dedup cache is populated at startup
+        // from the persisted response records.  Write a
+        // response, then construct an observer over the same
+        // DB and verify the cache reflects the persisted state.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        {
+            let persistence = Persistence::open(&db).unwrap();
+            let resp = ResponseRecord {
+                tx_hash_hex: format!("0x{}", "ab".repeat(32)),
+                game_id: 7,
+                status: ResponseStatus::Pending,
+                submitted_at_block: 100,
+                depth: 0,
+                pivot_idx: Some(32),
+            };
+            persistence.store_response(&resp).unwrap();
+        }
+        // Construct a fresh observer over the same DB.
+        let persistence = Persistence::open(&db).unwrap();
+        let source = InMemoryL1Source::new();
+        let submitter = MockSubmitter::new();
+        let oracle = MemoryTruthOracle::new();
+        let watcher_cfg = WatcherConfig {
+            game_contract: make_contract_addr(1),
+            state_root_submission_contract: make_contract_addr(2),
+            confirmation_depth: 1,
+            reorg_window_capacity: 16,
+            blocks_per_iteration: 64,
         };
-        obs.persistence().store_response(&resp).unwrap();
+        let cfg = ObserverConfig::new(watcher_cfg, [0u8; 32]);
+        let obs = Observer::new(cfg, source, submitter, oracle, persistence).unwrap();
+        // Cache populated from persistence: hit on (7, Some(32)).
         assert!(obs.has_submitted_for_pivot(7, Some(32)));
         assert!(!obs.has_submitted_for_pivot(7, Some(64)));
         assert!(!obs.has_submitted_for_pivot(99, Some(32)));
+    }
+
+    /// In-memory dedup cache is updated atomically with each
+    /// `maybe_play_move` submission.  After a submission, the
+    /// SAME pivot cannot be re-submitted in the same iteration.
+    #[test]
+    fn pivot_dedup_in_memory_cache_blocks_resubmission() {
+        let (mut obs, _dir) = fresh_observer();
+        assert!(!obs.has_submitted_for_pivot(42, Some(16)));
+        // Insert directly into the in-memory cache (mirrors
+        // what `maybe_play_move` does after a successful submit).
+        obs.submitted_pivots.insert((42, Some(16)));
+        assert!(obs.has_submitted_for_pivot(42, Some(16)));
+        assert!(!obs.has_submitted_for_pivot(42, Some(32)));
     }
 
     /// Stop signal halts the run loop promptly.
@@ -1035,6 +1180,7 @@ mod tests {
                 },
                 me: TurnSide::Challenger,
                 last_updated_block: 100,
+                state_known: true,
             },
         );
         // Simulate a `GameSettled` event.
@@ -1173,6 +1319,7 @@ mod tests {
                 },
                 me: TurnSide::Challenger,
                 last_updated_block: 50,
+                state_known: true,
             };
             obs.persistence().store_game(&rec).unwrap();
             obs.persistence().write_cursor(123).unwrap();

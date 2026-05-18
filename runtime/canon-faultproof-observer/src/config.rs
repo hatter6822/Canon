@@ -254,15 +254,39 @@ impl CliConfig {
                 "confirmation-depth must be > 0".into(),
             ));
         }
+        if self.confirmation_depth > crate::watcher::MAX_CONFIRMATION_DEPTH {
+            return Err(CliError::InvalidConfiguration(format!(
+                "confirmation-depth ({}) exceeds hard upper bound ({})",
+                self.confirmation_depth,
+                crate::watcher::MAX_CONFIRMATION_DEPTH,
+            )));
+        }
         if self.reorg_window == 0 {
             return Err(CliError::InvalidConfiguration(
                 "reorg-window must be > 0".into(),
             ));
         }
+        // `reorg_window` is `u32` (per the CLI flag) but the
+        // watcher's underlying capacity is `usize`.  Cast and
+        // bound against MAX_REORG_WINDOW_CAPACITY for parity.
+        if (self.reorg_window as usize) > crate::watcher::MAX_REORG_WINDOW_CAPACITY {
+            return Err(CliError::InvalidConfiguration(format!(
+                "reorg-window ({}) exceeds hard upper bound ({})",
+                self.reorg_window,
+                crate::watcher::MAX_REORG_WINDOW_CAPACITY,
+            )));
+        }
         if self.blocks_per_iteration == 0 {
             return Err(CliError::InvalidConfiguration(
                 "blocks-per-iter must be > 0".into(),
             ));
+        }
+        if self.blocks_per_iteration > crate::watcher::MAX_BLOCKS_PER_ITERATION {
+            return Err(CliError::InvalidConfiguration(format!(
+                "blocks-per-iter ({}) exceeds hard upper bound ({})",
+                self.blocks_per_iteration,
+                crate::watcher::MAX_BLOCKS_PER_ITERATION,
+            )));
         }
         if self.poll_interval.as_millis() == 0 {
             return Err(CliError::InvalidConfiguration(
@@ -377,6 +401,10 @@ OPTIONS:
     --blocks-per-iter <N>       Per-iteration block budget (default: 64)
     --poll-interval-ms <N>      Polling interval in ms (default: 12000)
     --start-block <N>           Override watcher cursor at startup
+                                (advanced operator-only escape hatch;
+                                bypasses the persisted-cursor recovery —
+                                use only when resuming from a known
+                                historic block on a fresh deployment)
     --log-level <LEVEL>         tracing filter (default: info)
     -h, --help                  Print this help text
     -V, --version               Print version and exit

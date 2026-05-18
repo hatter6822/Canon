@@ -75,28 +75,61 @@
 //!      iteration re-delivers the failing events.  Per-pivot
 //!      submission deduplication defends against duplicate
 //!      submissions on restart.
-//!   3. **Cross-deployment-replay defence.**  Each game record
-//!      carries the deployment-id; the observer's
+//!   3. **Cross-deployment-replay defence — INCOMPLETE.**  The
+//!      observer's
 //!      [`ObserverConfig::deployment_id`](observer::ObserverConfig)
-//!      is consulted during `GameOpened` handling.
-//!   4. **Key zeroization.**  The signing key is held behind
+//!      is stamped onto each adopted game's record, but the
+//!      `FaultProofGameOpened` event payload does NOT carry the
+//!      contract's `deploymentId` field — actual cross-deployment
+//!      validation requires an `eth_call` to `games(uint256)` on
+//!      the contract to read the persisted state.  That contract
+//!      read is deferred RH-G follow-up work.  Until it lands,
+//!      operators MUST point the observer at the correct game
+//!      contract address for their deployment (the `deploymentId`
+//!      embedded in the contract is the runtime authority).
+//!   4. **Cold-start game safety.**  Games opened before the
+//!      observer started watching are adopted into the in-memory
+//!      map with `state_known = false` (the full range bounds /
+//!      sequencer / challenger / bonds are not in the event
+//!      payload).  The orchestrator's `maybe_play_move` REFUSES
+//!      to compute or submit moves for `state_known = false`
+//!      games until the contract-state read lands.  This
+//!      defends against the observer broadcasting wrong-shape
+//!      calldata derived from placeholder range bounds.
+//!   5. **Key zeroization.**  The signing key is held behind
 //!      `Zeroizing<[u8; 32]>` (via
 //!      [`canon_l1_ingest::key::BridgeActorKey`]) and scrubs on
 //!      drop.
-//!   5. **Loud failure modes.**  Configuration errors, deep
+//!   6. **Loud failure modes.**  Configuration errors, deep
 //!      re-orgs, persistent state corruption, and invariant
 //!      violations all map to
 //!      [`canon_cli_common::exit::OperatorExitCode::OperatorAction`]
 //!      so a supervisor can distinguish them from transient
-//!      failures (which retry with backoff).
-//!   6. **No panics on attacker input.**  Every L1 event-decoder
+//!      failures (which retry with backoff).  Transient L1-RPC
+//!      issues (transport, `NonMonotone` block gaps) map to
+//!      `Transient` and trigger retry with backoff.
+//!   7. **No panics on attacker input.**  Every L1 event-decoder
 //!      error path returns a typed
 //!      [`events::EventDecodeError`]; every state-machine
 //!      transition rejection returns a typed [`game::GameError`].
-//!   7. **No `unsafe`.**  `unsafe_code = "forbid"` workspace
+//!   8. **No `unsafe`.**  `unsafe_code = "forbid"` workspace
 //!      lint.  The observer is a pure-Rust orchestrator; the
 //!      crypto primitives live behind the `canon-l1-ingest`'s
 //!      audited `k256`-based key wrapper.
+//!   9. **Bounded configuration.**  Every operator-tunable
+//!      parameter (confirmation depth, reorg window capacity,
+//!      blocks per iteration) is bounded above by a hard
+//!      compile-time constant in [`watcher`].  Defends against
+//!      operator-typo-induced OOM / memory-bomb scenarios.
+//!  10. **Wrong-selector calldata refused.**  The
+//!      `TerminateOnSingleStep` honest move requires a full-form
+//!      calldata (action variant + cell-proof bundle) that the
+//!      off-chain observer cannot synthesise alone.  The minimum-
+//!      form calldata's selector does NOT match the deployed
+//!      contract; [`submitter::encode_calldata`] refuses to
+//!      silently emit it.  Operators submit the full-form
+//!      transaction manually until the canon-subprocess pipeline
+//!      lands.
 //!
 //! ## What this RH-G landing ships
 //!

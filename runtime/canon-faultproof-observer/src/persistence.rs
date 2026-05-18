@@ -90,6 +90,25 @@ pub struct GameRecord {
     pub me: TurnSide,
     /// L1 block number when this record was last updated.
     pub last_updated_block: u64,
+    /// True iff the observer knows the **full** game state (the
+    /// `low.idx` and `high.idx` range bounds, the sequencer /
+    /// challenger actor ids, the bond amounts).  The `FaultProofGameOpened`
+    /// event carries only the disputed state roots, not the full
+    /// game state; production deployments learn the full state
+    /// via an `eth_call` to `games(uint256)` on the contract,
+    /// which is deferred RH-G follow-up work.
+    ///
+    /// When `state_known == false`, the orchestrator's
+    /// `maybe_play_move` refuses to compute or submit moves for
+    /// this game.  The game record IS still persisted + updated
+    /// from observed events (so `compute_next_move`'s eventual
+    /// run produces correct results once the full state is
+    /// learned), but no calldata is submitted in the interim.
+    ///
+    /// Default `false` for serde backward-compatibility with
+    /// pre-v0.2.3 game records (which had no such field).
+    #[serde(default)]
+    pub state_known: bool,
 }
 
 /// One persisted response-submission record.
@@ -325,7 +344,16 @@ impl Persistence {
     pub fn store_response(&self, rec: &ResponseRecord) -> Result<(), PersistenceError> {
         let tx_hash_bytes = parse_hex_tx_hash(&rec.tx_hash_hex)?;
         let key = response_key(&tx_hash_bytes);
-        let bytes = serde_json::to_vec(rec)?;
+        // Canonicalise the JSON-stored `tx_hash_hex` to the
+        // round-trip form (lowercase, no `0x` prefix) so that
+        // two writes for the same hash with different surface
+        // formats don't produce two distinct JSON payloads
+        // pointing at the same key.
+        let canonical_rec = ResponseRecord {
+            tx_hash_hex: hex::encode(tx_hash_bytes),
+            ..rec.clone()
+        };
+        let bytes = serde_json::to_vec(&canonical_rec)?;
         self.storage.put(&key, &bytes).map_err(Into::into)
     }
 
@@ -362,7 +390,13 @@ impl Persistence {
         for rec in &batch.responses {
             let tx_hash_bytes = parse_hex_tx_hash(&rec.tx_hash_hex)?;
             let key = response_key(&tx_hash_bytes);
-            let value = serde_json::to_vec(rec)?;
+            // Canonicalise stored hex; see `store_response` for
+            // rationale.
+            let canonical_rec = ResponseRecord {
+                tx_hash_hex: hex::encode(tx_hash_bytes),
+                ..rec.clone()
+            };
+            let value = serde_json::to_vec(&canonical_rec)?;
             tx.put(&key, &value)?;
         }
         if let Some(cursor) = batch.cursor {
@@ -497,6 +531,7 @@ mod tests {
             },
             me: TurnSide::Challenger,
             last_updated_block: 100,
+            state_known: true,
         }
     }
 
@@ -617,7 +652,10 @@ mod tests {
         assert_eq!(ids, [1u128, 7, 100].iter().copied().collect());
     }
 
-    /// Response record round-trips.
+    /// Response record round-trips.  The stored `tx_hash_hex`
+    /// is canonicalised to lowercase + no-prefix on write (see
+    /// `store_response`); the loaded record has the canonical
+    /// form regardless of the input format.
     #[test]
     fn response_record_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -628,7 +666,18 @@ mod tests {
         let mut hash_bytes = [0u8; 32];
         hash_bytes[0] = 0xab;
         let loaded = p.load_response(&hash_bytes).unwrap().unwrap();
-        assert_eq!(loaded, rec);
+        // The non-`tx_hash_hex` fields round-trip identically.
+        assert_eq!(loaded.game_id, rec.game_id);
+        assert_eq!(loaded.status, rec.status);
+        assert_eq!(loaded.submitted_at_block, rec.submitted_at_block);
+        assert_eq!(loaded.depth, rec.depth);
+        assert_eq!(loaded.pivot_idx, rec.pivot_idx);
+        // The `tx_hash_hex` is canonicalised: lowercase + no
+        // `0x` prefix.  `sample_response`'s input has the form
+        // `"0xab" + "0".repeat(62)` which canonicalises to the
+        // same bytes with the 0x stripped.
+        assert!(!loaded.tx_hash_hex.starts_with("0x"));
+        assert_eq!(loaded.tx_hash_hex.len(), 64);
     }
 
     /// `list_responses` only enumerates responses.
@@ -705,21 +754,65 @@ mod tests {
         assert!(matches!(err, PersistenceError::Storage(_)));
     }
 
-    /// `0x`-prefix is accepted on tx-hash.
+    /// `0x`-prefix is accepted on input and canonicalised
+    /// (stripped) on store.  Two writes with `0xab...` and
+    /// `ab...` (uppercase / lowercase / prefix variations) all
+    /// produce the same canonical stored form, eliminating
+    /// case-drift between the JSON value and the storage key.
     #[test]
     fn tx_hash_hex_accepts_0x_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
         let p = Persistence::open(&db).unwrap();
         let mut rec = sample_response(0xcd, 42);
-        rec.tx_hash_hex = format!("0x{}", "0".repeat(63) + "c"); // 32 bytes hex
-                                                                 // Build a properly formatted 32-byte hex.
+        // Build a properly formatted 32-byte hex with 0x prefix.
         rec.tx_hash_hex = format!("0x{}", "ab".repeat(32));
         p.store_response(&rec).unwrap();
-        // Confirm it loads.
+        // Confirm it loads and has the canonical (no-prefix,
+        // lowercase) form.
         let key_hash_bytes = [0xabu8; 32];
         let loaded = p.load_response(&key_hash_bytes).unwrap().unwrap();
-        assert_eq!(loaded.tx_hash_hex, rec.tx_hash_hex);
+        assert_eq!(loaded.tx_hash_hex, "ab".repeat(32));
+        assert!(!loaded.tx_hash_hex.starts_with("0x"));
+    }
+
+    /// Uppercase hex input is canonicalised to lowercase.
+    #[test]
+    fn tx_hash_hex_uppercase_canonicalised_to_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let p = Persistence::open(&db).unwrap();
+        let mut rec = sample_response(0xcd, 42);
+        rec.tx_hash_hex = "AB".repeat(32);
+        p.store_response(&rec).unwrap();
+        let key_hash_bytes = [0xabu8; 32];
+        let loaded = p.load_response(&key_hash_bytes).unwrap().unwrap();
+        assert_eq!(loaded.tx_hash_hex, "ab".repeat(32));
+    }
+
+    /// Two writes with different surface formats produce the
+    /// same canonical storage value.
+    #[test]
+    fn tx_hash_hex_surface_drift_canonicalised() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let p = Persistence::open(&db).unwrap();
+
+        let mut rec_lower = sample_response(0xcd, 42);
+        rec_lower.tx_hash_hex = "ab".repeat(32);
+        let mut rec_upper_prefixed = rec_lower.clone();
+        rec_upper_prefixed.tx_hash_hex = format!("0x{}", "AB".repeat(32));
+
+        p.store_response(&rec_lower).unwrap();
+        let key_hash_bytes = [0xabu8; 32];
+        let loaded_a = p.load_response(&key_hash_bytes).unwrap().unwrap();
+
+        p.store_response(&rec_upper_prefixed).unwrap();
+        let loaded_b = p.load_response(&key_hash_bytes).unwrap().unwrap();
+
+        // Both loads produce the same canonical hex string.
+        assert_eq!(loaded_a.tx_hash_hex, loaded_b.tx_hash_hex);
+        assert_eq!(loaded_a.tx_hash_hex, "ab".repeat(32));
     }
 
     /// Game-state JSON round-trips through `SQLite`.

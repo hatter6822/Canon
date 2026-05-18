@@ -282,12 +282,29 @@ pub enum GameTransition {
 /// Errors `apply_transition` can produce.  Each variant maps to a
 /// precise revert reason in the L1 game contract.  Mirrors Lean's
 /// `LegalKernel.FaultProof.Game.GameError`.
+///
+/// The Lean inductive includes two additional constructors —
+/// `wrongTurn` and `terminationDuringBisection` — that Lean's
+/// `applyTransition` never actually emits (no code path returns
+/// them).  We mirror them here as `WrongTurn` /
+/// `TerminationDuringBisection` for byte-equivalence with the
+/// Lean reference's `Repr` instance, even though the Rust port
+/// also never emits them.  An external caller round-tripping a
+/// Lean `Except GameError` payload that carried one of these
+/// tags can decode it as the matching Rust variant.
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum GameError {
     /// The game has already ended.
     #[error("game has already ended")]
     GameAlreadyEnded,
+    /// Wrong turn (the caller is not the responding party).
+    /// Present for parity with the Lean reference; the Rust port
+    /// does not emit this variant directly (the L1 contract is
+    /// the authoritative turn-validator; off-chain we trust the
+    /// caller passed `me` correctly).
+    #[error("wrong turn")]
+    WrongTurn,
     /// The submitted midpoint is outside the disputed range.
     #[error("midpoint out of range")]
     MidpointOutOfRange,
@@ -304,6 +321,19 @@ pub enum GameError {
     /// The range is not single-step yet; bisect more first.
     #[error("range is not single-step; bisect more first")]
     RangeNotSingleStep,
+    /// Termination attempted during an active bisection.  Present
+    /// for parity with the Lean reference; the Rust port never
+    /// emits this variant directly (the single-step check in
+    /// `apply_terminate_on_single_step` returns `RangeNotSingleStep`
+    /// for the same observable failure).
+    #[error("termination attempted during active bisection")]
+    TerminationDuringBisection,
+    /// A settlement transition was applied with `InProgress` as
+    /// the requested final status.  Distinct from
+    /// `GameAlreadyEnded` (which surfaces when the game is
+    /// already terminal).  Diagnostic-only.
+    #[error("invalid settlement: cannot finalise with InProgress status")]
+    InvalidSettlement,
 }
 
 /// Apply a transition.  Returns the new game state if the
@@ -445,7 +475,7 @@ pub fn apply_settlement(gs: &GameState, final_status: GameStatus) -> Result<Game
         // Caller passed `InProgress` as the "final" status — a
         // logic error.  Surface as a typed error rather than
         // silently no-op.
-        return Err(GameError::GameAlreadyEnded);
+        return Err(GameError::InvalidSettlement);
     }
     Ok(GameState {
         status: final_status,
@@ -842,7 +872,7 @@ mod tests {
     fn apply_settlement_rejects_in_progress_final() {
         let gs = fresh_game(0, 64, TurnSide::Sequencer);
         let err = apply_settlement(&gs, GameStatus::InProgress).unwrap_err();
-        assert_eq!(err, GameError::GameAlreadyEnded);
+        assert_eq!(err, GameError::InvalidSettlement);
     }
 
     /// Full bisection trace: ten `respond_disagree` narrow the

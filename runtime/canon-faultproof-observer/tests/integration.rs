@@ -497,6 +497,7 @@ fn game_state_persists_through_sqlite() {
         },
         me: TurnSide::Challenger,
         last_updated_block: 12345,
+        state_known: true,
     };
     persistence.store_game(&rec).unwrap();
     let loaded = persistence.load_game(1).unwrap().unwrap();
@@ -529,4 +530,104 @@ fn settlement_composes_with_state_machine() {
     };
     let settled = apply_settlement(&state, GameStatus::SequencerWon).unwrap();
     assert_eq!(settled.status, GameStatus::SequencerWon);
+}
+
+/// Cold-start safety gate: a game adopted from a
+/// `FaultProofGameOpened` event has `state_known = false` and
+/// the observer refuses to submit moves until the full state is
+/// learned (via a future `eth_call`).  Even when the truthful
+/// commit is loaded into the oracle, no calldata is submitted.
+#[test]
+fn cold_start_game_blocks_move_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let persistence = Persistence::open(&db).unwrap();
+    let mut source = InMemoryL1Source::new();
+    let game_contract = make_contract_addr(1);
+    let state_root_contract = make_contract_addr(2);
+
+    // Push 5 blocks; block 102 opens a game; block 104 has a
+    // midpoint submitted by the sequencer.
+    let mut last_hash = [0u8; 32];
+    for i in 0..5u8 {
+        let h = make_block_hash(0x10, i);
+        let head = header(100 + u64::from(i), h, last_hash);
+        last_hash = h;
+        let mut logs = HashMap::new();
+        if i == 2 {
+            let challenger = topic_from_u64(0xCAFE);
+            let log = game_opened_log(
+                game_contract,
+                42,
+                challenger,
+                commit(0x11),
+                commit(0x22),
+                100 + u64::from(i),
+                [0xa1; 32],
+                0,
+            );
+            logs.insert(game_contract, vec![log]);
+        }
+        source.push_block(head, logs);
+    }
+    source.set_latest(104);
+
+    let submitter = MockSubmitter::new();
+    // Populate oracle with truthful commits so the strategy
+    // WOULD produce a move if state_known were true.
+    let mut oracle = MemoryTruthOracle::new();
+    for idx in 0..=128u64 {
+        oracle.insert(idx, commit(u8::try_from(idx & 0xFF).unwrap_or(0)));
+    }
+    let watcher_cfg = WatcherConfig {
+        game_contract,
+        state_root_submission_contract: state_root_contract,
+        confirmation_depth: 1,
+        reorg_window_capacity: 16,
+        blocks_per_iteration: 64,
+    };
+    let cfg = ObserverConfig::new(watcher_cfg, [0u8; 32]);
+    let mut obs = Observer::new(cfg, source, submitter, oracle, persistence).unwrap();
+    obs.watcher_mut_seed_for_test(99);
+    let out = obs.run_iteration().unwrap();
+
+    // Game adopted but state_known should be false.
+    let game = obs.games().get(&42).unwrap();
+    assert!(
+        !game.state_known,
+        "cold-start game must have state_known=false"
+    );
+    // No moves submitted (the safety gate fired).
+    assert_eq!(obs.submitter().submissions().len(), 0);
+    assert_eq!(out.submitted_moves, 0);
+}
+
+/// Configuration validation: `reorg_window` over the hard upper
+/// bound is rejected at config-parse time.
+#[test]
+fn watcher_config_rejects_oversize_reorg_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let persistence = Persistence::open(&db).unwrap();
+    let source = InMemoryL1Source::new();
+    let submitter = MockSubmitter::new();
+    let oracle = MemoryTruthOracle::new();
+    let watcher_cfg = WatcherConfig {
+        game_contract: make_contract_addr(1),
+        state_root_submission_contract: make_contract_addr(2),
+        confirmation_depth: 12,
+        // Way over the hard upper bound (MAX_REORG_WINDOW_CAPACITY = 4096).
+        reorg_window_capacity: 100_000,
+        blocks_per_iteration: 64,
+    };
+    let cfg = ObserverConfig::new(watcher_cfg, [0u8; 32]);
+    let result = Observer::new(cfg, source, submitter, oracle, persistence);
+    let Err(err) = result else {
+        panic!("expected ObserverError for oversize reorg_window_capacity");
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("reorg_window_capacity") || msg.contains("hard upper bound"),
+        "expected reorg-window upper bound error, got: {err}",
+    );
 }

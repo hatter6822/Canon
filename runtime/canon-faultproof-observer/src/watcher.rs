@@ -57,6 +57,27 @@ use crate::events::{decode_event, EventDecodeError, GameEvent};
 /// finality depth (12 for Ethereum mainnet).
 pub const DEFAULT_REORG_WINDOW_CAPACITY: usize = 16;
 
+/// Hard upper bound on `reorg_window_capacity`.  The window
+/// allocates `O(capacity × sizeof(BlockHeader))` memory at
+/// construction time; an attacker-controlled capacity of, say,
+/// `usize::MAX` would trigger an OOM.  Bounding at 4096 covers
+/// every realistic L1 finality depth (Ethereum mainnet's
+/// finality is 64 epochs × 32 slots = 2048 slots; 4096 is 2x
+/// headroom).
+pub const MAX_REORG_WINDOW_CAPACITY: usize = 4096;
+
+/// Hard upper bound on `confirmation_depth`.  Larger values
+/// delay event processing without security benefit (L1
+/// finality is the ground truth).  Bounded at the same value
+/// as the window capacity for consistency.
+pub const MAX_CONFIRMATION_DEPTH: u32 = 4096;
+
+/// Hard upper bound on `blocks_per_iteration`.  Caps the
+/// per-iteration work to a reasonable amount; an unbounded
+/// budget can stall the watcher loop on a long historical
+/// catch-up.
+pub const MAX_BLOCKS_PER_ITERATION: u32 = 4096;
+
 /// Default L1 confirmation depth.  Mirrors
 /// `canon-cli-common::paths::DEFAULT_L1_CONFIRMATION_DEPTH`.
 pub const DEFAULT_L1_CONFIRMATION_DEPTH: u32 =
@@ -130,10 +151,28 @@ impl WatcherConfig {
                 "reorg_window_capacity must be > 0".into(),
             ));
         }
+        if self.reorg_window_capacity > MAX_REORG_WINDOW_CAPACITY {
+            return Err(WatcherError::Config(format!(
+                "reorg_window_capacity ({}) exceeds hard upper bound ({MAX_REORG_WINDOW_CAPACITY})",
+                self.reorg_window_capacity
+            )));
+        }
         if self.blocks_per_iteration == 0 {
             return Err(WatcherError::Config(
                 "blocks_per_iteration must be > 0".into(),
             ));
+        }
+        if self.blocks_per_iteration > MAX_BLOCKS_PER_ITERATION {
+            return Err(WatcherError::Config(format!(
+                "blocks_per_iteration ({}) exceeds hard upper bound ({MAX_BLOCKS_PER_ITERATION})",
+                self.blocks_per_iteration
+            )));
+        }
+        if self.confirmation_depth > MAX_CONFIRMATION_DEPTH {
+            return Err(WatcherError::Config(format!(
+                "confirmation_depth ({}) exceeds hard upper bound ({MAX_CONFIRMATION_DEPTH})",
+                self.confirmation_depth
+            )));
         }
         // Cast saturating to u32: a capacity above u32::MAX is
         // a configuration error elsewhere, but if it ever

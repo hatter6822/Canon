@@ -96,11 +96,20 @@ impl ObserverError {
     pub fn exit_code(&self) -> OperatorExitCode {
         match self {
             // Transient: retry with backoff.
-            Self::Source(SourceError::Transport(_) | SourceError::BlockNotFound(_)) => {
-                OperatorExitCode::Transient
-            }
+            //
+            // `ReorgError::NonMonotone` is a transient
+            // upstream-RPC bug: the L1 source returned a
+            // block-number gap, which the watcher recovers from
+            // by re-fetching.  Per `canon-l1-ingest::reorg`'s
+            // docstring, "the watcher must back off and retry".
+            Self::Source(SourceError::Transport(_) | SourceError::BlockNotFound(_))
+            | Self::Reorg(ReorgError::NonMonotone { .. }) => OperatorExitCode::Transient,
 
-            // OperatorAction: manual intervention.
+            // OperatorAction: manual intervention.  Deep re-orgs
+            // and orphaned-parent inconsistencies signal an L1
+            // chain reorganisation deeper than the observer's
+            // sliding window — the operator must intervene
+            // (replay window expansion, manual cursor reset).
             Self::Reorg(ReorgError::DeepReorg { .. } | ReorgError::OrphanedParent { .. })
             | Self::Config(_)
             | Self::Crypto(_)
@@ -118,11 +127,9 @@ impl ObserverError {
             // category above for readability; clippy's
             // match_same_arms is allowed locally.
             #[allow(clippy::match_same_arms)]
-            Self::Reorg(_)
-            | Self::Game(_)
-            | Self::Strategy(_)
-            | Self::Storage(_)
-            | Self::Submitter(_) => OperatorExitCode::OperatorAction,
+            Self::Game(_) | Self::Strategy(_) | Self::Storage(_) | Self::Submitter(_) => {
+                OperatorExitCode::OperatorAction
+            }
         }
     }
 }
@@ -149,6 +156,24 @@ mod tests {
             window_floor: 100,
         });
         assert_eq!(err.exit_code(), OperatorExitCode::OperatorAction);
+    }
+
+    /// `OrphanedParent` maps to `OperatorAction`.
+    #[test]
+    fn orphaned_parent_is_operator_action() {
+        let err = ObserverError::Reorg(ReorgError::OrphanedParent { incoming_number: 1 });
+        assert_eq!(err.exit_code(), OperatorExitCode::OperatorAction);
+    }
+
+    /// `NonMonotone` reorg maps to `Transient` (recoverable via
+    /// back-off + retry, per the `canon-l1-ingest::reorg` docstring).
+    #[test]
+    fn non_monotone_reorg_is_transient() {
+        let err = ObserverError::Reorg(ReorgError::NonMonotone {
+            incoming_number: 105,
+            last_seen: 100,
+        });
+        assert_eq!(err.exit_code(), OperatorExitCode::Transient);
     }
 
     /// `Malformed` source response maps to `Unavailable`.

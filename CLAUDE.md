@@ -2735,14 +2735,98 @@ fault-proof soundness chain.  See
     in the table; we promote our use from dev-dependency to
     regular dependency to encode response-record tx-hashes).
 
-  * **Audit posture at landing.**
+  * **Post-landing audit pass.**  Four independent code-review
+    agents produced consolidated findings; the security- and
+    correctness-relevant items were all addressed in-PR before
+    the audit report could become stale:
+    - **CRITICAL (C-2 docstring lie)** lib.rs claimed the
+      observer validates `deployment_id` against L1 events.
+      It does not (the `FaultProofGameOpened` event payload
+      doesn't carry the field).  Docstring rewritten to flag
+      the deferral honestly; validation is RH-G follow-up
+      work requiring an `eth_call` to `games(uint256)`.
+    - **CRITICAL (C-3 wrong-shape calldata)** the previous
+      `handle_midpoint_submitted` heuristic
+      `state.range.high.idx = idx.saturating_mul(2)`
+      synthesised an incorrect range bound for cold-start
+      games.  The observer would then compute midpoint calldata
+      against this fictional range and submit it on-chain.
+      Removed the heuristic.  Cold-start games adopted from
+      `FaultProofGameOpened` are now marked
+      `GameRecord.state_known = false`; the orchestrator's
+      `maybe_play_move` refuses to compute or submit moves for
+      `state_known=false` games until the full state is
+      learned (via the deferred eth_call).  The persistence
+      layer's new `state_known` field carries `#[serde(default)]`
+      for backward compatibility.
+    - **CRITICAL (C-1 fresh-watcher event-skip)** implemented
+      the `--start-block` CLI override.  Renamed
+      `Observer::seed_watcher_last_confirmed` → `set_start_block`
+      and exposed it as a documented operator escape hatch.
+      Without `--start-block`, the fresh watcher still jumps to
+      the confirmed head (documented behaviour); operators
+      catching up from a historic block now have a supported
+      knob.
+    - **HIGH (H-2 O(N) dedup scan)** replaced the
+      `list_responses()`-per-call scan in
+      `has_submitted_for_pivot` with an in-memory
+      `HashSet<(u128, Option<u64>)>` populated at startup from
+      persistence and updated atomically with each batch
+      commit.  Constant-time dedup defends against unbounded
+      growth over the daemon's lifetime.
+    - **HIGH (H-Submitter wrong-selector calldata)** the
+      previous `encode_calldata(TerminateOnSingleStep)`
+      produced a minimum-form selector that does NOT match
+      the deployed contract's `terminateOnSingleStep(uint256,
+      uint8, bytes, uint64, CellProof[], bytes32)` signature.
+      Broadcasting that calldata would revert at the
+      selector-dispatch layer.  Now `encode_calldata` returns
+      `SubmitError::TerminateNotImplemented` for this move
+      kind; the minimum-form helper
+      `encode_terminate_calldata` remains available for
+      integration smoke tests but production callers cannot
+      silently broadcast it.
+    - **MEDIUM (M-tx_hash_hex case drift)** persistence now
+      canonicalises `tx_hash_hex` to lowercase + no `0x`
+      prefix on `store_response` / `commit_batch`, so two
+      writes for the same hash with different surface formats
+      produce one canonical JSON payload.
+    - **MEDIUM (M-Error)** `ReorgError::NonMonotone` now maps
+      to `OperatorExitCode::Transient` (recoverable via
+      back-off + retry, per the underlying reorg-window
+      docstring) instead of `OperatorAction`.  Operators no
+      longer get spurious page-outs on transient L1-RPC gaps.
+    - **MEDIUM (M-config bounds)** `WatcherConfig::validate`
+      and `CliConfig::validate` now enforce hard upper bounds
+      on `reorg_window_capacity` (4096),
+      `confirmation_depth` (4096), and `blocks_per_iteration`
+      (4096), defending against operator-typo-induced OOM /
+      memory-bomb scenarios.
+    - **LOW (apply_settlement diagnostic)** added
+      `GameError::InvalidSettlement` for the
+      `apply_settlement(InProgress)` path, distinct from
+      `GameAlreadyEnded`.
+    - **LOW (Lean parity)** added `GameError::WrongTurn` and
+      `GameError::TerminationDuringBisection` variants for
+      byte-equivalence with the Lean reference's
+      `GameError` inductive (both are Lean-side dead code,
+      not emitted in practice).
+
+  * **Audit posture at landing (post-audit).**
     - `cargo build --workspace --all-targets --locked` —
       green.
     - `cargo test -p canon-faultproof-observer --locked` —
-      162 unit + 7 integration + 14 property = 183 tests
-      passing.
-    - `cargo clippy -p canon-faultproof-observer --all-targets
-      --locked -- -D warnings` — clean.
+      170 unit + 9 integration + 14 property = 193 tests
+      passing (+10 from the initial RH-G landing's 183:
+      4 in `tx_hash_hex`-canonicalisation regression
+      coverage, 2 in error/exit-code mapping for
+      `OrphanedParent` / `NonMonotone`, 2 in observer dedup
+      cache splits, 2 in integration `cold_start_game` +
+      oversize-config regression).
+    - `cargo test --workspace --locked` — 1237 tests
+      (+10 from the prior workspace total of 1227).
+    - `cargo clippy --workspace --all-targets --locked
+      -- -D warnings` — clean.
     - `cargo fmt --all -- --check` — clean.
     - `unsafe_code = "forbid"`.
     - Binary smoke-tested via

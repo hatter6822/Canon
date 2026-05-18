@@ -28,13 +28,13 @@
 //!   * [`mock::MockSubmitter`] — in-memory; the test harness uses
 //!     this to drive the observer without an actual L1 RPC.
 //!     Records every submission for inspection.
-//!   * [`encode::encode_calldata`] — pure-Rust ABI encoder for
+//!   * [`encode_calldata`] — pure-Rust ABI encoder for
 //!     the four L1 contract methods (`submitMidpoint`,
 //!     `respondToMidpoint`, `terminateOnSingleStep`,
 //!     `claimTimeout`).  Production deployments use this
 //!     calldata as the `data` field of their transaction.
 //!
-//! The full production [`json_rpc::JsonRpcSubmitter`] that signs
+//! The full production `JsonRpcSubmitter` that signs
 //! and broadcasts is sketched as a public trait API but its
 //! actual `eth_sendRawTransaction` driver requires EIP-1559
 //! transaction-encoding work that mirrors RH-B's
@@ -117,13 +117,25 @@ pub enum SubmitError {
     #[error("cannot encode calldata for HonestMove::NoMove")]
     NoMove,
 
-    /// The honest move is `Submit` (proposing a new midpoint) but
-    /// the caller invoked `encode_calldata` instead of
-    /// `encode_submit_calldata` — the L1 contract's
-    /// `submitMidpoint` takes only the commit (the midpoint idx
-    /// is computed on-chain from the game's range).
-    #[error("encode_calldata cannot synthesise Submit; use the dedicated path")]
-    UnsupportedMove,
+    /// The honest move is `TerminateOnSingleStep` but the
+    /// production submitter's calldata builder is incomplete:
+    /// the L1 `CanonFaultProofGame.terminateOnSingleStep(uint256,
+    /// uint8, bytes, uint64, CellProof[], bytes32)` takes the
+    /// full action variant + cell-proof bundle, which require a
+    /// `canon` subprocess pipeline that is deferred RH-G
+    /// follow-up work (see lib.rs's "What this RH-G landing
+    /// ships").  The minimum-form `encode_terminate_calldata`
+    /// helper is available for integration smoke tests, but
+    /// `encode_calldata` for `TerminateOnSingleStep` refuses to
+    /// silently produce a calldata that would revert on-chain
+    /// at the L1 contract's selector-dispatch layer.
+    #[error(
+        "TerminateOnSingleStep calldata requires the full \
+         (actionKind, actionFields, signer, cellProofs) form \
+         which is deferred RH-G follow-up; the off-chain observer \
+         cannot synthesise it from local state alone"
+    )]
+    TerminateNotImplemented,
 
     /// Submission was rejected by the L1 RPC (e.g., invalid
     /// nonce, out-of-gas estimate).
@@ -131,7 +143,8 @@ pub enum SubmitError {
     RpcRejected(String),
 
     /// The submitter is in mock mode and was asked to perform a
-    /// network call.
+    /// network call beyond what the mock can synthesise (e.g.,
+    /// a fork-aware re-broadcast).
     #[error("mock submitter received unexpected network call")]
     MockUnsupported,
 }
@@ -159,9 +172,16 @@ pub fn encode_calldata(game_id: u128, mv: HonestMove) -> Result<Vec<u8>, SubmitE
         HonestMove::Submit(claim) => Ok(encode_submit_calldata(game_id, claim.commit)),
         HonestMove::RespondAgree => Ok(encode_respond_calldata(game_id, true)),
         HonestMove::RespondDisagree => Ok(encode_respond_calldata(game_id, false)),
-        HonestMove::TerminateOnSingleStep {
-            claimed_post_commit,
-        } => Ok(encode_terminate_calldata(game_id, claimed_post_commit)),
+        // The minimum-form `encode_terminate_calldata` produces
+        // a selector that does NOT match the deployed contract's
+        // `terminateOnSingleStep(uint256, uint8, bytes, uint64,
+        // CellProof[], bytes32)` signature; broadcasting that
+        // calldata would revert on-chain at the selector-dispatch
+        // layer.  Refuse to silently produce the wrong-selector
+        // calldata.  The minimum-form helper remains available
+        // via `encode_terminate_calldata` for integration smoke
+        // tests.
+        HonestMove::TerminateOnSingleStep { .. } => Err(SubmitError::TerminateNotImplemented),
     }
 }
 
@@ -459,23 +479,37 @@ mod tests {
         assert_eq!(bytes[67], 0);
     }
 
-    /// `encode_calldata(TerminateOnSingleStep)` uses the
-    /// terminate calldata.
+    /// `encode_calldata(TerminateOnSingleStep)` refuses to
+    /// silently emit wrong-selector calldata.  The full-form
+    /// calldata (with actionKind + actionFields + cellProofs)
+    /// requires a `canon` subprocess pipeline that is deferred
+    /// RH-G follow-up work.
     #[test]
-    fn terminate_uses_terminate_calldata() {
-        let bytes = encode_calldata(
+    fn terminate_calldata_refuses_minimum_form() {
+        let err = encode_calldata(
             42,
             HonestMove::TerminateOnSingleStep {
                 claimed_post_commit: commit(7),
             },
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(matches!(err, SubmitError::TerminateNotImplemented));
+    }
+
+    /// The minimum-form `encode_terminate_calldata` helper is
+    /// still callable for integration smoke tests.  It produces
+    /// the 4-byte selector + 32-byte gameId + 32-byte commit
+    /// shape.  Production callers should NOT broadcast this —
+    /// the selector doesn't match the deployed contract's
+    /// full-form signature.
+    #[test]
+    fn encode_terminate_calldata_minimum_form_shape() {
+        let bytes = encode_terminate_calldata(42, commit(7));
         assert_eq!(bytes.len(), 68);
         assert_eq!(
             &bytes[0..4],
             &MethodSelector::TerminateOnSingleStep.selector()
         );
-        // The last 32 bytes encode the claimed_post_commit.
         assert_eq!(&bytes[36..68], &commit(7));
     }
 

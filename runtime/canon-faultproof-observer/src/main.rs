@@ -157,18 +157,25 @@ fn run(cfg: &CliConfig) -> Result<(), ObserverError> {
     let mut observer = Observer::new(observer_cfg, source, submitter, oracle, persistence)?;
 
     // The --start-block override is a privileged operation that
-    // skips persisted-cursor recovery; we don't expose a public
-    // accessor for it.  Operators that need to manually reset
-    // the cursor should stop the observer, delete the
-    // `w/cursor` cell from the storage, and restart.  This
-    // policy avoids the "operator typed the wrong block number
-    // and we silently re-processed millions of events" footgun.
-    if cfg.start_block.is_some() {
-        return Err(ObserverError::Config(
-            "--start-block is not implemented in this landing; manually edit the \
-             w/cursor cell in canon-storage if you need to reset the watcher"
-                .to_string(),
-        ));
+    // overrides the persisted-cursor resume point.  Operators
+    // use this to catch-up the observer from a specific historic
+    // block on a fresh deployment (otherwise the fresh-watcher
+    // jumps to the confirmed head and silently skips historic
+    // games — see the documented "cold-start" behaviour in
+    // lib.rs's "Security properties").
+    //
+    // The override is documented as advanced operator-only.  An
+    // operator that supplies the wrong block number will cause
+    // the observer to re-process events (idempotent at the
+    // event-dispatch boundary) or to skip events (only if the
+    // override is higher than the current cursor).  We log the
+    // override loudly so the operator-supervisor sees it.
+    if let Some(start) = cfg.start_block {
+        observer.set_start_block(start);
+        info!(
+            start_block = start,
+            "watcher cursor overridden via --start-block (operator-supplied resume point)",
+        );
     }
 
     // Note: SIGTERM / SIGINT handling.  The std library doesn't

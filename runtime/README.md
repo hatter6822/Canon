@@ -99,11 +99,24 @@ SQLite event indexer) have all landed.  Current state:
     state map mirroring the Lean reference
     (`LegalKernel.FaultProof.Game`) byte-for-byte; computes the
     honest move via a deployment-supplied truth oracle; submits
-    responses via a pluggable submitter (mock + JSON-RPC trait
-    surface; production transaction encoder is a follow-up).
-    Persistence via `canon-storage` with atomic-batch commits.
-    Reuses `canon-l1-ingest`'s re-org window + JSON-RPC source
-    + `BridgeActorKey` signing-key wrapper.
+    responses via a pluggable submitter (mock + calldata
+    encoder; the production JSON-RPC transaction encoder is
+    deferred follow-up).  Persistence via `canon-storage` with
+    atomic-batch commits.  Reuses `canon-l1-ingest`'s re-org
+    window + JSON-RPC source + `BridgeActorKey` signing-key
+    wrapper.  Critical safety gate: cold-start games adopted
+    from `FaultProofGameOpened` events have `state_known = false`
+    until a future `eth_call`-based contract-state read learns
+    the full state; the orchestrator refuses to submit moves
+    for such games (defends against wrong-shape calldata
+    derived from placeholder range bounds).  In-memory pivot
+    dedup cache for O(1) duplicate-submission detection.
+    `TerminateOnSingleStep` calldata builder refuses to emit
+    the minimum-form selector that wouldn't match the deployed
+    contract's full signature.  Hard upper bounds on every
+    operator-tunable parameter (reorg_window_capacity,
+    confirmation_depth, blocks_per_iteration) at 4096 to defend
+    against memory-bomb scenarios.
 
 Work-unit status (per `docs/planning/rust_host_runtime_plan.md`):
 
