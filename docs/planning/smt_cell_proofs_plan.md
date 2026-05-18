@@ -392,12 +392,15 @@ submissions off-chain until the SMT path is shipped"
     from its honest base, and the per-tamper-class field-delta
     matches the documented mutation; fixture determinism;
     fixture write/verify cycle; cross-stack assertion gating).
-    10 Solidity test cases in `SmtCellProofCrossCheck` (header
+    12 Solidity test cases in `SmtCellProofCrossCheck` (header
     shape; `shouldVerify` matches position; `smtKey` /
     `leafPreimage` / `proofData` / `root` shape checks;
     per-entry verdict cross-stack assertion + per-honest-entry
     root byte-equality, both gated on `isKeccak256Linked`; spot
-    checks for entry 0 and entry 50 categories).
+    checks for entry 0 and entry 50 categories; per-entry
+    tamper-string-in-valid-set + per-entry category-consistent-
+    with-tamper defenses against fixture-corruption /
+    drift-between-fields bugs).
   * **Documentation updates.**
     - `docs/GENESIS_PLAN.md` §15B (lines ~5263-5270): the
       Workstream-SC.3 status sub-paragraph rewritten to declare
@@ -431,11 +434,12 @@ submissions off-chain until the SMT path is shipped"
       PASS, no kernel-TCB drift.
     - `forge build` — green; no warnings in the new files.
     - `forge test --match-contract SmtCellProofCrossCheck` —
-      8 passed; 2 skipped (the `isKeccak256Linked`-gated
+      10 passed; 2 skipped (the `isKeccak256Linked`-gated
       cross-stack assertions, expected in FNV-fallback CI).
-    - Full `forge test` — 400 tests passing, 11 skipped
+    - Full `forge test` — 402 tests passing, 11 skipped
       (+2 from pre-SC.3's 9 skipped: the two new SC.3 keccak-
-      gated tests).
+      gated tests; the audit pass added 2 more passing
+      non-keccak-gated tests).
     - `forge fmt --check test/CrossCheck/SmtCellProof.t.sol`
       — clean.
   * **Deferral markers retired by SC.3.**
@@ -446,7 +450,9 @@ submissions off-chain until the SMT path is shipped"
       ratification claim.
     - The two pre-existing markers (`StepVMMerkle.sol:35`,
       `Cell.lean:52`) were already retired by SC.1 / SC.2.
-  * **Audit-pass improvements (post-landing self-review).**
+  * **Audit-pass improvements (post-landing self-review,
+    two passes).**
+    Pass 1 (Lean-side):
     - Removed the dead `mkValidEntry` (taking a raw
       `Std.TreeMap UInt64 UInt64 compare`) constructor: it
       would have routed the proof construction through Lean's
@@ -472,7 +478,7 @@ submissions off-chain until the SMT path is shipped"
       walk to genuinely different roots: `siblingTamper`'s walk
       reads the appended sibling at depth 0; `bitmaskTamper`'s
       walk reads `paddingHash` (cursor exhausted) at depth 0.
-    - Added 2 new regression tests:
+    - Added 2 new Lean regression tests:
       `each adversarial entry's byte fields differ from its
       honest base` (catches "tamper is a no-op" bugs by
       asserting at least one of `(smtKey, leafPreimage,
@@ -487,6 +493,23 @@ submissions off-chain until the SMT path is shipped"
       entries the original proof was already the empty proof
       and the tamper preserves byte-identity at the proof
       level (the divergence is in `smtKey` + `leafPreimage`).
+    Pass 2 (clean-up + Solidity-side defense):
+    - Removed the dead `siblingsToJson` helper (declared but
+      unused after `Entry.toJson` was rewritten to serialise
+      `proofData` directly as a hex string rather than via a
+      per-sibling array).
+    - Added 2 new Solidity regression tests:
+      `per_entry_tamper_string_in_valid_set` (asserts every
+      adversarial entry's `tamper` JSON field is one of the
+      six documented strings, defending against fixture
+      corruption / silent tamper-class rename) and
+      `per_entry_category_consistent_with_tamper` (asserts the
+      `category` JSON field contains the
+      `"::tampered:<tamper>"` substring matching the `tamper`
+      field, defending against the two fields drifting out
+      of sync under a refactor).  The substring check uses a
+      simple O(|haystack|·|needle|) scan — acceptable for
+      the bounded ≤ 256-byte category strings.
   * **TCB delta:** zero.
   * **Trust-assumption delta:** zero (the cross-stack
     assertion's correctness rests on the same `CollisionFree

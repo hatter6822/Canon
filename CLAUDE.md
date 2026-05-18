@@ -2641,18 +2641,22 @@ operational off-chain audit gap documented in
     eight-cell maps plus 10 single-bit-position edge cases.
 
   * **Solidity consumer.**
-    `solidity/test/CrossCheck/SmtCellProof.t.sol` (~270 lines).
-    10 test cases: header shape (count + tamper-class
+    `solidity/test/CrossCheck/SmtCellProof.t.sol` (~390 lines).
+    12 test cases: header shape (count + tamper-class
     breakdown), per-entry `shouldVerify`-matches-position
     (honest in [0,50), adversarial in [50,100)), structural
     invariants for `smtKey` / `leafPreimage` / `proofData` /
     `root`, the per-entry cross-stack verdict assertion
     (`isKeccak256Linked`-gated), per-honest-entry root
-    byte-equality (also gated), and spot checks for entry 0
-    and entry 50.  Uses a locally-defined `SmtCellProofCrossCheckProxy`
-    (mirrors `SmtCellVerifier.t.sol`'s proxy pattern with a
-    distinct name to avoid ABI-name collisions when running
-    the full forge suite).
+    byte-equality (also gated), spot checks for entry 0 and
+    entry 50, per-entry tamper-string-in-valid-set
+    (fixture-corruption defense), per-entry
+    category-consistent-with-tamper (drift-between-fields
+    defense).  Uses a locally-defined
+    `SmtCellProofCrossCheckProxy` (mirrors
+    `SmtCellVerifier.t.sol`'s proxy pattern with a distinct
+    name to avoid ABI-name collisions when running the full
+    forge suite).
 
   * **Wire-format alignment.**  Each fixture entry carries:
     - `smtKeyHex` — 8-byte big-endian UInt64.
@@ -2687,8 +2691,9 @@ operational off-chain audit gap documented in
     - `lake exe deferral_audit` / `naming_audit` /
       `tcb_audit` / `stub_audit` / `count_sorries` — all PASS.
     - `forge build` — green.
-    - `forge test` — 400 tests passing; 11 skipped (+2 from
-      pre-SC.3's 9: the two new SC.3 keccak-gated tests).
+    - `forge test` — 402 tests passing; 11 skipped (+2 from
+      pre-SC.3's 9: the two new SC.3 keccak-gated tests; the
+      audit pass added 2 non-keccak-gated tests).
     - `forge fmt --check test/CrossCheck/SmtCellProof.t.sol`
       — clean.
 

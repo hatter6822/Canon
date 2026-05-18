@@ -295,4 +295,105 @@ contract SmtCellProofCrossCheck is CrossCheckFramework {
         string memory tamper = vm.parseJsonString(raw, ".entries[50].tamper");
         assertEq(tamper, "valueSubst", "entry[50] tamper");
     }
+
+    /// @notice Defense against fixture corruption: every
+    ///         adversarial entry's `tamper` field must be one of
+    ///         the six documented strings, and every honest entry's
+    ///         `tamper` field must be parseable as the canonical
+    ///         "null" representation (verified by deferring to the
+    ///         positional `shouldVerify=true` check above).
+    ///
+    /// @dev    `vm.parseJsonString` on a `null` JSON literal returns
+    ///         an empty string in Foundry; we use that semantics
+    ///         here.  If the fixture format changes to encode null
+    ///         differently, this test will need updating.
+    function test_per_entry_tamper_string_in_valid_set() public view {
+        if (!fixtureExists(FIXTURE_NAME)) return;
+        string memory raw = readFixture(FIXTURE_NAME);
+
+        // Pre-hash the six valid tamper strings for fast comparison.
+        bytes32 hValueSubst = keccak256(bytes("valueSubst"));
+        bytes32 hSiblingTamper = keccak256(bytes("siblingTamper"));
+        bytes32 hBitmaskTamper = keccak256(bytes("bitmaskTamper"));
+        bytes32 hRootTamper = keccak256(bytes("rootTamper"));
+        bytes32 hKeyMismatch = keccak256(bytes("keyMismatch"));
+        bytes32 hAbsentKey = keccak256(bytes("absentKey"));
+
+        for (uint256 i = 50; i < 100; i++) {
+            string memory base = string.concat(".entries[", vm.toString(i), "]");
+            string memory t = vm.parseJsonString(raw, string.concat(base, ".tamper"));
+            bytes32 h = keccak256(bytes(t));
+            bool valid = h == hValueSubst || h == hSiblingTamper || h == hBitmaskTamper
+                || h == hRootTamper || h == hKeyMismatch || h == hAbsentKey;
+            assertTrue(
+                valid,
+                string.concat(
+                    "adversarial entry[", vm.toString(i), "] has unrecognised tamper string: ", t
+                )
+            );
+        }
+    }
+
+    /// @notice Every adversarial entry's `category` ends with a
+    ///         `::tampered:<class>` suffix that matches the
+    ///         `tamper` field.  Catches a class of fixture-
+    ///         corruption bugs where the category and tamper fields
+    ///         drift out of sync (e.g., a refactor that renames one
+    ///         but not the other).
+    function test_per_entry_category_consistent_with_tamper() public view {
+        if (!fixtureExists(FIXTURE_NAME)) return;
+        string memory raw = readFixture(FIXTURE_NAME);
+        for (uint256 i = 50; i < 100; i++) {
+            string memory base = string.concat(".entries[", vm.toString(i), "]");
+            string memory category = vm.parseJsonString(raw, string.concat(base, ".category"));
+            string memory tamper = vm.parseJsonString(raw, string.concat(base, ".tamper"));
+            // The category contains "::tampered:<tamper>" as a
+            // substring.  We check by verifying that
+            // `keccak256(bytes(category))` contains
+            // `keccak256(bytes("::tampered:<tamper>"))` as a
+            // substring — implemented as a manual scan since
+            // Solidity does not provide a built-in substring check.
+            string memory needle = string.concat("::tampered:", tamper);
+            assertTrue(
+                _containsSubstring(category, needle),
+                string.concat(
+                    "adversarial entry[",
+                    vm.toString(i),
+                    "] category does not contain '",
+                    needle,
+                    "': ",
+                    category
+                )
+            );
+        }
+    }
+
+    /// @notice Internal substring check used by
+    ///         `test_per_entry_category_consistent_with_tamper`.
+    ///         Returns true iff `needle` appears anywhere within
+    ///         `haystack`.  O(|haystack| * |needle|) naive
+    ///         implementation; acceptable for the bounded test-time
+    ///         inputs (category strings ≤ 256 bytes).
+    function _containsSubstring(string memory haystack, string memory needle)
+        internal
+        pure
+        returns (bool)
+    {
+        bytes memory h = bytes(haystack);
+        bytes memory n = bytes(needle);
+        if (n.length == 0) return true;
+        if (h.length < n.length) return false;
+        uint256 limit = h.length - n.length;
+        for (uint256 i = 0; i <= limit; i++) {
+            bool match_ = true;
+            for (uint256 j = 0; j < n.length; j++) {
+                if (h[i + j] != n[j]) {
+                    match_ = false;
+                    break;
+                }
+            }
+            if (match_) return true;
+        }
+        return false;
+    }
 }

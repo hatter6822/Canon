@@ -652,10 +652,6 @@ def adversarialEntries (honestSlice : List Entry) : List Entry := Id.run do
 
 /-! ## JSON serialisation -/
 
-/-- Convert a list of byte-arrays to a JSON array of hex strings. -/
-def siblingsToJson (sibs : List ByteArray) : Json :=
-  .arr (sibs.map (fun s => .str (hexFromBytes s)))
-
 /-- Convert one entry to JSON.  Includes the optional `tamper`
     descriptor for tampered entries. -/
 def Entry.toJson (e : Entry) : Json :=
