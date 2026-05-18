@@ -67,7 +67,9 @@ use crate::game::{
     apply_settlement, apply_transition, Claim, DisputedRange, GameState, GameStatus,
     GameTransition, TurnSide,
 };
-use crate::persistence::{GameRecord, PersistBatch, Persistence, ResponseRecord, ResponseStatus};
+use crate::persistence::{
+    GameRecord, PersistBatch, PersistedHeader, Persistence, ResponseRecord, ResponseStatus,
+};
 use crate::strategy::{compute_next_move, HonestMove, HonestMoveError, TruthOracle};
 use crate::submitter::{encode_calldata, Submitter};
 use crate::watcher::{Watcher, WatcherConfig};
@@ -175,6 +177,23 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             ObserverError::Storage(canon_storage::storage::StorageError::Other(e.to_string()))
         })?;
         watcher.set_last_confirmed(cursor);
+        // Restore the re-org window from persistence.  This
+        // closes the original RH-G.2 plan's "Persist watcher
+        // state (last-processed block, recent block-hash
+        // window)" requirement.  Without window persistence, a
+        // re-org that orphans blocks between observer restart
+        // and the next fetched block would silently be missed
+        // (the new chain's block would link to a sibling of
+        // the persisted cursor, not the orphan, and our window
+        // would be empty → no detection).
+        let persisted_headers = persistence.read_reorg_window().map_err(|e| {
+            ObserverError::Storage(canon_storage::storage::StorageError::Other(e.to_string()))
+        })?;
+        if !persisted_headers.is_empty() {
+            let restored: Vec<canon_l1_ingest::reorg::BlockHeader> =
+                persisted_headers.into_iter().map(Into::into).collect();
+            watcher.seed_window(restored);
+        }
         // Restore in-memory game map.
         let game_records = persistence.list_games().map_err(|e| {
             ObserverError::Storage(canon_storage::storage::StorageError::Other(e.to_string()))
@@ -416,6 +435,17 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         }
         if let Some(new_cursor) = watch.new_last_confirmed {
             batch.set_cursor(new_cursor);
+            // Snapshot the re-org window into the batch so it
+            // commits atomically with the cursor advance.  This
+            // closes RH-G.2's "persist recent block-hash window"
+            // requirement.
+            let snapshot: Vec<PersistedHeader> = self
+                .watcher
+                .window_snapshot()
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            batch.set_reorg_window(snapshot);
         }
         // Phase 1: commit persistence (including any prepared
         // tx intent records staged by `maybe_play_move`).

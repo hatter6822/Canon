@@ -201,6 +201,23 @@ impl ReorgWindow {
         self.buffer.iter().any(|h| &h.hash == hash)
     }
 
+    /// Iterate the window's headers in ascending block-number
+    /// order (tail-to-head).  Used by downstream consumers
+    /// (e.g., the canon-faultproof-observer's persistence
+    /// layer) to snapshot the window for restart-time
+    /// resume.  Available since canon-l1-ingest v0.2.4.
+    pub fn iter(&self) -> impl Iterator<Item = &BlockHeader> {
+        self.buffer.iter()
+    }
+
+    /// Collect the window into a `Vec<BlockHeader>` for
+    /// serialisation / snapshotting.  Convenience over
+    /// `iter().copied().collect()`.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<BlockHeader> {
+        self.buffer.iter().copied().collect()
+    }
+
     /// Feed an incoming block.  Returns:
     ///
     ///   * `Ok(AdvanceOutcome::Advanced)` if the block linearly
@@ -677,5 +694,37 @@ mod tests {
         };
         let err = w.advance(orphan).unwrap_err();
         assert!(matches!(err, ReorgError::DeepReorg { .. }));
+    }
+
+    /// `iter()` returns headers in ascending block-number order.
+    #[test]
+    fn iter_returns_ascending_order() {
+        let mut w = ReorgWindow::new(4);
+        let chain = linear_chain(3, 100, 1);
+        for h in &chain {
+            w.advance(*h).unwrap();
+        }
+        let collected: Vec<u64> = w.iter().map(|h| h.number).collect();
+        assert_eq!(collected, vec![100, 101, 102]);
+    }
+
+    /// `to_vec()` produces the same ordering as `iter()`.
+    #[test]
+    fn to_vec_matches_iter() {
+        let mut w = ReorgWindow::new(4);
+        let chain = linear_chain(3, 100, 1);
+        for h in &chain {
+            w.advance(*h).unwrap();
+        }
+        let v = w.to_vec();
+        let i: Vec<BlockHeader> = w.iter().copied().collect();
+        assert_eq!(v, i);
+    }
+
+    /// `to_vec()` on an empty window returns an empty `Vec`.
+    #[test]
+    fn to_vec_empty_window() {
+        let w = ReorgWindow::new(4);
+        assert!(w.to_vec().is_empty());
     }
 }

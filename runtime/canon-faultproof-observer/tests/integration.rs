@@ -813,3 +813,69 @@ fn integration_mark_state_known_rejects_degenerate_range() {
     let updated = obs.mark_state_known(99, dummy_state, 100).unwrap();
     assert!(!updated);
 }
+
+/// RH-G.2 plan deliverable: re-org window is persisted across
+/// observer restarts.  Verifies the round-trip: observer A
+/// processes blocks → window has headers; observer A drops;
+/// observer B opens the same DB → window is restored from
+/// persistence.
+#[test]
+fn reorg_window_persists_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let game_contract = make_contract_addr(1);
+    let state_root_contract = make_contract_addr(2);
+
+    // Instance A: process some blocks to populate the window.
+    let window_head_hash;
+    {
+        let persistence = Persistence::open(&db).unwrap();
+        let mut source = InMemoryL1Source::new();
+        let mut last_hash = [0u8; 32];
+        for i in 0..5u8 {
+            let h = make_block_hash(0x10, i);
+            let head = header(100 + u64::from(i), h, last_hash);
+            last_hash = h;
+            source.push_block(head, HashMap::new());
+        }
+        source.set_latest(104);
+        let submitter = MockSubmitter::new();
+        let oracle = MemoryTruthOracle::new();
+        let watcher_cfg = WatcherConfig {
+            game_contract,
+            state_root_submission_contract: state_root_contract,
+            confirmation_depth: 1,
+            reorg_window_capacity: 16,
+            blocks_per_iteration: 64,
+        };
+        let cfg = ObserverConfig::new(watcher_cfg, [0u8; 32]);
+        let mut obs = Observer::new(cfg, source, submitter, oracle, persistence).unwrap();
+        obs.watcher_mut_seed_for_test(99);
+        let _ = obs.run_iteration().unwrap();
+        window_head_hash = obs.watcher().window_head().unwrap().hash;
+    }
+
+    // Instance B: re-open the DB; the window should be
+    // restored.
+    let persistence = Persistence::open(&db).unwrap();
+    // Read the persisted window directly to verify it's
+    // populated.
+    let persisted = persistence.read_reorg_window().unwrap();
+    assert!(!persisted.is_empty(), "reorg window must be persisted");
+    let source = InMemoryL1Source::new();
+    let submitter = MockSubmitter::new();
+    let oracle = MemoryTruthOracle::new();
+    let watcher_cfg = WatcherConfig {
+        game_contract,
+        state_root_submission_contract: state_root_contract,
+        confirmation_depth: 1,
+        reorg_window_capacity: 16,
+        blocks_per_iteration: 64,
+    };
+    let cfg = ObserverConfig::new(watcher_cfg, [0u8; 32]);
+    let obs_b = Observer::new(cfg, source, submitter, oracle, persistence).unwrap();
+    // The restored window's head should be the same hash we
+    // observed in Instance A.
+    let restored_head = obs_b.watcher().window_head().unwrap();
+    assert_eq!(restored_head.hash, window_head_hash);
+}

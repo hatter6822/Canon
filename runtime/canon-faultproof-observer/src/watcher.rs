@@ -412,6 +412,16 @@ impl<S: L1Source> Watcher<S> {
     pub fn window_head(&self) -> Option<BlockHeader> {
         self.reorg_window.head()
     }
+
+    /// Take a snapshot of the current re-org window for
+    /// persistence.  Returns the headers in ascending block-
+    /// number order.  Used by the observer to fold the window
+    /// state into the per-iteration `commit_batch` so the
+    /// cursor + window advance atomically.
+    #[must_use]
+    pub fn window_snapshot(&self) -> Vec<BlockHeader> {
+        self.reorg_window.to_vec()
+    }
 }
 
 #[cfg(test)]

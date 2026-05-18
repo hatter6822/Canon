@@ -70,6 +70,15 @@ pub const CURSOR_KEY: &[u8] = b"w/cursor";
 /// Identifier cell key.
 pub const IDENTIFIER_KEY: &[u8] = b"w/identifier";
 
+/// Re-org window cell key.  Holds a serialised
+/// `Vec<BlockHeader>` (JSON for now) of the recent block-hash
+/// window, so on restart the observer can resume re-org
+/// detection from the persisted window head rather than starting
+/// from an empty window.  Per the original RH-G.2 plan:
+/// "Persist watcher state (last-processed block, recent
+/// block-hash window) in `canon-storage`".
+pub const REORG_WINDOW_KEY: &[u8] = b"w/reorg_window";
+
 /// Key prefix for game records.
 pub const GAME_PREFIX: &[u8] = b"g/";
 
@@ -142,6 +151,41 @@ pub struct ResponseRecord {
     /// the idempotency check "have we already submitted at this
     /// pivot?").
     pub pivot_idx: Option<u64>,
+}
+
+/// Serializable mirror of `canon_l1_ingest::reorg::BlockHeader`
+/// — the upstream type doesn't derive serde, so we mirror it
+/// here for the persisted re-org window.  The fields are
+/// 1:1 with the upstream type; round-trip via the [`From`]
+/// impls below.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersistedHeader {
+    /// L1 block number.
+    pub number: u64,
+    /// 32-byte block hash (hex-string-friendly via serde).
+    pub hash: [u8; 32],
+    /// The parent block's 32-byte hash.
+    pub parent_hash: [u8; 32],
+}
+
+impl From<canon_l1_ingest::reorg::BlockHeader> for PersistedHeader {
+    fn from(h: canon_l1_ingest::reorg::BlockHeader) -> Self {
+        Self {
+            number: h.number,
+            hash: h.hash,
+            parent_hash: h.parent_hash,
+        }
+    }
+}
+
+impl From<PersistedHeader> for canon_l1_ingest::reorg::BlockHeader {
+    fn from(p: PersistedHeader) -> Self {
+        Self {
+            number: p.number,
+            hash: p.hash,
+            parent_hash: p.parent_hash,
+        }
+    }
 }
 
 /// Submission status.
@@ -310,6 +354,37 @@ impl Persistence {
             .map_err(Into::into)
     }
 
+    /// Read the persisted re-org window headers.  Returns an
+    /// empty `Vec` if no window has been persisted yet (fresh
+    /// observer).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PersistenceError::Storage`] on I/O failure or
+    /// [`PersistenceError::Json`] on a corrupted cell.
+    pub fn read_reorg_window(&self) -> Result<Vec<PersistedHeader>, PersistenceError> {
+        match self.storage.get(REORG_WINDOW_KEY)? {
+            None => Ok(Vec::new()),
+            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        }
+    }
+
+    /// Write the re-org window headers.  Production code paths
+    /// fold this into the `commit_batch` atomic write (via
+    /// [`PersistBatch::set_reorg_window`]) so the cursor + the
+    /// window advance atomically.  This helper is for direct
+    /// test access only.
+    ///
+    /// # Errors
+    ///
+    /// See [`PersistenceError`].
+    pub fn write_reorg_window(&self, headers: &[PersistedHeader]) -> Result<(), PersistenceError> {
+        let bytes = serde_json::to_vec(headers)?;
+        self.storage
+            .put(REORG_WINDOW_KEY, &bytes)
+            .map_err(Into::into)
+    }
+
     /// Load a game record by id.
     ///
     /// # Errors
@@ -440,6 +515,10 @@ impl Persistence {
         if let Some(cursor) = batch.cursor {
             tx.put(CURSOR_KEY, &cursor.to_be_bytes())?;
         }
+        if let Some(headers) = &batch.reorg_window {
+            let bytes = serde_json::to_vec(headers)?;
+            tx.put(REORG_WINDOW_KEY, &bytes)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -462,6 +541,11 @@ pub struct PersistBatch {
     pub responses: Vec<ResponseRecord>,
     /// New cursor value (or `None` to leave the cursor alone).
     pub cursor: Option<u64>,
+    /// New re-org window snapshot (or `None` to leave the
+    /// persisted window unchanged).  The watcher folds the
+    /// current window state into the batch each iteration so
+    /// the cursor + window advance atomically.
+    pub reorg_window: Option<Vec<PersistedHeader>>,
 }
 
 impl PersistBatch {
@@ -487,10 +571,20 @@ impl PersistBatch {
         self.cursor = Some(block);
     }
 
+    /// Set the re-org window snapshot to be persisted alongside
+    /// the cursor advance.  If called more than once, the last
+    /// call wins.
+    pub fn set_reorg_window(&mut self, headers: Vec<PersistedHeader>) {
+        self.reorg_window = Some(headers);
+    }
+
     /// True iff the batch carries no updates.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.games.is_empty() && self.responses.is_empty() && self.cursor.is_none()
+        self.games.is_empty()
+            && self.responses.is_empty()
+            && self.cursor.is_none()
+            && self.reorg_window.is_none()
     }
 }
 
