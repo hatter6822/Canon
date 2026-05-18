@@ -91,12 +91,19 @@ SQLite event indexer) have all landed.  Current state:
     throughput.  Optional `--report` JSON sidecar + `--baseline`
     regression check + absolute `--target-tps` /
     `--target-p99-ms` gates for CI.
-  * **`canon-faultproof-observer`** — RH-G skeleton.  Has a
-    minimal `Cargo.toml` plus `src/lib.rs` / `src/main.rs`
-    documenting the symbol surface the implementing work unit
-    will fill in.  Skeleton binary exits with code
-    `3 = NotImplemented` so a deployment that wires it up today
-    gets a loud, supervisor-visible refusal.
+  * **`canon-faultproof-observer`** — RH-G.  Off-chain
+    bisection-game observer daemon.  Watches L1 for
+    `FaultProofGameOpened` / `BisectionMidpointSubmitted` /
+    `BisectionResponseSubmitted` / `FaultProofGameSettled` /
+    `StateRootSubmitted` events; maintains an in-memory game-
+    state map mirroring the Lean reference
+    (`LegalKernel.FaultProof.Game`) byte-for-byte; computes the
+    honest move via a deployment-supplied truth oracle; submits
+    responses via a pluggable submitter (mock + JSON-RPC trait
+    surface; production transaction encoder is a follow-up).
+    Persistence via `canon-storage` with atomic-batch commits.
+    Reuses `canon-l1-ingest`'s re-org window + JSON-RPC source
+    + `BridgeActorKey` signing-key wrapper.
 
 Work-unit status (per `docs/planning/rust_host_runtime_plan.md`):
 
@@ -111,7 +118,7 @@ Work-unit status (per `docs/planning/rust_host_runtime_plan.md`):
 | RH-E.0    | `canon-storage`                     | **Complete**     |
 | RH-E.1    | `canon-indexer`                     | **Complete**     |
 | RH-F      | `canon-bench`                       | **Complete**     |
-| RH-G      | `canon-faultproof-observer`         | Skeleton; pending|
+| RH-G      | `canon-faultproof-observer`         | **Complete**     |
 
 ## Layout
 
@@ -250,7 +257,7 @@ runtime/
 │       │                              tests against a mock server
 │       └── fault_injection.rs       — cursor-recovery / commit-failure /
 │                                      poisoning recovery via FaultyStorage
-├── canon-faultproof-observer/       — RH-G skeleton (binary + lib)
+├── canon-faultproof-observer/       — RH-G observer daemon (binary + lib)
 ├── canon-bench/                     — RH-F (library + binary)
 │   ├── Cargo.toml
 │   ├── src/

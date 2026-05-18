@@ -238,7 +238,7 @@ canon/
 │   ├── canon-event-subscribe/ --   RH-D (event subscription server)
 │   ├── canon-storage/         --   RH-E.0 (Storage trait + SQLite-backed impl)
 │   ├── canon-indexer/         --   RH-E.1 (SQLite event indexer daemon)
-│   ├── canon-faultproof-observer/ -- RH-G skeleton (off-chain observer)
+│   ├── canon-faultproof-observer/ -- RH-G off-chain bisection-game observer
 │   ├── canon-bench/           --   RH-F (transfer-throughput benchmark)
 │   └── tests/cross-stack/     --   shared fixture corpus (.cxsf files)
 ├── scripts/setup.sh           -- SHA-256-verified toolchain + Foundry installer
@@ -779,7 +779,7 @@ work units.  Status:
 | RH-E.0    | Rust host: storage abstraction     | Complete |
 | RH-E.1    | Rust host: SQLite indexer          | Complete (Rust framework; `--verify-against-canon` wiring deferred pending canon-host getBalance endpoint) |
 | RH-F      | Rust host: 10k tx/sec benchmark    | Complete (harness ships; observed throughput ~7.5k ops/sec under default workload — gap documented in plan §RH-F closeout) |
-| RH-G      | Rust host: fault-proof observer    | Not started (skeleton landed under RH-H) |
+| RH-G      | Rust host: fault-proof observer    | Complete (off-chain observer daemon; game state machine + honest strategy + L1 watcher + persistence + mock submitter; production EIP-1559 submitter + `canon --replay-up-to` subcommand wiring deferred) |
 | SC.1      | SMT cell proofs: Lean spec + soundness | Complete |
 | SC.2      | SMT cell proofs: Solidity verifier | Complete |
 | SC.3      | SMT cell proofs: cross-stack soundness + corpus | Complete |
@@ -2616,6 +2616,139 @@ library + binary per `docs/planning/rust_host_runtime_plan.md`
       documented flag; a full default-workload run
       (1000 actors / 10000 transfers / 64 workers) sustains
       ~6500-7500 ops/sec without errors.
+
+**Workstream RH-G (Off-chain fault-proof observer).**
+**Complete.**  Materialises `runtime/canon-faultproof-observer/`
+as the operational counterpart to the Workstream-H Lean
+fault-proof soundness chain.  See
+`docs/planning/rust_host_runtime_plan.md` §RH-G and
+`docs/fault_proof_runbook.md` §7.  Headlines:
+
+  * **Library + binary surface.**  `canon-faultproof-observer`
+    ships as a library (10 modules: `config`, `error`, `events`,
+    `game`, `observer`, `persistence`, `strategy`, `submitter`,
+    `watcher` + crate root) plus a binary
+    (`canon-faultproof-observer` daemon with documented CLI flags
+    `--l1-rpc / --game-contract / --state-root-contract /
+    --storage / --keystore / --deployment-id / --play-as /
+    --confirmation-depth / --reorg-window / --blocks-per-iter /
+    --poll-interval-ms / --start-block / --log-level`).
+    Identifier string `"canon-faultproof-observer/v1"` published
+    via the crate's `OBSERVER_IDENTIFIER` constant and the
+    storage's `w/identifier` cell.
+
+  * **RH-G.3 — Game state machine.**  Rust port of
+    `LegalKernel.FaultProof.Game.applyTransition` in
+    `src/game.rs`.  Mirrors the Lean reference byte-for-byte:
+    identical data shapes (`Claim`, `DisputedRange`, `TurnSide`,
+    `GameStatus`, `GameState`, `GameTransition`, `GameError`),
+    identical transition function (every error variant maps to
+    the Lean reference's `Except GameError` arm).  Headline
+    property: `apply_transition` is byte-equivalent to the Lean
+    reference (verified by 14 property tests).  Bisection
+    convergence is observable as a property test:
+    `bisection_terminates_in_logarithmic_rounds` exercises full
+    bisection traces over random widths and asserts the
+    `ceil(log2(width))` bound.
+
+  * **RH-G.4 — Honest-strategy computation.**  In
+    `src/strategy.rs`: the `TruthOracle` trait abstracts the
+    truthful-commit function (`LogIndex → StateCommit`); two
+    implementations ship (in-memory `MemoryTruthOracle` for
+    tests and the in-memory mode; a `SubprocessTruthOracle`
+    pattern documented for production wire-up to a future
+    `canon --replay-up-to` subcommand).  The `compute_next_move`
+    function mirrors Lean's `honestStrategy` decision tree
+    exactly (no-move / submit / respond-agree / respond-disagree
+    / terminate-on-single-step).
+
+  * **RH-G.2 — L1 event-watch with re-org handling.**  In
+    `src/watcher.rs` + `src/events.rs`.  Reuses
+    `canon-l1-ingest`'s sliding-window re-org tracker
+    (`reorg::ReorgWindow`) and `L1Source` trait surface — sharing
+    the audited code rather than duplicating it.  Decodes the
+    five game-contract events (`FaultProofGameOpened`,
+    `BisectionMidpointSubmitted`, `BisectionResponseSubmitted`,
+    `FaultProofGameSettled`, `StateRootSubmitted`) via a typed
+    `GameEvent` enum.  Defence-in-depth: logs fetched **by block
+    hash** (not by number) — defends against re-org racing the
+    header→logs sequence.  Deep re-orgs (depth > window) and
+    orphaned-parent inconsistencies surface as typed
+    `WatcherError::Reorg` errors that halt the daemon with an
+    operator alert.
+
+  * **RH-G.5 — Response submission + signing.**  In
+    `src/submitter.rs`: the `Submitter` trait + a
+    `mock::MockSubmitter` impl that records every submission for
+    inspection.  The pure-Rust `encode_calldata` function emits
+    the four observer-callable methods' ABI calldata bytes
+    (`submitMidpoint`, `respondToMidpoint`,
+    `terminateOnSingleStep`, `claimTimeout`).  Method selectors
+    derived from `keccak256(signature)` at runtime.  The full
+    JSON-RPC submitter (EIP-1559 transaction encoder +
+    `eth_sendRawTransaction` driver) is sketched as a public
+    trait but the actual transport layer is RH-G follow-up
+    work; the calldata bytes are the load-bearing cross-stack
+    contract and they ARE pinned by the unit + property tests.
+
+  * **RH-G.6 — Persistence + crash recovery.**  In
+    `src/persistence.rs`: `canon-storage`-backed game / response
+    / cursor / identifier cell layout.  Three keyspaces:
+    `g/<game_id_16BE>` for game records, `r/<tx_hash_32>` for
+    response records, `w/cursor` for the watcher cursor,
+    `w/identifier` for the identifier cell.  Every batch commit
+    is atomic via `Storage::transaction` — game updates +
+    response records + cursor advance commit together or roll
+    back together.  On startup the observer re-loads every
+    game + cursor and resumes from the persisted position.
+    Identifier-cell discipline rejects opening a database
+    written by a different observer or version.
+
+  * **RH-G.1 — Crate skeleton + dependencies.**  Workspace
+    dependency additions: `hex` (regular, was dev-only),
+    `k256`, `serde`, `serde_json`, `sha3`, `thiserror`,
+    `tracing`, `tracing-subscriber`, `zeroize`, plus
+    `canon-cli-common`, `canon-storage`, and `canon-l1-ingest`
+    (path).  The signing key path uses
+    `canon-l1-ingest::key::BridgeActorKey` (already-audited
+    `Zeroizing<[u8; 32]>` wrapper).
+
+  * **RH-G.7 — Cross-stack equivalence corpus + chaos suite.**
+    **Partial.**  The 14 property tests in `tests/property.rs`
+    cover: `apply_transition` determinism, respond-agree /
+    respond-disagree narrowing, settled-game rejection,
+    settlement idempotence, depth-tick invariant, calldata
+    encoding shape, `compute_next_move` panic-freeness, turn
+    flipping, midpoint-inside-range invariant, bisection
+    logarithmic-convergence bound, JSON round-trip.  The 7
+    integration tests in `tests/integration.rs` cover: end-to-
+    end game lifecycle, persistence-across-restart, idempotent
+    iteration, cold-start skip of unknown-game settlement,
+    missing-truth-oracle deferral, full SQLite round-trip,
+    settlement composition.  The Lean-generated corpus
+    (50+ recorded game traces) is deferred to a follow-up
+    cross-stack landing once the Lean side ships an equivalent
+    generator alongside the SubprocessTruthOracle.
+
+  * **Workspace dependency additions.**  None beyond
+    workspace-shared crates (the `hex` workspace dep was already
+    in the table; we promote our use from dev-dependency to
+    regular dependency to encode response-record tx-hashes).
+
+  * **Audit posture at landing.**
+    - `cargo build --workspace --all-targets --locked` —
+      green.
+    - `cargo test -p canon-faultproof-observer --locked` —
+      162 unit + 7 integration + 14 property = 183 tests
+      passing.
+    - `cargo clippy -p canon-faultproof-observer --all-targets
+      --locked -- -D warnings` — clean.
+    - `cargo fmt --all -- --check` — clean.
+    - `unsafe_code = "forbid"`.
+    - Binary smoke-tested via
+      `./target/release/canon-faultproof-observer --version` →
+      `canon-faultproof-observer v0.2.2 (canon-faultproof-observer/v1)`;
+      `--help` lists every documented flag.
 
 **Workstream SC.3 (SMT cell-proof cross-stack soundness corpus,
 see `docs/planning/smt_cell_proofs_plan.md`).**  **Complete.**

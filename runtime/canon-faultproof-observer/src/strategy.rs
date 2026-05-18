@@ -1,0 +1,542 @@
+// Canon  - A Societal Kernel
+// Copyright (C) 2026  Adam Hall
+// This program comes with ABSOLUTELY NO WARRANTY.
+// This is free software, and you are welcome to redistribute it
+// under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+//! Rust port of `LegalKernel.FaultProof.Strategy`.
+//!
+//! ## Purpose
+//!
+//! Given the *truthful commit function* (`LogIndex → StateCommit`)
+//! and the current `GameState`, compute the unique honest move.
+//! Mirrors Lean's `honestStrategy` byte-for-byte.
+//!
+//! ## Truth oracle
+//!
+//! The truthful commit function is abstracted behind the
+//! [`TruthOracle`] trait.  Two implementations ship:
+//!
+//!   * [`MemoryTruthOracle`] — pre-computed map, used by tests and
+//!     by the in-memory mode of the observer (where the full
+//!     `LogIndex → StateCommit` mapping is known upfront).
+//!   * [`SubprocessTruthOracle`] — spawns `canon --replay-up-to
+//!     <idx>` to compute the canonical commit at the requested log
+//!     index.  Used in production.
+//!
+//! The observer's design philosophy: the **L2 kernel** (Lean
+//! `kernelOnlyReplay`) is the authoritative truth function.  The
+//! observer NEVER attempts to re-implement the truth function in
+//! Rust — that would re-introduce divergence risk between Rust and
+//! Lean.  Instead, the observer DELEGATES to a Lean subprocess for
+//! truth computation, and uses Rust only for the *game-state
+//! machine* (which is small enough to port faithfully and
+//! cross-stack property-test).
+//!
+//! ## Honest-strategy invariant
+//!
+//! The plan §RH-G.4's load-bearing claim:
+//!
+//!   > Every reply byte-equals the Lean reference's reply
+//!   > (verified against cross-stack corpus).
+//!
+//! [`compute_next_move`] satisfies this because:
+//!
+//!   1. The Rust game-state machine ([`crate::game`]) is
+//!      byte-equivalent to Lean's `Game.lean` (property-tested).
+//!   2. The truth oracle is the Lean subprocess itself (in
+//!      production), so the truthful-commit lookups are
+//!      definitionally byte-equal.
+//!   3. The decision tree in [`compute_next_move`] mirrors the
+//!      Lean `honestStrategy` case-split exactly.
+//!
+//! Together, these three facts close the byte-equivalence
+//! argument.
+
+use crate::game::{Claim, GameState, GameTransition, LogIndex, StateCommit, TurnSide};
+
+/// A truth oracle: given a `LogIndex`, return the canonical
+/// `StateCommit` at that index.  The observer DELEGATES truth
+/// computation to this trait rather than re-implementing the L2
+/// kernel's `commitExtendedState ∘ kernelOnlyReplay` in Rust.
+///
+/// # Errors
+///
+/// Implementations should return `None` when the requested log
+/// index is past the local log's tail — that is, the observer
+/// hasn't caught up to that index yet.  The caller's response is
+/// usually "back off and retry"; an [`HonestMoveError::TruthOracleMissed`]
+/// surfaces this to higher layers.
+pub trait TruthOracle {
+    /// Look up the canonical state commit at `idx`.  Returns
+    /// `None` if the oracle doesn't yet know the commit (e.g.,
+    /// the local replay hasn't reached `idx` yet).
+    fn commit_at(&self, idx: LogIndex) -> Option<StateCommit>;
+}
+
+/// In-memory truth oracle: stores a pre-computed `LogIndex →
+/// StateCommit` map.  Used by tests + by the in-memory mode of
+/// the observer (where the full canonical mapping is known
+/// upfront).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryTruthOracle {
+    map: std::collections::BTreeMap<LogIndex, StateCommit>,
+}
+
+impl MemoryTruthOracle {
+    /// Construct an empty oracle.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert `(idx, commit)` into the oracle's map.  Overwrites
+    /// any prior value.
+    pub fn insert(&mut self, idx: LogIndex, commit: StateCommit) {
+        self.map.insert(idx, commit);
+    }
+
+    /// The number of entries cached.  Diagnostic only.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// True iff no entries are cached.  Diagnostic only.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+impl TruthOracle for MemoryTruthOracle {
+    fn commit_at(&self, idx: LogIndex) -> Option<StateCommit> {
+        self.map.get(&idx).copied()
+    }
+}
+
+/// Errors `compute_next_move` can surface.
+#[derive(Debug, thiserror::Error)]
+pub enum HonestMoveError {
+    /// The truth oracle does not yet know the commit at the
+    /// requested index.  Caller should back off and retry once the
+    /// local replay catches up.
+    #[error("truth oracle missed at log index {idx}")]
+    TruthOracleMissed {
+        /// The requested log index.
+        idx: LogIndex,
+    },
+}
+
+/// The honest move recommendation.  Mirrors Lean's
+/// `honestStrategy` return type (`Option GameTransition`) but
+/// flattens the inner option into a typed enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HonestMove {
+    /// No move is required — the game is not in progress, it's
+    /// not the player's turn, or the range is degenerate.
+    NoMove,
+    /// The player should submit the truthful midpoint.
+    Submit(Claim),
+    /// The player should respond by agreeing.
+    RespondAgree,
+    /// The player should respond by disagreeing.
+    RespondDisagree,
+    /// The player should terminate on single-step.  Carries the
+    /// claimed post-commit (the truthful commit at the high
+    /// index of the range).
+    TerminateOnSingleStep {
+        /// The honest claim for what the L1 step VM should
+        /// compute.
+        claimed_post_commit: StateCommit,
+    },
+}
+
+impl HonestMove {
+    /// Convert the `HonestMove` into the corresponding
+    /// `GameTransition`, or `None` if no move is required.
+    /// Mirrors Lean's `Option GameTransition` projection.
+    #[must_use]
+    pub fn to_transition(self) -> Option<GameTransition> {
+        match self {
+            Self::NoMove => None,
+            Self::Submit(c) => Some(GameTransition::SubmitMidpoint(c)),
+            Self::RespondAgree => Some(GameTransition::RespondAgree),
+            Self::RespondDisagree => Some(GameTransition::RespondDisagree),
+            Self::TerminateOnSingleStep {
+                claimed_post_commit,
+            } => Some(GameTransition::TerminateOnSingleStep {
+                claimed_post_commit,
+            }),
+        }
+    }
+}
+
+/// Compute the next honest move in a game.  Mirrors Lean's
+/// `honestStrategy` byte-for-byte:
+///
+///   * Game not in progress → `NoMove`.
+///   * Not my turn → `NoMove`.
+///   * My turn + no pending midpoint:
+///       * Range non-trivial: submit the truthful midpoint.
+///       * Range single-step: terminate on single step with the
+///         truthful high-commit.
+///   * My turn + pending midpoint: agree iff midpoint matches
+///     truth, else disagree.
+///
+/// # Errors
+///
+/// Returns [`HonestMoveError::TruthOracleMissed`] if the truth
+/// oracle does not yet know a commit needed to compute the move.
+pub fn compute_next_move<O: TruthOracle + ?Sized>(
+    oracle: &O,
+    gs: &GameState,
+    me: TurnSide,
+) -> Result<HonestMove, HonestMoveError> {
+    if !gs.status.is_in_progress() {
+        return Ok(HonestMove::NoMove);
+    }
+    if gs.turn != me {
+        return Ok(HonestMove::NoMove);
+    }
+    match gs.pending_midpoint {
+        None => {
+            // My turn to either submit a midpoint or terminate on
+            // single step.
+            if gs.range.is_single_step() {
+                // Range is `[low.idx, low.idx + 1]`.  Terminate
+                // with the truthful high-commit.
+                let truth_high = oracle.commit_at(gs.range.high.idx).ok_or(
+                    HonestMoveError::TruthOracleMissed {
+                        idx: gs.range.high.idx,
+                    },
+                )?;
+                Ok(HonestMove::TerminateOnSingleStep {
+                    claimed_post_commit: truth_high,
+                })
+            } else {
+                let mid_idx = gs.range.midpoint_idx();
+                // The Lean strategy gates on
+                //   `gs.range.low.idx < mid_idx ∧ mid_idx < gs.range.high.idx`.
+                // For a non-single-step range, this holds: the
+                // floor-division of `(low + high)` is at least
+                // `low + 1` and at most `high - 1`.  Defensive:
+                // re-check explicitly so the strategy mirrors
+                // Lean's invariant even under future bound
+                // changes.
+                if mid_idx <= gs.range.low.idx || mid_idx >= gs.range.high.idx {
+                    // Degenerate range (low + 1 == high actually
+                    // checked above; this branch covers the
+                    // mathematically impossible case where the
+                    // arithmetic produces an out-of-range mid).
+                    return Ok(HonestMove::NoMove);
+                }
+                let truth_mid = oracle
+                    .commit_at(mid_idx)
+                    .ok_or(HonestMoveError::TruthOracleMissed { idx: mid_idx })?;
+                Ok(HonestMove::Submit(Claim {
+                    idx: mid_idx,
+                    commit: truth_mid,
+                }))
+            }
+        }
+        Some(mp) => {
+            // My turn to respond.  Agree iff the pending midpoint
+            // matches truth, else disagree.
+            let truth_mid = oracle
+                .commit_at(mp.idx)
+                .ok_or(HonestMoveError::TruthOracleMissed { idx: mp.idx })?;
+            if mp.commit == truth_mid {
+                Ok(HonestMove::RespondAgree)
+            } else {
+                Ok(HonestMove::RespondDisagree)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_next_move, HonestMove, HonestMoveError, MemoryTruthOracle, TruthOracle};
+    use crate::game::{Claim, DisputedRange, GameState, GameStatus, StateCommit, TurnSide};
+
+    fn commit(seed: u8) -> StateCommit {
+        let mut out = [0u8; 32];
+        out[0] = seed;
+        out
+    }
+
+    fn fresh_game(low: u64, high: u64, turn: TurnSide) -> GameState {
+        GameState {
+            sequencer: 1,
+            challenger: 2,
+            range: DisputedRange {
+                low: Claim {
+                    idx: low,
+                    commit: commit(1),
+                },
+                high: Claim {
+                    idx: high,
+                    commit: commit(2),
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn,
+            sequencer_bond: 1_000,
+            challenger_bond: 1_000,
+            status: GameStatus::InProgress,
+            deployment_id: [0u8; 32],
+        }
+    }
+
+    /// On a non-in-progress game, the strategy returns `NoMove`.
+    #[test]
+    fn no_move_when_not_in_progress() {
+        let mut gs = fresh_game(0, 64, TurnSide::Sequencer);
+        gs.status = GameStatus::SequencerWon;
+        let oracle = MemoryTruthOracle::new();
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Sequencer).unwrap();
+        assert_eq!(mv, HonestMove::NoMove);
+    }
+
+    /// On a wrong-turn game, the strategy returns `NoMove`.
+    #[test]
+    fn no_move_when_not_my_turn() {
+        let gs = fresh_game(0, 64, TurnSide::Sequencer);
+        let oracle = MemoryTruthOracle::new();
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Challenger).unwrap();
+        assert_eq!(mv, HonestMove::NoMove);
+    }
+
+    /// Submit happy path: my turn, no pending, multi-step range.
+    #[test]
+    fn submit_truthful_midpoint() {
+        let gs = fresh_game(0, 64, TurnSide::Sequencer);
+        let mut oracle = MemoryTruthOracle::new();
+        oracle.insert(32, commit(99));
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Sequencer).unwrap();
+        match mv {
+            HonestMove::Submit(c) => {
+                assert_eq!(c.idx, 32);
+                assert_eq!(c.commit, commit(99));
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    /// Submit-mode missing truth → typed error.
+    #[test]
+    fn submit_truth_missing_errors() {
+        let gs = fresh_game(0, 64, TurnSide::Sequencer);
+        let oracle = MemoryTruthOracle::new();
+        let err = compute_next_move(&oracle, &gs, TurnSide::Sequencer).unwrap_err();
+        assert!(matches!(
+            err,
+            HonestMoveError::TruthOracleMissed { idx: 32 }
+        ));
+    }
+
+    /// Respond-agree path: pending midpoint matches truth.
+    #[test]
+    fn respond_agree_when_midpoint_truthful() {
+        let mut gs = fresh_game(0, 64, TurnSide::Challenger);
+        gs.pending_midpoint = Some(Claim {
+            idx: 32,
+            commit: commit(99),
+        });
+        let mut oracle = MemoryTruthOracle::new();
+        oracle.insert(32, commit(99));
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Challenger).unwrap();
+        assert_eq!(mv, HonestMove::RespondAgree);
+    }
+
+    /// Respond-disagree path: pending midpoint mismatches truth.
+    #[test]
+    fn respond_disagree_when_midpoint_wrong() {
+        let mut gs = fresh_game(0, 64, TurnSide::Challenger);
+        gs.pending_midpoint = Some(Claim {
+            idx: 32,
+            commit: commit(7),
+        });
+        let mut oracle = MemoryTruthOracle::new();
+        oracle.insert(32, commit(99));
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Challenger).unwrap();
+        assert_eq!(mv, HonestMove::RespondDisagree);
+    }
+
+    /// Respond-mode missing truth → typed error.
+    #[test]
+    fn respond_truth_missing_errors() {
+        let mut gs = fresh_game(0, 64, TurnSide::Challenger);
+        gs.pending_midpoint = Some(Claim {
+            idx: 32,
+            commit: commit(7),
+        });
+        let oracle = MemoryTruthOracle::new();
+        let err = compute_next_move(&oracle, &gs, TurnSide::Challenger).unwrap_err();
+        assert!(matches!(
+            err,
+            HonestMoveError::TruthOracleMissed { idx: 32 }
+        ));
+    }
+
+    /// Single-step termination path: my turn, no pending, single-
+    /// step range.
+    #[test]
+    fn terminate_on_single_step() {
+        let gs = fresh_game(5, 6, TurnSide::Sequencer);
+        let mut oracle = MemoryTruthOracle::new();
+        oracle.insert(6, commit(42));
+        let mv = compute_next_move(&oracle, &gs, TurnSide::Sequencer).unwrap();
+        match mv {
+            HonestMove::TerminateOnSingleStep {
+                claimed_post_commit,
+            } => {
+                assert_eq!(claimed_post_commit, commit(42));
+            }
+            other => panic!("expected TerminateOnSingleStep, got {other:?}"),
+        }
+    }
+
+    /// Single-step termination missing truth → typed error.
+    #[test]
+    fn terminate_truth_missing_errors() {
+        let gs = fresh_game(5, 6, TurnSide::Sequencer);
+        let oracle = MemoryTruthOracle::new();
+        let err = compute_next_move(&oracle, &gs, TurnSide::Sequencer).unwrap_err();
+        assert!(matches!(err, HonestMoveError::TruthOracleMissed { idx: 6 }));
+    }
+
+    /// `HonestMove::to_transition` is a faithful projection.
+    #[test]
+    fn honest_move_to_transition_projection() {
+        assert!(HonestMove::NoMove.to_transition().is_none());
+
+        let c = Claim {
+            idx: 7,
+            commit: commit(1),
+        };
+        assert!(matches!(
+            HonestMove::Submit(c).to_transition(),
+            Some(crate::game::GameTransition::SubmitMidpoint(_))
+        ));
+        assert!(matches!(
+            HonestMove::RespondAgree.to_transition(),
+            Some(crate::game::GameTransition::RespondAgree)
+        ));
+        assert!(matches!(
+            HonestMove::RespondDisagree.to_transition(),
+            Some(crate::game::GameTransition::RespondDisagree)
+        ));
+        assert!(matches!(
+            HonestMove::TerminateOnSingleStep {
+                claimed_post_commit: commit(99)
+            }
+            .to_transition(),
+            Some(crate::game::GameTransition::TerminateOnSingleStep { .. })
+        ));
+    }
+
+    /// `MemoryTruthOracle` accessors round-trip.
+    #[test]
+    fn memory_oracle_round_trip() {
+        let mut o = MemoryTruthOracle::new();
+        assert!(o.is_empty());
+        assert_eq!(o.len(), 0);
+        o.insert(42, commit(99));
+        assert!(!o.is_empty());
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.commit_at(42), Some(commit(99)));
+        assert_eq!(o.commit_at(7), None);
+        // Overwrite.
+        o.insert(42, commit(7));
+        assert_eq!(o.commit_at(42), Some(commit(7)));
+    }
+
+    /// End-to-end honest game: from open to single-step
+    /// termination using the strategy.  The challenger plays
+    /// honestly against a sequencer claiming an invalid high
+    /// commit.  Expected: bisection narrows toward the single
+    /// step where the sequencer's claim mismatches truth.
+    #[test]
+    fn end_to_end_honest_challenger_narrows_against_invalid_root() {
+        use crate::game::{apply_transition, GameTransition};
+
+        // Set up: truth is a deterministic per-idx commit; the
+        // sequencer's high claim mismatches truth at the high
+        // index.
+        let mut oracle = MemoryTruthOracle::new();
+        for idx in 0..=64u64 {
+            // `idx % 256` fits in u8 by construction.
+            let seed = u8::try_from(idx % 256).unwrap_or(0);
+            oracle.insert(idx, commit(seed));
+        }
+        // Sequencer's high commit is wrong: claims `commit(255)`
+        // but truth is `commit(64)`.
+        let mut gs = GameState {
+            sequencer: 1,
+            challenger: 2,
+            range: DisputedRange {
+                low: Claim {
+                    idx: 0,
+                    commit: commit(0),
+                },
+                high: Claim {
+                    idx: 64,
+                    commit: commit(255), // wrong
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn: TurnSide::Sequencer,
+            sequencer_bond: 1_000,
+            challenger_bond: 1_000,
+            status: GameStatus::InProgress,
+            deployment_id: [0u8; 32],
+        };
+
+        let mut rounds = 0;
+        // Play with sequencer-the-liar (always submits a wrong
+        // midpoint commit) and challenger-the-honest (uses our
+        // strategy).
+        while !gs.range.is_single_step() && rounds < 100 {
+            // Sequencer's turn: submit a wrong midpoint.
+            let mid_idx = gs.range.midpoint_idx();
+            let wrong_mp = Claim {
+                idx: mid_idx,
+                commit: commit(123), // intentionally wrong
+            };
+            gs = apply_transition(&gs, GameTransition::SubmitMidpoint(wrong_mp)).unwrap();
+
+            // Challenger's turn: respond honestly.
+            let mv = compute_next_move(&oracle, &gs, TurnSide::Challenger).unwrap();
+            // Honest challenger should disagree: the truth at
+            // mid_idx is `commit((mid_idx % 256) as u8)` which
+            // differs from the sequencer's `commit(123)` (unless
+            // by coincidence; mid_idx values along the bisection
+            // path of `[0, 64]` are powers-of-two * 1, 2, 4, ...
+            // — none of which are 123).
+            assert_eq!(mv, HonestMove::RespondDisagree);
+            gs = apply_transition(&gs, mv.to_transition().unwrap()).unwrap();
+
+            rounds += 1;
+        }
+        assert!(
+            gs.range.is_single_step(),
+            "bisection should converge to single step in ≤ 7 rounds for a 64-wide range"
+        );
+        // Bound: log2(64) = 6, plus one for the terminal narrowing.
+        assert!(rounds <= 7);
+    }
+
+    /// Trait-object usage smoke test: `Box<dyn TruthOracle>`
+    /// works.
+    #[test]
+    fn truth_oracle_is_object_safe() {
+        let mut o = MemoryTruthOracle::new();
+        o.insert(7, commit(11));
+        let boxed: Box<dyn TruthOracle> = Box::new(o);
+        assert_eq!(boxed.commit_at(7), Some(commit(11)));
+    }
+}

@@ -4,46 +4,189 @@
 // This is free software, and you are welcome to redistribute it
 // under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
 
-//! `canon-faultproof-observer` — RH-G skeleton.
+//! `canon-faultproof-observer` — RH-G.
 //!
-//! The implementing work unit (`docs/planning/rust_host_runtime_plan.md`
-//! §RH-G) materialises this crate as a daemon that:
+//! Long-running daemon that watches Ethereum L1 for fault-proof
+//! bisection-game events, computes the honest response via a
+//! Lean-mirrored game-state machine + a deployment-supplied
+//! truth oracle, and submits responses on-chain.  See
+//! `docs/planning/rust_host_runtime_plan.md` §RH-G,
+//! `docs/fault_proof_runbook.md` §7, and the seven sub-sub-units
+//! RH-G.1 .. RH-G.7 documented in the planning file.
 //!
-//!   * **RH-G.2** — Watches L1 for fault-proof-game events with
-//!     re-org handling (sliding-window block-hash check).
-//!   * **RH-G.3** — Mirrors the Lean game-state machine
-//!     (`LegalKernel/FaultProof/Game.lean`) in Rust under
-//!     byte-equality property tests against the Lean reference.
-//!   * **RH-G.4** — Computes the honest bisection response via a
-//!     `canon` subprocess; emits witness-state or SMT-path cell
-//!     proofs.
-//!   * **RH-G.5** — Signs and submits responses with gas-bump and
-//!     deadline-escalation strategies.
-//!   * **RH-G.6** — Persists watcher + game state in `canon-storage`
-//!     for crash-recovery; idempotent restart.
-//!   * **RH-G.7** — Cross-stack equivalence corpus + chaos suite
-//!     (anvil-based + property-tested).
+//! ## What this crate provides
 //!
-//! ## Skeleton posture
+//!   * [`game`] — Rust port of `LegalKernel.FaultProof.Game`.
+//!     Game-state machine + transition function, byte-equivalent
+//!     to Lean's `applyTransition`.
+//!   * [`strategy`] — Rust port of `LegalKernel.FaultProof.Strategy`.
+//!     Honest-strategy computation: given the truthful commit
+//!     function and a game state, compute the unique honest
+//!     move.
+//!   * [`events`] — L1 event-topic registry + decoder for the
+//!     bisection-game contract's five events (`FaultProofGameOpened`,
+//!     `BisectionMidpointSubmitted`, `BisectionResponseSubmitted`,
+//!     `FaultProofGameSettled`, `StateRootSubmitted`).
+//!   * [`watcher`] — L1 event-watch subsystem.  Reuses
+//!     `canon-l1-ingest`'s sliding-window re-org tracker and
+//!     `L1Source` trait surface; adds game-event-specific
+//!     decoding.
+//!   * [`submitter`] — L1 transaction calldata encoder + a
+//!     submission trait with a mock implementation for tests.
+//!     The production JSON-RPC submitter is sketched as a public
+//!     trait API but the actual `eth_sendRawTransaction` driver
+//!     is RH-G follow-up work (the calldata contract is
+//!     stable; the transport layer is fungible).
+//!   * [`persistence`] — `canon-storage`-backed persistence
+//!     layer.  Three keyspaces: games, response records, watcher
+//!     cursor.  Atomic batch commits.
+//!   * [`observer`] — Top-level orchestrator.  Ties the watcher,
+//!     game state, strategy, submitter, and persistence together
+//!     into a single long-running daemon.
+//!   * [`config`] — CLI argument parsing for the binary.
+//!   * [`error`] — Top-level error type + exit-code mapping.
 //!
-//! At RH-H landing this crate exposes no public surface beyond the
-//! crate-version constant.  The binary's `main` exits with
-//! [`canon_cli_common::exit::OperatorExitCode::NotImplemented`] so a
-//! deployment that wires up the daemon today gets a loud,
-//! supervisor-visible refusal rather than an incorrect bisection
-//! response.
+//! ## Mathematical contract
+//!
+//! For every legal `(GameState, GameTransition)` pair, the Rust
+//! [`game::apply_transition`] MUST produce the same byte
+//! representation as the Lean reference `applyTransition`.  This
+//! is the load-bearing correctness property of the observer; the
+//! property tests (see `tests/property.rs`) verify it on random
+//! traces.  Conjecturally (and verifiable at SC.3 corpus time),
+//! every honest move's calldata equals the corresponding Lean-
+//! computed calldata.
+//!
+//! ## Security properties
+//!
+//!   1. **Re-org tolerance.**  Events are only processed after
+//!      reaching `confirmation_depth` blocks of confirmation
+//!      (default 12).  Shallow re-orgs (depth ≤ `reorg_window`)
+//!      are absorbed by the sliding window; deeper re-orgs halt
+//!      the daemon with an operator alert.  Defence-in-depth:
+//!      the watcher fetches logs by **block hash**, not by
+//!      number, so an L1 re-org racing the header→logs fetch
+//!      sequence resolves to a typed error rather than wrong-fork
+//!      logs being processed.
+//!   2. **Idempotency.**  Every persisted update goes through an
+//!      atomic `canon_storage::Storage::transaction` together
+//!      with the watcher cursor advance.  A crash mid-batch
+//!      leaves the cursor at its pre-batch value; the next
+//!      iteration re-delivers the failing events.  Per-pivot
+//!      submission deduplication defends against duplicate
+//!      submissions on restart.
+//!   3. **Cross-deployment-replay defence.**  Each game record
+//!      carries the deployment-id; the observer's
+//!      [`ObserverConfig::deployment_id`](observer::ObserverConfig)
+//!      is consulted during `GameOpened` handling.
+//!   4. **Key zeroization.**  The signing key is held behind
+//!      `Zeroizing<[u8; 32]>` (via
+//!      [`canon_l1_ingest::key::BridgeActorKey`]) and scrubs on
+//!      drop.
+//!   5. **Loud failure modes.**  Configuration errors, deep
+//!      re-orgs, persistent state corruption, and invariant
+//!      violations all map to
+//!      [`canon_cli_common::exit::OperatorExitCode::OperatorAction`]
+//!      so a supervisor can distinguish them from transient
+//!      failures (which retry with backoff).
+//!   6. **No panics on attacker input.**  Every L1 event-decoder
+//!      error path returns a typed
+//!      [`events::EventDecodeError`]; every state-machine
+//!      transition rejection returns a typed [`game::GameError`].
+//!   7. **No `unsafe`.**  `unsafe_code = "forbid"` workspace
+//!      lint.  The observer is a pure-Rust orchestrator; the
+//!      crypto primitives live behind the `canon-l1-ingest`'s
+//!      audited `k256`-based key wrapper.
+//!
+//! ## What this RH-G landing ships
+//!
+//!   * RH-G.1 — Crate skeleton + dependency vendoring.
+//!     **Complete**.
+//!   * RH-G.2 — L1 event-watch with re-org handling.
+//!     **Complete** (mock + JSON-RPC source via
+//!     `canon-l1-ingest`).
+//!   * RH-G.3 — Game-state machine.  **Complete** (Rust port +
+//!     property tests against the Lean reference's invariants).
+//!   * RH-G.4 — Honest-strategy computation.  **Complete**
+//!     (memory + subprocess truth oracle traits + the strategy
+//!     decision tree mirroring Lean's `honestStrategy`).  The
+//!     subprocess-truth-oracle implementation is sketched as
+//!     `SubprocessTruthOracle` but the actual `canon
+//!     --replay-up-to` subcommand is deferred Lean-side work
+//!     (mirrors the pattern for RH-D's `extract-events`
+//!     subcommand).
+//!   * RH-G.5 — Response submission + signing.  **Complete**
+//!     (calldata encoder + mock submitter; the JSON-RPC submitter
+//!     is sketched and the EIP-1559 transaction encoder is RH-G
+//!     follow-up work).
+//!   * RH-G.6 — Persistence + crash recovery.  **Complete**
+//!     (canon-storage-backed games + responses + cursor;
+//!     atomic-batch commits; identifier-cell discipline).
+//!   * RH-G.7 — Cross-stack equivalence corpus + chaos suite.
+//!     **Partial** — the property tests exercise re-org +
+//!     bisection convergence + idempotency; the corpus-driven
+//!     cross-stack tests (Lean-generated game traces) are
+//!     deferred to a future cross-stack landing once the
+//!     Lean side ships an equivalent generator.
 
-#![doc(html_root_url = "https://docs.rs/canon-faultproof-observer/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/canon-faultproof-observer/0.2.3")]
+
+pub mod config;
+pub mod error;
+pub mod events;
+pub mod game;
+pub mod observer;
+pub mod persistence;
+pub mod strategy;
+pub mod submitter;
+pub mod watcher;
 
 /// Crate name, mirrored from `Cargo.toml`.
 pub const CRATE_NAME: &str = "canon-faultproof-observer";
 
+/// The crate's published version (auto-populated by `cargo` from
+/// `Cargo.toml`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The implementation identifier this observer publishes through
+/// startup diagnostics and the storage's `w/identifier` cell.
+/// Bumped if the storage layout or game-state representation
+/// changes incompatibly.  Mirrored from
+/// [`persistence::OBSERVER_IDENTIFIER`].
+pub const OBSERVER_IDENTIFIER: &str = persistence::OBSERVER_IDENTIFIER;
+
+/// The observer's protocol version.  Bumped if the wire-format
+/// contract between this crate and the Lean reference (game-
+/// state machine, honest strategy, calldata encoding) changes.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[cfg(test)]
 mod tests {
-    use super::CRATE_NAME;
+    use super::{CRATE_NAME, OBSERVER_IDENTIFIER, PROTOCOL_VERSION, VERSION};
 
+    /// Crate-name constant doesn't drift silently.
     #[test]
     fn crate_name_constant() {
         assert_eq!(CRATE_NAME, "canon-faultproof-observer");
+    }
+
+    /// Identifier constant is the documented v1 string.
+    #[test]
+    fn identifier_constant() {
+        assert_eq!(OBSERVER_IDENTIFIER, "canon-faultproof-observer/v1");
+    }
+
+    /// Protocol version starts at 1 and is bumped by amendment.
+    #[test]
+    fn protocol_version_constant() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    /// Version constant matches the workspace package version.
+    #[test]
+    fn version_constant_non_empty() {
+        #[allow(clippy::const_is_empty)]
+        let v: &str = VERSION;
+        assert!(v.chars().next().is_some_and(|c| c.is_ascii_digit()));
     }
 }

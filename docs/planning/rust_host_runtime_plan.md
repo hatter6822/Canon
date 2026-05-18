@@ -3392,6 +3392,12 @@ inform our defence-in-depth strategy:
 
 ### RH-G — `canon-faultproof-observer` (Workstream H, WU H.10.5)
 
+**Status:** **Complete** (off-chain observer daemon: game state
+machine + honest strategy + L1 watcher with re-org handling +
+persistence + mock submitter + ABI calldata encoder).  See
+"RH-G Closeout" at the bottom of this section for the per-sub-
+unit landing notes.
+
 **Finding map.**  H.10.5 deferred per
 `LegalKernel/FaultProof/Witness.lean:65`; runbook drafted at
 `docs/fault_proof_runbook.md` §7.
