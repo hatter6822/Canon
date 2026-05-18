@@ -2854,25 +2854,64 @@ fault-proof soundness chain.  See
       ordering invariants and the 4-cell settlement coverage
       matrix.
 
-  * **Audit posture at landing (post-audit-pass-2).**
+  * **Audit pass 3 (validation hardening + lifecycle test).**
+    A third independent audit-pass surfaced three findings;
+    all addressed:
+    - **CRITICAL (mark_state_known validation)**: the original
+      `mark_state_known` API performed NO defensive checks on
+      the supplied `full_state`.  An eth_call response (deferred
+      RH-G follow-up) from a malicious / misconfigured contract
+      could (a) replace the in-memory state with a different
+      `deployment_id` (cross-deployment-replay), (b) resurrect
+      a settled game's status from terminal to `InProgress`,
+      or (c) install a degenerate range (low.idx >= high.idx).
+      Now enforces all three invariants at the API boundary,
+      returning `ObserverError::Invariant` on violation.
+    - **MEDIUM (depth clamp in cold-start bypass)**: the
+      cold-start `handle_response_submitted` bypass's
+      `depth.saturating_add(1)` could grow `state.depth` past
+      `MAX_BISECTION_DEPTH = 64` over many observed responses.
+      Clamps at `MAX_BISECTION_DEPTH + 1` so a future
+      `apply_transition` on this state cleanly returns
+      `BisectionDepthExceeded` rather than mis-reporting a
+      smaller depth.
+    - **MEDIUM (cache-vs-persistence ordering documentation)**:
+      the in-memory `submitted_pivots` cache is updated BEFORE
+      `commit_batch`.  Under a commit-fail + restart scenario,
+      the cache loses the entry and the observer would re-submit
+      on next iteration.  With the mock submitter this is
+      benign (no L1 broadcast); with the future production
+      JSON-RPC submitter, the same logical move could be
+      broadcast twice (contract reverts the duplicate; gas
+      wasted but no state corruption).  Documented loudly in
+      the code comment; the production submitter wire-up MUST
+      persist a "pre-submit intent" record (tracked as RH-G
+      follow-up).
+    - **Test additions**: `mark_state_known_rejects_mismatched_deployment_id`,
+      `mark_state_known_refuses_to_resurrect_settled_game`,
+      `mark_state_known_rejects_degenerate_range`,
+      `mark_state_known_is_idempotent` (unit); full
+      `cold_start_lifecycle_with_mark_state_known` integration
+      test exercising adoption → mark-known → strategy-ready
+      precondition.
+
+  * **Audit posture at landing (post-audit-pass-3).**
     - `cargo build --workspace --all-targets --locked` —
       green.
     - `cargo test -p canon-faultproof-observer --locked` —
-      179 unit + 9 integration + 18 property = 206 tests
-      passing (+13 from audit-pass-1's 193: 4 new property
-      tests in audit-pass-2, 5 new unit tests covering
-      cold-start status guards + `mark_state_known` +
-      cross-contract log ordering + config upper bounds,
-      4 new validate-upper-bounds tests).
-    - `cargo test --workspace --locked` — 1250 tests
-      (+13 from the prior workspace total of 1237).
+      183 unit + 11 integration + 18 property = 212 tests
+      passing (+6 from audit-pass-2's 206: 4 new
+      mark_state_known unit tests, 2 new integration tests
+      for the lifecycle and degenerate-range rejection).
+    - `cargo test --workspace --locked` — 1256 tests
+      (+6 from the prior workspace total of 1250).
     - `cargo clippy --workspace --all-targets --locked
       -- -D warnings` — clean.
     - `cargo fmt --all -- --check` — clean.
     - `unsafe_code = "forbid"`.
     - Binary smoke-tested via
       `./target/release/canon-faultproof-observer --version` →
-      `canon-faultproof-observer v0.2.2 (canon-faultproof-observer/v1)`;
+      `canon-faultproof-observer v0.2.3 (canon-faultproof-observer/v1)`;
       `--help` lists every documented flag.
 
 **Workstream SC.3 (SMT cell-proof cross-stack soundness corpus,

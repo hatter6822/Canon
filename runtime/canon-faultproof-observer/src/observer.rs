@@ -260,6 +260,29 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
     /// the game as known.  The orchestrator's `maybe_play_move`
     /// will then start submitting moves for that game.
     ///
+    /// # Defensive checks
+    ///
+    /// The method enforces three invariants on `full_state`:
+    ///
+    /// 1. **Deployment-id parity.**  The supplied `full_state`'s
+    ///    `deployment_id` MUST equal the observer's configured
+    ///    `deployment_id` (the bytes the operator passed on the
+    ///    `--deployment-id` CLI flag).  A mismatch indicates the
+    ///    caller's contract-read returned data for the WRONG
+    ///    deployment, which would be a cross-deployment-replay
+    ///    attempt.  Rejects with [`ObserverError::Invariant`].
+    /// 2. **Status preservation.**  If the in-memory record was
+    ///    already terminal (e.g., `SequencerWon`), we refuse to
+    ///    overwrite with a non-terminal `InProgress` state.
+    ///    The settlement event has authority over the status
+    ///    field; an out-of-order `eth_call` response cannot
+    ///    resurrect a settled game.  Rejects with
+    ///    [`ObserverError::Invariant`].
+    /// 3. **Game-id consistency.**  The supplied `full_state`'s
+    ///    range bounds must satisfy `low.idx < high.idx`
+    ///    (otherwise the game's bisection is degenerate).
+    ///    Rejects with [`ObserverError::Invariant`].
+    ///
     /// # Returns
     ///
     /// `Ok(true)` if the game was found and updated; `Ok(false)`
@@ -267,8 +290,9 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`ObserverError::Storage`] if the persistence
-    /// commit fails.
+    /// Returns [`ObserverError::Invariant`] if any of the
+    /// defensive checks fail; [`ObserverError::Storage`] if the
+    /// persistence commit fails.
     pub fn mark_state_known(
         &mut self,
         game_id: u128,
@@ -278,6 +302,35 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         let Some(rec) = self.games.get(&game_id).cloned() else {
             return Ok(false);
         };
+        // Defensive check 1: deployment-id parity.
+        if full_state.deployment_id != self.config.deployment_id {
+            return Err(ObserverError::Invariant(format!(
+                "mark_state_known game {game_id}: supplied deployment_id does not match observer's \
+                 configured deployment_id; cross-deployment-replay refused",
+            )));
+        }
+        // Defensive check 2: status preservation.  A settled
+        // in-memory record cannot be overwritten with a
+        // non-terminal status.
+        if rec.state.status.is_terminal() && full_state.status.is_in_progress() {
+            return Err(ObserverError::Invariant(format!(
+                "mark_state_known game {game_id}: refusing to overwrite settled \
+                 (status={:?}) state with InProgress",
+                rec.state.status,
+            )));
+        }
+        // Defensive check 3: range non-degeneracy.  A
+        // legitimate game has low.idx < high.idx; the contract
+        // enforces this at creation time (per
+        // `initiateChallenge`'s `if (lowLogIndex >= disputedLogIndex)`
+        // check).  Defends against a buggy contract-state read.
+        if full_state.range.low.idx >= full_state.range.high.idx {
+            return Err(ObserverError::Invariant(format!(
+                "mark_state_known game {game_id}: degenerate range \
+                 (low.idx={}, high.idx={}); legitimate L1 games have low < high",
+                full_state.range.low.idx, full_state.range.high.idx,
+            )));
+        }
         let new_rec = GameRecord {
             game_id: rec.game_id,
             state: full_state,
@@ -649,7 +702,22 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
             let mut new_rec = rec.clone();
             new_rec.state.pending_midpoint = None;
             new_rec.state.turn = rec.state.turn.flip();
-            new_rec.state.depth = new_rec.state.depth.saturating_add(1);
+            // Clamp depth at MAX_BISECTION_DEPTH + 1 (i.e., 65)
+            // so the post-state remains within an envelope that
+            // `apply_transition`'s `bisectionDepthExceeded` guard
+            // would recognise.  An unclamped saturating_add lets
+            // depth grow to u32::MAX over many observed responses,
+            // which would defeat the depth-cap invariant if
+            // `apply_transition` were later called on this state
+            // (e.g., after `mark_state_known` flips state_known
+            // but a subsequent event interleaves).  Clamp to the
+            // "just-exceeded" value so the next `apply_transition`
+            // call cleanly returns `BisectionDepthExceeded`.
+            new_rec.state.depth = new_rec
+                .state
+                .depth
+                .saturating_add(1)
+                .min(crate::game::MAX_BISECTION_DEPTH + 1);
             new_rec.last_updated_block = block_number;
             self.games.insert(game_id, new_rec.clone());
             batch.upsert_game(new_rec);
@@ -845,12 +913,29 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
                 // Insert into the in-memory pivot-dedup cache
                 // immediately so a subsequent move within the
                 // same iteration cannot duplicate-submit.
+                //
+                // **Production submitter integration note.**
                 // Persistence is committed atomically at the end
                 // of `run_iteration`; on commit failure the
-                // in-memory cache will be slightly ahead of the
-                // persisted store until the next restart, which
-                // is benign (we'd just over-defer on the next
-                // iteration, never under-defer).
+                // in-memory cache will be ahead of the persisted
+                // store.  Within the same process this is benign
+                // (we'd over-defer, never under-defer).  ACROSS
+                // a restart however, the cache is rebuilt from
+                // persisted records; the un-committed entry is
+                // lost; the observer would re-submit on the next
+                // iteration.  With the MOCK submitter this is
+                // harmless (no L1 broadcast).  With the FUTURE
+                // production JSON-RPC submitter that actually
+                // sends an L1 transaction, the same logical move
+                // could be broadcast twice — wasting gas on the
+                // duplicate (the contract reverts on the second
+                // attempt with `MidpointAlreadyPending` etc.)
+                // but not corrupting state.
+                //
+                // The production submitter wire-up SHOULD persist
+                // a "pre-submit intent" record before invoking
+                // the submitter, and clear it on confirmation.
+                // Tracked as RH-G follow-up work in CLAUDE.md.
                 self.submitted_pivots.insert((rec.game_id, pivot_idx));
                 info!(
                     game_id = %rec.game_id,
@@ -1001,6 +1086,7 @@ pub struct IterationOutcome {
 #[cfg(test)]
 mod tests {
     use super::{Observer, ObserverConfig};
+    use crate::error::ObserverError;
     use crate::events::{GameEvent, GameEventTopic};
     use crate::game::{Claim, DisputedRange, GameState, GameStatus, StateCommit, TurnSide};
     use crate::persistence::{
@@ -1370,7 +1456,10 @@ mod tests {
             sequencer_bond: 100_000,
             challenger_bond: 100_000,
             status: GameStatus::InProgress,
-            deployment_id: [0xDE; 32],
+            // Match the observer's configured deployment_id
+            // (fresh_observer uses `[0u8; 32]`).  The audit-
+            // pass-3 defensive check rejects mismatched ids.
+            deployment_id: [0u8; 32],
         };
         let updated = obs.mark_state_known(77, full_state.clone(), 200).unwrap();
         assert!(updated);
@@ -1411,6 +1500,268 @@ mod tests {
         };
         let updated = obs.mark_state_known(99_999, dummy_state, 100).unwrap();
         assert!(!updated);
+    }
+
+    /// `mark_state_known` rejects a state with a mismatched
+    /// `deployment_id`.  This is the cross-deployment-replay
+    /// defence that prevents an `eth_call` from a misconfigured
+    /// contract address from overwriting our in-memory state.
+    #[test]
+    fn mark_state_known_rejects_mismatched_deployment_id() {
+        let (mut obs, _dir) = fresh_observer();
+        // Inject a cold-start game with the observer's configured
+        // deployment_id ([0u8; 32]).
+        obs.games.insert(
+            77,
+            GameRecord {
+                game_id: 77,
+                state: GameState {
+                    sequencer: 0,
+                    challenger: 0,
+                    range: DisputedRange {
+                        low: Claim {
+                            idx: 0,
+                            commit: [0u8; 32],
+                        },
+                        high: Claim {
+                            idx: 0,
+                            commit: commit(1),
+                        },
+                    },
+                    pending_midpoint: None,
+                    depth: 0,
+                    turn: TurnSide::Sequencer,
+                    sequencer_bond: 0,
+                    challenger_bond: 0,
+                    status: GameStatus::InProgress,
+                    deployment_id: [0u8; 32],
+                },
+                me: TurnSide::Challenger,
+                last_updated_block: 100,
+                state_known: false,
+            },
+        );
+        // Attempt mark_state_known with WRONG deployment_id.
+        let wrong_state = GameState {
+            sequencer: 11,
+            challenger: 22,
+            range: DisputedRange {
+                low: Claim {
+                    idx: 0,
+                    commit: commit(7),
+                },
+                high: Claim {
+                    idx: 1024,
+                    commit: commit(8),
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn: TurnSide::Sequencer,
+            sequencer_bond: 0,
+            challenger_bond: 0,
+            status: GameStatus::InProgress,
+            deployment_id: [0xDE; 32], // mismatched!
+        };
+        let err = obs.mark_state_known(77, wrong_state, 200).unwrap_err();
+        assert!(matches!(err, ObserverError::Invariant(_)));
+        // The in-memory record must remain UNTOUCHED.
+        let rec = obs.games().get(&77).unwrap();
+        assert!(!rec.state_known);
+    }
+
+    /// `mark_state_known` refuses to overwrite a settled game's
+    /// status with `InProgress`.  The settlement event has
+    /// authority over the status field; an out-of-order
+    /// `eth_call` response cannot resurrect a settled game.
+    #[test]
+    fn mark_state_known_refuses_to_resurrect_settled_game() {
+        let (mut obs, _dir) = fresh_observer();
+        obs.games.insert(
+            88,
+            GameRecord {
+                game_id: 88,
+                state: GameState {
+                    sequencer: 0,
+                    challenger: 0,
+                    range: DisputedRange {
+                        low: Claim {
+                            idx: 0,
+                            commit: [0u8; 32],
+                        },
+                        high: Claim {
+                            idx: 0,
+                            commit: commit(1),
+                        },
+                    },
+                    pending_midpoint: None,
+                    depth: 0,
+                    turn: TurnSide::Sequencer,
+                    sequencer_bond: 0,
+                    challenger_bond: 0,
+                    status: GameStatus::ChallengerWon, // already settled
+                    deployment_id: [0u8; 32],
+                },
+                me: TurnSide::Challenger,
+                last_updated_block: 100,
+                state_known: false,
+            },
+        );
+        let resurrect_state = GameState {
+            sequencer: 11,
+            challenger: 22,
+            range: DisputedRange {
+                low: Claim {
+                    idx: 0,
+                    commit: commit(7),
+                },
+                high: Claim {
+                    idx: 1024,
+                    commit: commit(8),
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn: TurnSide::Sequencer,
+            sequencer_bond: 0,
+            challenger_bond: 0,
+            status: GameStatus::InProgress, // tries to resurrect
+            deployment_id: [0u8; 32],
+        };
+        let err = obs.mark_state_known(88, resurrect_state, 200).unwrap_err();
+        assert!(matches!(err, ObserverError::Invariant(_)));
+        // The settled status must remain unchanged.
+        let rec = obs.games().get(&88).unwrap();
+        assert_eq!(rec.state.status, GameStatus::ChallengerWon);
+    }
+
+    /// `mark_state_known` is idempotent: calling twice with the
+    /// same arguments produces the same observable end state.
+    /// (The second call updates `last_updated_block` only.)
+    #[test]
+    fn mark_state_known_is_idempotent() {
+        let (mut obs, _dir) = fresh_observer();
+        // Inject a cold-start game.
+        obs.games.insert(
+            55,
+            GameRecord {
+                game_id: 55,
+                state: GameState {
+                    sequencer: 0,
+                    challenger: 0,
+                    range: DisputedRange {
+                        low: Claim {
+                            idx: 0,
+                            commit: [0u8; 32],
+                        },
+                        high: Claim {
+                            idx: 0,
+                            commit: commit(1),
+                        },
+                    },
+                    pending_midpoint: None,
+                    depth: 0,
+                    turn: TurnSide::Sequencer,
+                    sequencer_bond: 0,
+                    challenger_bond: 0,
+                    status: GameStatus::InProgress,
+                    deployment_id: [0u8; 32],
+                },
+                me: TurnSide::Challenger,
+                last_updated_block: 100,
+                state_known: false,
+            },
+        );
+        let full_state = GameState {
+            sequencer: 11,
+            challenger: 22,
+            range: DisputedRange {
+                low: Claim {
+                    idx: 0,
+                    commit: commit(7),
+                },
+                high: Claim {
+                    idx: 1024,
+                    commit: commit(8),
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn: TurnSide::Sequencer,
+            sequencer_bond: 100_000,
+            challenger_bond: 100_000,
+            status: GameStatus::InProgress,
+            deployment_id: [0u8; 32],
+        };
+        // First call: transitions to state_known = true.
+        let first = obs.mark_state_known(55, full_state.clone(), 200).unwrap();
+        assert!(first);
+        let rec_after_first = obs.games().get(&55).unwrap().clone();
+        // Second call with identical args.
+        let second = obs.mark_state_known(55, full_state.clone(), 200).unwrap();
+        assert!(second);
+        let rec_after_second = obs.games().get(&55).unwrap().clone();
+        // Idempotence: end states are equal.
+        assert_eq!(rec_after_first, rec_after_second);
+    }
+
+    /// `mark_state_known` rejects a degenerate range (low >= high).
+    #[test]
+    fn mark_state_known_rejects_degenerate_range() {
+        let (mut obs, _dir) = fresh_observer();
+        obs.games.insert(
+            99,
+            GameRecord {
+                game_id: 99,
+                state: GameState {
+                    sequencer: 0,
+                    challenger: 0,
+                    range: DisputedRange {
+                        low: Claim {
+                            idx: 0,
+                            commit: [0u8; 32],
+                        },
+                        high: Claim {
+                            idx: 0,
+                            commit: commit(1),
+                        },
+                    },
+                    pending_midpoint: None,
+                    depth: 0,
+                    turn: TurnSide::Sequencer,
+                    sequencer_bond: 0,
+                    challenger_bond: 0,
+                    status: GameStatus::InProgress,
+                    deployment_id: [0u8; 32],
+                },
+                me: TurnSide::Challenger,
+                last_updated_block: 100,
+                state_known: false,
+            },
+        );
+        let degenerate_state = GameState {
+            sequencer: 11,
+            challenger: 22,
+            range: DisputedRange {
+                low: Claim {
+                    idx: 100,
+                    commit: commit(7),
+                },
+                high: Claim {
+                    idx: 100, // SAME as low → degenerate
+                    commit: commit(8),
+                },
+            },
+            pending_midpoint: None,
+            depth: 0,
+            turn: TurnSide::Sequencer,
+            sequencer_bond: 0,
+            challenger_bond: 0,
+            status: GameStatus::InProgress,
+            deployment_id: [0u8; 32],
+        };
+        let err = obs.mark_state_known(99, degenerate_state, 200).unwrap_err();
+        assert!(matches!(err, ObserverError::Invariant(_)));
     }
 
     /// Stop signal halts the run loop promptly.
