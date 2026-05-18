@@ -29,7 +29,7 @@ submissions off-chain until the SMT path is shipped"
     - **SC.1** Lean SMT spec + per-cell proof scheme — **Complete**.
     - **SC.2** Solidity SMT verifier (gas-efficient) — **Complete**.
     - **SC.3** Cross-stack soundness theorem + corpus widening —
-      Not started.
+      **Complete**.
   * **Effort estimate:** 6–9 calendar weeks for one Lean-Solidity
     engineer.  Parallelisable into 4–6 weeks if Lean and Solidity
     are split between two engineers after SC.1.
@@ -337,6 +337,116 @@ submissions off-chain until the SMT path is shipped"
     deployment layer, not the Lean trusted kernel).
   * **Trust-assumption delta:** zero (same `keccak256`
     collision-resistance as the existing chain).
+
+### SC.3 closeout (post-landing)
+
+  * **Module:** `LegalKernel/Test/Bridge/CrossCheck/SmtCellProof.lean`
+    (new, ~620 lines; Lean-side fixture generator) +
+    `solidity/test/CrossCheck/SmtCellProof.t.sol` (new, ~265
+    lines; Solidity-side consumer).
+  * **Cross-stack corpus:** 100 entries in
+    `solidity/test/CrossCheck/fixtures/smt_cell_proof.json` (50
+    honest + 50 adversarial).  The honest set covers singleton /
+    two-cell / three-cell / four-cell / eight-cell maps plus 10
+    single-bit-position edge cases (MSB at d=0, mid at d=32, LSB
+    at d=63, all-ones at d=0..63).  The adversarial set
+    round-robins six tamper classes across the honest base:
+      - **valueSubst** (9 entries) — re-encode the leafPreimage
+        with a different value (XOR of the original by
+        `0xDEADBEEF`).
+      - **siblingTamper** (9 entries) — flip the first byte of
+        the first sibling in `proofData`; falls back to a
+        bitmask flip when the base has zero siblings.
+      - **bitmaskTamper** (8 entries) — flip bit 0 of byte 0 of
+        the bitmask (re-classifies depth 0's sibling between
+        canonical-empty and supplied).
+      - **rootTamper** (8 entries) — flip the first byte of the
+        claimed root (proof walks to the original root, but the
+        claim is wrong).
+      - **keyMismatch** (8 entries) — re-route the smtKey via an
+        XOR with `0xAAAAAAAAAAAAAAAA`; the proof's siblings no
+        longer fit the new path.
+      - **absentKey** (8 entries) — substitute the empty proof
+        (32-byte zero bitmask, no siblings) against the original
+        populated map's root; the walk produces a different
+        output than `smtRoot m`.
+  * **Wire-format alignment.**  Each entry carries the four
+    byte-string inputs the Solidity verifier consumes
+    (`smtKey`, `leafPreimage`, `proofData`, `root`) plus the
+    expected verdict (`shouldVerify`).  Lean uses a small
+    `CrossStackUInt64` wrapper whose `Encodable` instance
+    produces 8 big-endian bytes (matching Solidity's MSB-first
+    key reading); the wrapper's `BitsKey` instance defers to
+    `UInt64`'s, so the proof construction (`smtRoot` +
+    `buildSmtCellProof`) walks the same path the Solidity
+    verifier walks.  `proofData` is the on-wire encoding
+    `bitmask(32 bytes) || siblings(N × 32 bytes)`, low-depth-
+    first; matches the SC.2 wire-format spec verbatim.
+  * **Tests landed.**  14 Lean test cases in
+    `crosscheck-smt-cell-proof` (count check; honest-side Lean
+    verification; adversarial-side Lean rejection; structural
+    invariants for `smtKey` / `leafPreimage` / `proofData` /
+    `root`; tamper-class coverage; honest/adversarial tamper-
+    field invariants; fixture determinism; fixture write/verify
+    cycle; cross-stack assertion gating).  10 Solidity test
+    cases in `SmtCellProofCrossCheck` (header shape;
+    `shouldVerify` matches position; `smtKey` / `leafPreimage`
+    / `proofData` / `root` shape checks; per-entry verdict
+    cross-stack assertion + per-honest-entry root byte-equality,
+    both gated on `isKeccak256Linked`; spot checks for entry 0
+    and entry 50 categories).
+  * **Documentation updates.**
+    - `docs/GENESIS_PLAN.md` §15B (lines ~5263-5270): the
+      Workstream-SC.3 status sub-paragraph rewritten to declare
+      completion, replacing the "pre-SC.3 deployments choosing
+      the SMT path get gas-efficient on-chain verification with
+      the Lean-side soundness theorems as upstream contract"
+      hedge with the mechanical cross-stack ratification claim.
+    - `CLAUDE.md` headline-theorem table extended with SC.3
+      cross-stack ratification rows; roadmap table updated to
+      mark SC.3 complete; test-count narrative bumped.
+    - `AGENTS.md` kept byte-identical to `CLAUDE.md`.
+  * **Hash-binding-conditional behaviour.**  At `lake test` time
+    in default CI, `Bridge.HashAdaptor.isKeccak256Linked = false`
+    and `hashBytes` falls back to FNV-1a-64 padded to 32 bytes.
+    The fixture's bytes are then FNV-derived; Solidity's
+    keccak256 verification produces different roots.  Both the
+    Solidity per-entry verdict test and the per-honest-entry
+    root-byte test are gated on the header's
+    `isKeccak256Linked` flag and skip cleanly in that mode.
+    Header-shape and structural-invariant tests run
+    unconditionally.  In a production environment with the
+    `canon-hash-keccak256` Rust adaptor linked, both sides
+    walk keccak256 and the byte verdicts match exactly.
+  * **Audit posture at landing.**
+    - `lake build` — green; zero new warnings.
+    - `lake test` — `ALL TESTS PASSED`; 2081 total tests across
+      ~102 suites (+14 from the SC.1 milestone's 2067).
+    - `lake exe deferral_audit` — PASS, no deferral markers.
+    - `lake exe naming_audit` — PASS, content-driven naming.
+    - `lake exe tcb_audit` / `stub_audit` / `count_sorries` —
+      PASS, no kernel-TCB drift.
+    - `forge build` — green; no warnings in the new files.
+    - `forge test --match-contract SmtCellProofCrossCheck` —
+      8 passed; 2 skipped (the `isKeccak256Linked`-gated
+      cross-stack assertions, expected in FNV-fallback CI).
+    - Full `forge test` — 400 tests passing, 11 skipped
+      (+2 from pre-SC.3's 9 skipped: the two new SC.3 keccak-
+      gated tests).
+    - `forge fmt --check test/CrossCheck/SmtCellProof.t.sol`
+      — clean.
+  * **Deferral markers retired by SC.3.**
+    - GENESIS_PLAN §15B "pre-SC.3 deployments choosing the SMT
+      path get gas-efficient on-chain verification with the
+      Lean-side soundness theorems as upstream contract" hedge
+      — retired in favour of the mechanical fixture-corpus
+      ratification claim.
+    - The two pre-existing markers (`StepVMMerkle.sol:35`,
+      `Cell.lean:52`) were already retired by SC.1 / SC.2.
+  * **TCB delta:** zero.
+  * **Trust-assumption delta:** zero (the cross-stack
+    assertion's correctness rests on the same `CollisionFree
+    hashBytes` hypothesis the Lean theorems already document).
 
 ## Table of contents
 
