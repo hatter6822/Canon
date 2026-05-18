@@ -423,6 +423,83 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
         Ok(true)
     }
 
+    /// Hydrate every `state_known = false` game by reading its
+    /// full state from the L1 contract via the supplied state
+    /// reader.  This is the production wiring for the deferred
+    /// contract-state read documented on `handle_game_opened`.
+    ///
+    /// On a successful read, [`Self::mark_state_known`] is
+    /// invoked, which atomically commits the upgraded state and
+    /// flips the `state_known` flag.  Once that happens, the
+    /// orchestrator's `maybe_play_move` starts submitting honest
+    /// moves for the game.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(hydrated_count, error_count)`.  Per-game
+    /// errors are logged at warn-level and SKIPPED (the
+    /// orchestrator continues with the remaining games); they
+    /// do NOT halt the daemon.  Operators monitoring the daemon
+    /// see the warn line and can investigate individually.
+    ///
+    /// # Errors
+    ///
+    /// Per-game errors are logged + counted but not propagated.
+    /// The method itself does not return an error (callers can
+    /// retry the next iteration).
+    pub fn hydrate_cold_start_games(
+        &mut self,
+        reader: &crate::state_reader::ContractGameReader<'_>,
+        block_number: u64,
+    ) -> (usize, usize) {
+        // Snapshot the cold-start game IDs.  We can't iterate
+        // self.games and mark-state-known in the same loop
+        // (mark_state_known mutates the map).
+        let cold_start_ids: Vec<u128> = self
+            .games
+            .iter()
+            .filter(|(_, rec)| !rec.state_known)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut hydrated = 0usize;
+        let mut errors = 0usize;
+        for game_id in cold_start_ids {
+            match reader.read_and_validate(game_id, self.config.deployment_id) {
+                Ok(full_state) => match self.mark_state_known(game_id, full_state, block_number) {
+                    Ok(true) => hydrated += 1,
+                    Ok(false) => {
+                        // Race: game was already settled / removed
+                        // between snapshot and mark.  Benign.
+                    }
+                    Err(e) => {
+                        warn!(
+                            game_id = %game_id,
+                            error = %e,
+                            "hydrate_cold_start_games: mark_state_known refused",
+                        );
+                        errors += 1;
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        game_id = %game_id,
+                        error = %e,
+                        "hydrate_cold_start_games: eth_call failed",
+                    );
+                    errors += 1;
+                }
+            }
+        }
+        if hydrated > 0 || errors > 0 {
+            info!(
+                hydrated = hydrated,
+                errors = errors,
+                "hydrate_cold_start_games iteration complete",
+            );
+        }
+        (hydrated, errors)
+    }
+
     /// Read accessor for the persistence handle.  Tests use this
     /// to verify post-iteration state.
     #[must_use]

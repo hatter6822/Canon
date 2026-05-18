@@ -1,0 +1,584 @@
+// Canon  - A Societal Kernel
+// Copyright (C) 2026  Adam Hall
+// This program comes with ABSOLUTELY NO WARRANTY.
+// This is free software, and you are welcome to redistribute it
+// under certain conditions. See: https://github.com/hatter6822/Orbcrypt/blob/main/LICENSE
+
+//! eth_call-based reader for the `CanonFaultProofGame` contract's
+//! per-game state.  Closes RH-G's "contract-state read" follow-up
+//! by hydrating the observer's cold-start `state_known=false`
+//! placeholders with the full on-chain state.
+//!
+//! ## Wire format
+//!
+//! The contract's auto-generated `games(uint256)` getter returns a
+//! 15-field tuple matching the Solidity `Game` struct layout
+//! (verified via `forge inspect CanonFaultProofGame abi --json`).
+//! Three of the fields (`low`, `high`, `pendingMidpoint`) are
+//! themselves 2-field tuples `(uint64 idx, bytes32 commit)`.
+//!
+//! Solidity ABI encoding flattens nested static tuples into their
+//! component slots, so the wire layout is 18 × 32-byte slots
+//! (576 bytes total):
+//!
+//! ```text
+//!  Slot   Field
+//!  ----   --------------------------------------------------------
+//!  0      address sequencer (right-aligned in 32 bytes)
+//!  1      address challenger
+//!  2      uint64 low.idx (right-aligned)
+//!  3      bytes32 low.commit
+//!  4      uint64 high.idx
+//!  5      bytes32 high.commit
+//!  6      bool hasPendingMidpoint (0 or 1 in slot[31])
+//!  7      uint64 pendingMidpoint.idx
+//!  8      bytes32 pendingMidpoint.commit
+//!  9      uint64 depth
+//! 10      uint8 turn (slot[31] in {0, 1})
+//! 11      uint64 turnDeadline
+//! 12      uint128 sequencerBond (right-aligned)
+//! 13      uint128 challengerBond
+//! 14      uint8 status (slot[31] in {0..=4})
+//! 15      bytes32 deploymentId
+//! 16      uint64 lastStepBlock
+//! 17      uint64 disputedLogIndex
+//! ```
+//!
+//! All fields are STATIC (no dynamic types), so the response is
+//! exactly 576 bytes regardless of payload values.
+//!
+//! Method selector: `keccak256("games(uint256)")[..4]` =
+//! `0x117a5b90` (verified via `forge inspect CanonFaultProofGame
+//! methods` and pinned in [`selector_matches_solidity_inspector_output`]).
+//!
+//! ## Cross-deployment-replay defence
+//!
+//! The reader's [`ContractGameReader::read_and_validate`] entry
+//! point validates the returned `deploymentId` against the
+//! observer's expected value BEFORE installing the state.
+//! Mismatches surface as
+//! [`GameStateReadError::DeploymentIdMismatch`].  This closes the
+//! cross-deployment-replay gap documented in
+//! `Observer::handle_game_opened`'s docstring at the RH-G
+//! initial landing.
+
+use crate::game::{Claim, DisputedRange, GameState, GameStatus, TurnSide};
+use canon_l1_ingest::source::json_rpc::JsonRpcL1Source;
+use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
+
+/// Number of 32-byte ABI slots in the `games(uint256)` response.
+pub const GAMES_RESPONSE_SLOTS: usize = 18;
+
+/// Total response byte length: `GAMES_RESPONSE_SLOTS × 32`.
+pub const GAMES_RESPONSE_BYTES: usize = GAMES_RESPONSE_SLOTS * 32;
+
+/// 4-byte selector for `games(uint256)`.  Pinned constant;
+/// regression-tested against the keccak256 of the signature.
+const GAMES_SELECTOR: [u8; 4] = [0x11, 0x7a, 0x5b, 0x90];
+
+/// Errors the state reader can produce.
+#[derive(Debug, thiserror::Error)]
+pub enum GameStateReadError {
+    /// The L1 RPC transport failed.
+    #[error("L1 RPC error: {0}")]
+    RpcTransport(String),
+    /// The `eth_call` returned a non-hex / malformed response.
+    #[error("malformed eth_call response: {0}")]
+    Malformed(String),
+    /// The response length was unexpected (not exactly
+    /// `GAMES_RESPONSE_BYTES`).
+    #[error("`eth_call` response wrong length: expected {expected} bytes, got {actual}")]
+    WrongLength {
+        /// The expected response length.
+        expected: usize,
+        /// The actual response length.
+        actual: usize,
+    },
+    /// The returned `turn` byte was outside the legal `0..=1` range.
+    #[error("`eth_call` returned invalid turn byte: {0}")]
+    InvalidTurn(u8),
+    /// The returned `status` byte was outside the legal `0..=4` range.
+    #[error("`eth_call` returned invalid status byte: {0}")]
+    InvalidStatus(u8),
+    /// The returned `deploymentId` does not match the observer's
+    /// configured deployment ID.  Cross-deployment-replay defence.
+    #[error("deployment ID mismatch: contract returned 0x{contract_hex}, observer expects 0x{observer_hex}")]
+    DeploymentIdMismatch {
+        /// The contract-returned deployment ID (hex, no `0x`).
+        contract_hex: String,
+        /// The observer's expected deployment ID (hex, no `0x`).
+        observer_hex: String,
+    },
+    /// The returned state has `low.idx >= high.idx`, which is
+    /// degenerate (the kernel reference rejects this at
+    /// `applyTransition` time).
+    #[error("`eth_call` returned degenerate range: low.idx={low_idx} >= high.idx={high_idx}")]
+    DegenerateRange {
+        /// The low-bound log index.
+        low_idx: u64,
+        /// The high-bound log index.
+        high_idx: u64,
+    },
+}
+
+/// A reader for the `CanonFaultProofGame` contract's per-game
+/// state via the auto-generated `games(uint256)` getter.
+///
+/// Holds a reference to a `JsonRpcL1Source` (re-using the
+/// canon-l1-ingest crate's audited HTTP/1.1 + JSON-RPC client).
+pub struct ContractGameReader<'a> {
+    rpc: &'a JsonRpcL1Source,
+    game_contract_hex: String,
+}
+
+impl<'a> ContractGameReader<'a> {
+    /// Construct a reader from an existing JSON-RPC source and the
+    /// game contract's L1 address.
+    ///
+    /// `game_contract`: 20-byte L1 address.
+    #[must_use]
+    pub fn new(rpc: &'a JsonRpcL1Source, game_contract: [u8; 20]) -> Self {
+        let game_contract_hex = format!("0x{}", hex::encode(game_contract));
+        Self {
+            rpc,
+            game_contract_hex,
+        }
+    }
+
+    /// Read the full per-game state via `eth_call` to
+    /// `games(uint256)`.
+    ///
+    /// Returns the decoded `GameState` on success.  The returned
+    /// state's `deployment_id` field is populated from the
+    /// contract; callers MUST cross-check it against their
+    /// expected value before installing.  Use
+    /// [`Self::read_and_validate`] for the orchestrator-friendly
+    /// variant that delegates this check.
+    ///
+    /// # Errors
+    ///
+    /// See [`GameStateReadError`].
+    pub fn read_game(&self, game_id: u128) -> Result<GameState, GameStateReadError> {
+        let calldata = encode_games_calldata(game_id);
+        let calldata_hex = format!("0x{}", hex::encode(calldata));
+        let params = json!([
+            {
+                "to": self.game_contract_hex,
+                "data": calldata_hex,
+            },
+            "latest"
+        ]);
+        let response = self
+            .rpc
+            .rpc("eth_call", params)
+            .map_err(|e| GameStateReadError::RpcTransport(e.to_string()))?;
+        let hex_str = match response {
+            Value::String(s) => s,
+            other => {
+                return Err(GameStateReadError::Malformed(format!(
+                    "expected string response, got: {other}"
+                )))
+            }
+        };
+        let bytes = decode_hex_response(&hex_str)?;
+        decode_game_state(&bytes)
+    }
+
+    /// Read the per-game state AND validate the returned
+    /// `deploymentId` against the observer's expected value, plus
+    /// the range non-degeneracy invariant.  Returns the validated
+    /// state or a typed error.
+    ///
+    /// # Errors
+    ///
+    /// See [`GameStateReadError`].  In particular:
+    /// * [`GameStateReadError::DeploymentIdMismatch`] surfaces
+    ///   when the contract returns a different deployment ID
+    ///   than expected (cross-deployment-replay defence).
+    /// * [`GameStateReadError::DegenerateRange`] surfaces when
+    ///   `low.idx >= high.idx`, which would also be rejected by
+    ///   the observer's `mark_state_known` API.
+    pub fn read_and_validate(
+        &self,
+        game_id: u128,
+        expected_deployment_id: [u8; 32],
+    ) -> Result<GameState, GameStateReadError> {
+        let state = self.read_game(game_id)?;
+        if state.deployment_id != expected_deployment_id {
+            return Err(GameStateReadError::DeploymentIdMismatch {
+                contract_hex: hex::encode(state.deployment_id),
+                observer_hex: hex::encode(expected_deployment_id),
+            });
+        }
+        if state.range.low.idx >= state.range.high.idx {
+            return Err(GameStateReadError::DegenerateRange {
+                low_idx: state.range.low.idx,
+                high_idx: state.range.high.idx,
+            });
+        }
+        Ok(state)
+    }
+}
+
+/// Encode the `games(uint256)` calldata: 4-byte selector +
+/// 32-byte big-endian gameId.
+#[must_use]
+pub fn encode_games_calldata(game_id: u128) -> Vec<u8> {
+    let mut out = Vec::with_capacity(36);
+    out.extend_from_slice(&GAMES_SELECTOR);
+    // u128 left-padded into 32 bytes BE.
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&game_id.to_be_bytes());
+    out
+}
+
+/// Compute `keccak256(signature)[..4]`.  Pure helper used by the
+/// build-time selector pin.
+#[must_use]
+pub fn compute_selector(signature: &str) -> [u8; 4] {
+    let mut hasher = Keccak256::new();
+    hasher.update(signature.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 4];
+    out.copy_from_slice(&digest[..4]);
+    out
+}
+
+fn decode_hex_response(hex_str: &str) -> Result<Vec<u8>, GameStateReadError> {
+    let trimmed = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    if trimmed.len() % 2 != 0 {
+        return Err(GameStateReadError::Malformed(format!(
+            "odd-length hex string: {}",
+            trimmed.len()
+        )));
+    }
+    hex::decode(trimmed).map_err(|e| GameStateReadError::Malformed(e.to_string()))
+}
+
+/// Decode a `GAMES_RESPONSE_BYTES`-long ABI-encoded `games(uint256)`
+/// response into a `GameState`.
+///
+/// # Errors
+///
+/// See [`GameStateReadError`].
+///
+/// # Panics
+///
+/// Cannot panic in practice — every `try_into()` is on a slice
+/// whose length is structurally guaranteed by the per-slot
+/// indexing arithmetic.  The `debug_assert!` checks in the
+/// `read_*_from_slot` helpers add a defensive layer in debug
+/// builds.
+pub fn decode_game_state(bytes: &[u8]) -> Result<GameState, GameStateReadError> {
+    if bytes.len() != GAMES_RESPONSE_BYTES {
+        return Err(GameStateReadError::WrongLength {
+            expected: GAMES_RESPONSE_BYTES,
+            actual: bytes.len(),
+        });
+    }
+    // Helper: extract slot i.
+    let slot = |i: usize| -> &[u8] { &bytes[i * 32..(i + 1) * 32] };
+
+    let sequencer = read_address_as_actor_id(slot(0));
+    let challenger = read_address_as_actor_id(slot(1));
+    let low_idx = read_u64_from_slot(slot(2));
+    let low_commit: [u8; 32] = slot(3).try_into().unwrap();
+    let high_idx = read_u64_from_slot(slot(4));
+    let high_commit: [u8; 32] = slot(5).try_into().unwrap();
+    let has_pending = read_bool_from_slot(slot(6));
+    let pending_idx = read_u64_from_slot(slot(7));
+    let pending_commit: [u8; 32] = slot(8).try_into().unwrap();
+    let pending_midpoint = if has_pending {
+        Some(Claim {
+            idx: pending_idx,
+            commit: pending_commit,
+        })
+    } else {
+        None
+    };
+    let depth = u32::try_from(read_u64_from_slot(slot(9))).unwrap_or(u32::MAX);
+    let turn_byte = slot(10)[31];
+    let turn = match turn_byte {
+        0 => TurnSide::Sequencer,
+        1 => TurnSide::Challenger,
+        other => return Err(GameStateReadError::InvalidTurn(other)),
+    };
+    let _turn_deadline = read_u64_from_slot(slot(11));
+    let sequencer_bond = read_u128_from_slot(slot(12));
+    let challenger_bond = read_u128_from_slot(slot(13));
+    let status_byte = slot(14)[31];
+    let status = match status_byte {
+        0 => GameStatus::InProgress,
+        1 => GameStatus::SequencerWon,
+        2 => GameStatus::ChallengerWon,
+        3 => GameStatus::TimedOutSequencer,
+        4 => GameStatus::TimedOutChallenger,
+        other => return Err(GameStateReadError::InvalidStatus(other)),
+    };
+    let deployment_id: [u8; 32] = slot(15).try_into().unwrap();
+    let _last_step_block = read_u64_from_slot(slot(16));
+    let _disputed_log_index = read_u64_from_slot(slot(17));
+
+    Ok(GameState {
+        sequencer,
+        challenger,
+        range: DisputedRange {
+            low: Claim {
+                idx: low_idx,
+                commit: low_commit,
+            },
+            high: Claim {
+                idx: high_idx,
+                commit: high_commit,
+            },
+        },
+        pending_midpoint,
+        depth,
+        turn,
+        sequencer_bond,
+        challenger_bond,
+        status,
+        deployment_id,
+    })
+}
+
+/// Read the last 8 bytes of a 32-byte ABI slot as a big-endian u64.
+fn read_u64_from_slot(slot: &[u8]) -> u64 {
+    debug_assert_eq!(slot.len(), 32);
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&slot[24..32]);
+    u64::from_be_bytes(buf)
+}
+
+/// Read the last 16 bytes of a 32-byte ABI slot as a big-endian u128.
+fn read_u128_from_slot(slot: &[u8]) -> u128 {
+    debug_assert_eq!(slot.len(), 32);
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&slot[16..32]);
+    u128::from_be_bytes(buf)
+}
+
+/// Project a 20-byte L1 address to a u64 `ActorId` via the low
+/// 8 bytes.  This matches the observer's existing convention for
+/// mapping L1 EOAs to kernel actor IDs.  Production deployments
+/// with multi-actor binding via the address book may need a
+/// different projection; for the observer's purposes (identity
+/// for turn-tracking only), the low-8 projection suffices.
+fn read_address_as_actor_id(slot: &[u8]) -> u64 {
+    debug_assert_eq!(slot.len(), 32);
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&slot[24..32]);
+    u64::from_be_bytes(buf)
+}
+
+fn read_bool_from_slot(slot: &[u8]) -> bool {
+    debug_assert_eq!(slot.len(), 32);
+    slot[31] != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_matches_solidity_inspector_output() {
+        // `forge inspect CanonFaultProofGame methods` reports
+        // `games(uint256) = 0x117a5b90`.  Verify our constant
+        // matches the keccak256 derivation.
+        let computed = compute_selector("games(uint256)");
+        assert_eq!(computed, GAMES_SELECTOR);
+    }
+
+    #[test]
+    fn calldata_layout_is_36_bytes() {
+        let cd = encode_games_calldata(42);
+        assert_eq!(cd.len(), 36);
+        assert_eq!(&cd[..4], &GAMES_SELECTOR);
+        let mut expected_tail = [0u8; 32];
+        expected_tail[16..].copy_from_slice(&42u128.to_be_bytes());
+        assert_eq!(&cd[4..], &expected_tail);
+    }
+
+    #[test]
+    fn calldata_preserves_full_u128_range() {
+        let cd = encode_games_calldata(u128::MAX);
+        assert_eq!(cd.len(), 36);
+        assert_eq!(&cd[4..20], &[0u8; 16]);
+        assert_eq!(&cd[20..], &u128::MAX.to_be_bytes());
+    }
+
+    fn synth_response_bytes() -> Vec<u8> {
+        let mut out = vec![0u8; GAMES_RESPONSE_BYTES];
+        // Slot 0: sequencer address (low 8 bytes = 0x0001020304050607).
+        out[24..32].copy_from_slice(&0x0001_0203_0405_0607u64.to_be_bytes());
+        // Slot 1: challenger address.
+        out[32 + 24..32 + 32].copy_from_slice(&0x1011_1213_1415_1617u64.to_be_bytes());
+        // Slot 2: low.idx = 10.
+        out[2 * 32 + 24..2 * 32 + 32].copy_from_slice(&10u64.to_be_bytes());
+        // Slot 3: low.commit.
+        out[3 * 32..4 * 32].copy_from_slice(&[0x42u8; 32]);
+        // Slot 4: high.idx = 100.
+        out[4 * 32 + 24..4 * 32 + 32].copy_from_slice(&100u64.to_be_bytes());
+        // Slot 5: high.commit.
+        out[5 * 32..6 * 32].copy_from_slice(&[0x43u8; 32]);
+        // Slot 6: hasPendingMidpoint = true.
+        out[6 * 32 + 31] = 1;
+        // Slot 7: pendingMidpoint.idx = 50.
+        out[7 * 32 + 24..7 * 32 + 32].copy_from_slice(&50u64.to_be_bytes());
+        // Slot 8: pendingMidpoint.commit.
+        out[8 * 32..9 * 32].copy_from_slice(&[0x44u8; 32]);
+        // Slot 9: depth = 5.
+        out[9 * 32 + 24..9 * 32 + 32].copy_from_slice(&5u64.to_be_bytes());
+        // Slot 10: turn = 1 (Challenger).
+        out[10 * 32 + 31] = 1;
+        // Slot 11: turnDeadline = 12345.
+        out[11 * 32 + 24..11 * 32 + 32].copy_from_slice(&12345u64.to_be_bytes());
+        // Slot 12: sequencerBond = 1_000_000.
+        out[12 * 32 + 16..12 * 32 + 32].copy_from_slice(&1_000_000u128.to_be_bytes());
+        // Slot 13: challengerBond = 2_000_000.
+        out[13 * 32 + 16..13 * 32 + 32].copy_from_slice(&2_000_000u128.to_be_bytes());
+        // Slot 14: status = 0 (InProgress).  Already zero.
+        // Slot 15: deploymentId.
+        out[15 * 32..16 * 32].copy_from_slice(&[0xABu8; 32]);
+        // Slot 16: lastStepBlock = 100_000.
+        out[16 * 32 + 24..16 * 32 + 32].copy_from_slice(&100_000u64.to_be_bytes());
+        // Slot 17: disputedLogIndex = 75.
+        out[17 * 32 + 24..17 * 32 + 32].copy_from_slice(&75u64.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn decode_game_state_rejects_short_response() {
+        let bytes = vec![0u8; 480];
+        let err = decode_game_state(&bytes);
+        assert!(matches!(
+            err,
+            Err(GameStateReadError::WrongLength {
+                expected: GAMES_RESPONSE_BYTES,
+                actual: 480
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_game_state_rejects_long_response() {
+        let bytes = vec![0u8; GAMES_RESPONSE_BYTES + 32];
+        let err = decode_game_state(&bytes);
+        assert!(matches!(err, Err(GameStateReadError::WrongLength { .. })));
+    }
+
+    #[test]
+    fn decode_game_state_decodes_typical_response() {
+        let bytes = synth_response_bytes();
+        let gs = decode_game_state(&bytes).expect("decode");
+        assert_eq!(gs.sequencer, 0x0001_0203_0405_0607);
+        assert_eq!(gs.challenger, 0x1011_1213_1415_1617);
+        assert_eq!(gs.range.low.idx, 10);
+        assert_eq!(gs.range.low.commit, [0x42u8; 32]);
+        assert_eq!(gs.range.high.idx, 100);
+        assert_eq!(gs.range.high.commit, [0x43u8; 32]);
+        assert_eq!(
+            gs.pending_midpoint,
+            Some(Claim {
+                idx: 50,
+                commit: [0x44u8; 32]
+            })
+        );
+        assert_eq!(gs.depth, 5);
+        assert_eq!(gs.turn, TurnSide::Challenger);
+        assert_eq!(gs.sequencer_bond, 1_000_000);
+        assert_eq!(gs.challenger_bond, 2_000_000);
+        assert_eq!(gs.status, GameStatus::InProgress);
+        assert_eq!(gs.deployment_id, [0xABu8; 32]);
+    }
+
+    #[test]
+    fn decode_game_state_handles_no_pending_midpoint() {
+        let mut bytes = synth_response_bytes();
+        // Clear hasPendingMidpoint.
+        bytes[6 * 32 + 31] = 0;
+        let gs = decode_game_state(&bytes).expect("decode");
+        assert!(gs.pending_midpoint.is_none());
+    }
+
+    #[test]
+    fn decode_game_state_rejects_invalid_turn() {
+        let mut bytes = synth_response_bytes();
+        bytes[10 * 32 + 31] = 2;
+        let err = decode_game_state(&bytes);
+        assert!(matches!(err, Err(GameStateReadError::InvalidTurn(2))));
+    }
+
+    #[test]
+    fn decode_game_state_rejects_invalid_status() {
+        let mut bytes = synth_response_bytes();
+        bytes[14 * 32 + 31] = 5;
+        let err = decode_game_state(&bytes);
+        assert!(matches!(err, Err(GameStateReadError::InvalidStatus(5))));
+    }
+
+    #[test]
+    fn decode_game_state_decodes_every_valid_status() {
+        for s in 0u8..=4u8 {
+            let mut bytes = synth_response_bytes();
+            bytes[14 * 32 + 31] = s;
+            let gs = decode_game_state(&bytes).expect("decode");
+            match s {
+                0 => assert_eq!(gs.status, GameStatus::InProgress),
+                1 => assert_eq!(gs.status, GameStatus::SequencerWon),
+                2 => assert_eq!(gs.status, GameStatus::ChallengerWon),
+                3 => assert_eq!(gs.status, GameStatus::TimedOutSequencer),
+                4 => assert_eq!(gs.status, GameStatus::TimedOutChallenger),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn decode_hex_response_strips_prefix() {
+        let bytes = decode_hex_response("0xdeadbeef").unwrap();
+        assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let bytes2 = decode_hex_response("deadbeef").unwrap();
+        assert_eq!(bytes2, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn decode_hex_response_rejects_odd_length() {
+        let err = decode_hex_response("0xa");
+        assert!(matches!(err, Err(GameStateReadError::Malformed(_))));
+    }
+
+    #[test]
+    fn read_helpers_extract_expected_widths() {
+        let mut slot = [0u8; 32];
+        slot[24..32].copy_from_slice(&0xDEAD_BEEF_DEAD_BEEFu64.to_be_bytes());
+        assert_eq!(read_u64_from_slot(&slot), 0xDEAD_BEEF_DEAD_BEEF);
+        slot[16..32].copy_from_slice(&0xCAFE_BABE_DEAD_BEEF_CAFE_BABE_DEAD_BEEFu128.to_be_bytes());
+        assert_eq!(
+            read_u128_from_slot(&slot),
+            0xCAFE_BABE_DEAD_BEEF_CAFE_BABE_DEAD_BEEFu128
+        );
+        let mut bslot = [0u8; 32];
+        bslot[31] = 0;
+        assert!(!read_bool_from_slot(&bslot));
+        bslot[31] = 1;
+        assert!(read_bool_from_slot(&bslot));
+        bslot[31] = 42;
+        assert!(read_bool_from_slot(&bslot));
+    }
+
+    #[test]
+    fn read_address_uses_low_8_bytes() {
+        let mut slot = [0u8; 32];
+        // Right-aligned 20-byte address; only low 8 bytes are read.
+        slot[24..32].copy_from_slice(&0xAA_BB_CC_DD_EE_FF_01_02u64.to_be_bytes());
+        assert_eq!(read_address_as_actor_id(&slot), 0xAA_BB_CC_DD_EE_FF_01_02);
+    }
+
+    #[test]
+    fn games_response_bytes_constant_is_576() {
+        assert_eq!(GAMES_RESPONSE_BYTES, 576);
+        assert_eq!(GAMES_RESPONSE_SLOTS, 18);
+    }
+}

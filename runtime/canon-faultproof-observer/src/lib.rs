@@ -171,6 +171,7 @@ pub mod game;
 pub mod jsonrpc_submitter;
 pub mod observer;
 pub mod persistence;
+pub mod state_reader;
 pub mod strategy;
 pub mod submitter;
 pub mod watcher;
