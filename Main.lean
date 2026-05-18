@@ -298,6 +298,130 @@ def cmdReplayUpTo (logPath : System.FilePath) (idxStr : String)
       IO.println (formatHashHex commit)
       pure 0
 
+/-- Encode a `CellTag` as the canonical `kindIndex || keyA || keyB`
+    triple expected by the off-chain `CellProof` consumer.
+    `keyA` and `keyB` are `u128`-shaped fields in the on-wire
+    Solidity `CellProof` struct; we encode them as hex strings
+    (32 chars each = 16 bytes) so the JSON envelope is
+    machine-parseable.  Keys not used by the tag (e.g.,
+    `bridgeNextWdId` has no key) are encoded as `0`. -/
+def formatCellTag (t : LegalKernel.FaultProof.CellTag) : String × String × String :=
+  let toHexU64 (n : Nat) : String :=
+    let lo : Nat := n % (1 <<< 64)
+    -- 16 hex chars = 8 bytes; left-padded with '0'.
+    let raw := Nat.toDigits 16 lo
+    let pad := List.replicate (16 - raw.length) '0'
+    String.ofList (pad ++ raw)
+  let kind := toString t.kindIndex
+  match t with
+  | .balance r a       => (kind, toHexU64 r.toNat, toHexU64 a.toNat)
+  | .nonce a           => (kind, toHexU64 a.toNat, toHexU64 0)
+  | .registry a        => (kind, toHexU64 a.toNat, toHexU64 0)
+  | .localPolicy a     => (kind, toHexU64 a.toNat, toHexU64 0)
+  -- DepositId / WithdrawalId are `Nat` already (per
+  -- Bridge/State.lean), so no `.toNat` projection.
+  | .bridgeConsumed d  => (kind, toHexU64 d, toHexU64 0)
+  | .bridgePending w   => (kind, toHexU64 w, toHexU64 0)
+  | .bridgeNextWdId    => (kind, toHexU64 0, toHexU64 0)
+
+/-- Format a `CellProof` as a single line of JSON suitable for
+    the off-chain `canon-faultproof-observer`'s consumer.
+    Layout:
+    ```
+    {"kind":N,"keyA":"HEX","keyB":"HEX","cellValue":"HEX","witnessCommit":"HEX"}
+    ```
+    The `witnessCommit` field is `commitExtendedState(p.witnessState)`
+    — the verifier-supplied commit that must match the
+    `preStateCommit` in `terminateOnSingleStep`. -/
+def formatCellProofJson (p : LegalKernel.FaultProof.CellProof) : String :=
+  let (kind, keyA, keyB) := formatCellTag p.cellTag
+  let cellValHex :=
+    p.cellValue.toList.foldl
+      (fun acc b =>
+        let hi := b.toNat / 16
+        let lo := b.toNat % 16
+        let toChar (n : Nat) : Char :=
+          if n < 10 then Char.ofNat (n + 48)
+                   else Char.ofNat (n - 10 + 97)
+        acc ++ String.ofList [toChar hi, toChar lo])
+      ""
+  let commit := LegalKernel.FaultProof.commitExtendedState p.witnessState
+  let commitHex := formatHashHex commit
+  -- JSON line builder.  String.append used directly to keep
+  -- the literal quotes out of the s!"..." parser.
+  let q := "\""
+  let parts : List String := [
+    "{", q ++ "kind" ++ q, ":", kind, ",",
+    q ++ "keyA" ++ q, ":", q ++ keyA ++ q, ",",
+    q ++ "keyB" ++ q, ":", q ++ keyB ++ q, ",",
+    q ++ "cellValue" ++ q, ":", q ++ cellValHex ++ q, ",",
+    q ++ "witnessCommit" ++ q, ":", q ++ commitHex ++ q,
+    "}"
+  ]
+  String.join parts
+
+/-- Subcommand: `canon export-cell-proofs LOG IDX SIGNER`.
+
+    Replays the log prefix `entries[0..idx]` to obtain the
+    pre-state for the action at log index `idx`, decodes that
+    action (via `entries[idx]`), and emits the cell-proof bundle
+    for that action's required cells.
+
+    Output: a JSON array of cell-proof objects, one per line in
+    the bundle, terminated by a closing `]`.  The off-chain
+    observer's [`canon_faultproof_observer::submitter::CellProof`]
+    type consumes this format.
+
+    Exit codes:
+    * 0 — success.
+    * 1 — log parse error.
+    * 2 — idx out of range or signer not a Nat. -/
+def cmdExportCellProofs (logPath : System.FilePath) (idxStr : String)
+    (signerStr : String) (deploymentId : ByteArray := ByteArray.empty) :
+    IO UInt32 := do
+  let _ := deploymentId
+  match idxStr.toNat?, signerStr.toNat? with
+  | none, _ =>
+    IO.eprintln s!"canon export-cell-proofs: idx '{idxStr}' is not a Nat"
+    pure 2
+  | _, none =>
+    IO.eprintln s!"canon export-cell-proofs: signer '{signerStr}' is not a Nat"
+    pure 2
+  | some idx, some signerNat =>
+    let (entries, _, frameErr?) ← readAllEntries logPath
+    if let some err := frameErr? then
+      IO.eprintln s!"warning: log has partial tail ({repr err})"
+    if idx >= entries.length then
+      IO.eprintln
+        s!"canon export-cell-proofs: idx {idx} >= log length {entries.length}"
+      pure 2
+    else
+      let prefix_ := entries.take idx
+      let preState := LegalKernel.Disputes.kernelOnlyReplay demoGenesis prefix_
+      -- `Inhabited LogEntry` is not derived; use `Option`
+      -- accessor + match to defend.  The `idx < entries.length`
+      -- guard above ensures `entries[idx]?` is `some`.
+      match entries[idx]? with
+      | none =>
+        IO.eprintln "canon export-cell-proofs: internal error (idx within bounds but list access failed)"
+        pure 1
+      | some entry =>
+        let action := entry.signedAction.action
+        -- ActorId = UInt64 abbreviation (per Kernel.lean:51).
+        let signer : ActorId :=
+          UInt64.ofNat (signerNat % (1 <<< 64))
+        let bundle :=
+          LegalKernel.FaultProof.Observer.buildObserverCellProofs preState action signer
+        -- Emit as a JSON array.
+        IO.println "["
+        let mut first := true
+        for p in bundle.proofs do
+          let leadIn := if first then "  " else ", "
+          IO.println s!"{leadIn}{formatCellProofJson p}"
+          first := false
+        IO.println "]"
+        pure 0
+
 /-- Format a `WithdrawalProof` as a hex-encoded summary string —
     leaf bytes + index + 64 sibling hashes.  Suitable for piping to
     a Solidity test driver via stdout. -/
@@ -349,6 +473,7 @@ def cmdHelp : IO UInt32 := do
   IO.println "  canon [GLOBAL_FLAGS] snapshot         LOG SNAP_PATH"
   IO.println "  canon [GLOBAL_FLAGS] withdrawal-proof SNAP_PATH ID"
   IO.println "  canon [GLOBAL_FLAGS] replay-up-to      LOG IDX"
+  IO.println "  canon [GLOBAL_FLAGS] export-cell-proofs LOG IDX SIGNER"
   IO.println "  canon help"
   IO.println ""
   IO.println "Global flags:"
@@ -364,6 +489,7 @@ def cmdHelp : IO UInt32 := do
   IO.println "  SNAP_PATH path to write or read the snapshot file."
   IO.println "  ID        a `WithdrawalId` (Nat) to look up in the snapshot."
   IO.println "  IDX       a `LogIndex` (Nat) for the replay-up-to subcommand."
+  IO.println "  SIGNER    an `ActorId` (Nat) for the export-cell-proofs subcommand."
   IO.println ""
   IO.println "See docs/abi.md for the on-disk and on-wire byte layouts."
   pure 0
@@ -465,6 +591,10 @@ def main (args : List String) : IO UInt32 := do
     warnIfFallbackHash allowFallbackHash
     warnIfNoDeploymentId depId?
     cmdReplayUpTo (System.FilePath.mk log) idxStr depId
+  | ["export-cell-proofs", log, idxStr, signerStr] => do
+    warnIfFallbackHash allowFallbackHash
+    warnIfNoDeploymentId depId?
+    cmdExportCellProofs (System.FilePath.mk log) idxStr signerStr depId
   | _ => do
     IO.eprintln "canon: unrecognised arguments; try `canon help`."
     pure 2
