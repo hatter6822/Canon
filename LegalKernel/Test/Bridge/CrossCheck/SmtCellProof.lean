@@ -262,10 +262,12 @@ structure CrossStackUInt64 where
   value : UInt64
 
 /-- `Encodable` instance for `CrossStackUInt64`: 8 big-endian
-    bytes on encode.  `decode` is a placeholder that the SMT
-    cell-proof machinery never invokes (only `encode` is used
-    by `leafHash` / `smtRoot` / `verifySmtCellProof`); the
-    decoder shape exists only to satisfy the typeclass. -/
+    bytes on encode (matching `uint64ToBytesBE`).  `decode`
+    reads 8 BE bytes and reconstructs the wrapper; though
+    correct, it is never invoked by the SMT cell-proof
+    machinery (`leafHash` / `smtRoot` / `verifySmtCellProof`
+    all consume `encode` only).  The decoder is supplied for
+    typeclass completeness. -/
 instance instEncodableCrossStackUInt64 :
     LegalKernel.Encoding.Encodable CrossStackUInt64 where
   encode x := (uint64ToBytesBE x.value).toList
