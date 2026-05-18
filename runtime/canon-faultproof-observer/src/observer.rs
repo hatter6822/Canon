@@ -292,6 +292,32 @@ impl<S: L1Source, Sub: Submitter, T: TruthOracle> Observer<S, Sub, T> {
     /// causes the observer to silently skip events.  Use with
     /// care and document operator decisions in your runbook.
     pub fn set_start_block(&mut self, block: u64) {
+        // Defensive validation: if a persisted cursor already
+        // exists, warn when the override moves it BACKWARD
+        // (re-processes events — usually intentional but
+        // operator might typo) or way FORWARD (skips events —
+        // usually a bug).  We don't BLOCK either; the operator
+        // is explicitly opting in via the flag.
+        if let Some(existing) = self.watcher.last_confirmed_block() {
+            if block < existing {
+                warn!(
+                    persisted_cursor = existing,
+                    start_block = block,
+                    "--start-block moves cursor BACKWARD; the observer will re-process \
+                     events from this block forward (idempotent at the event-dispatch \
+                     boundary, but verify this is intentional)",
+                );
+            } else if block > existing.saturating_add(1_000_000) {
+                warn!(
+                    persisted_cursor = existing,
+                    start_block = block,
+                    skip_distance = block.saturating_sub(existing),
+                    "--start-block JUMPS FORWARD by more than 1M blocks; the observer \
+                     will silently SKIP all events between the persisted cursor and \
+                     the override; verify this is intentional",
+                );
+            }
+        }
         self.watcher.set_last_confirmed(Some(block));
     }
 

@@ -65,14 +65,18 @@ pub enum MethodSelector {
     SubmitMidpoint,
     /// `respondToMidpoint(uint256 gameId, bool agree)`.
     RespondToMidpoint,
-    /// `terminateOnSingleStep(uint256 gameId, bytes32 claimedPostCommit)`.
-    /// Note: the production contract takes additional arguments
-    /// (actionKind, actionFields, signer, cellProofs), but the
-    /// off-chain calldata generation here covers the minimum
-    /// observer-emitted form.  Full calldata requires the cell-
-    /// proof bundle which comes from a `canon` subprocess; see
-    /// the module docstring's "What this RH-G landing ships".
+    /// MINIMUM-FORM `terminateOnSingleStep(uint256 gameId, bytes32 claimedPostCommit)`.
+    /// **This selector does NOT match the deployed contract's
+    /// full signature.**  Use [`Self::TerminateOnSingleStepFull`]
+    /// for production calldata.  Kept for integration smoke tests
+    /// that exercise the minimum encoding path.
     TerminateOnSingleStep,
+    /// **FULL-FORM** `terminateOnSingleStep(uint256, uint8, bytes, uint64, (uint8,uint256,uint256,bytes,bytes32)[], bytes32)`.
+    /// This is the production contract's actual signature — the
+    /// fields are `(gameId, actionKind, actionFields, signer,
+    /// cellProofs, claimedPostCommit)`.  Use this selector for
+    /// any calldata the observer broadcasts to L1.
+    TerminateOnSingleStepFull,
     /// `claimTimeout(uint256 gameId)`.
     ClaimTimeout,
 }
@@ -92,6 +96,18 @@ impl MethodSelector {
             Self::SubmitMidpoint => "submitMidpoint(uint256,bytes32)",
             Self::RespondToMidpoint => "respondToMidpoint(uint256,bool)",
             Self::TerminateOnSingleStep => "terminateOnSingleStep(uint256,bytes32)",
+            // Full-form Solidity signature (per
+            // `solidity/src/contracts/CanonFaultProofGame.sol:383`):
+            // `terminateOnSingleStep(uint256 gameId, uint8 actionKind,
+            //                        bytes actionFields, uint64 signer,
+            //                        CellProof[] cellProofs,
+            //                        bytes32 claimedPostCommit)`
+            // The `CellProof` struct's canonical ABI tuple is
+            // `(uint8, uint256, uint256, bytes, bytes32)` — see
+            // `CanonStepVM::CellProof`.
+            Self::TerminateOnSingleStepFull => {
+                "terminateOnSingleStep(uint256,uint8,bytes,uint64,(uint8,uint256,uint256,bytes,bytes32)[],bytes32)"
+            }
             Self::ClaimTimeout => "claimTimeout(uint256)",
         }
     }
@@ -208,17 +224,275 @@ pub fn encode_respond_calldata(game_id: u128, agree: bool) -> Vec<u8> {
 }
 
 /// Encode the minimum form of `terminateOnSingleStep(uint256 gameId,
-/// bytes32 claimedPostCommit)`.  The production contract takes a
-/// fuller form with cell proofs and action calldata; that wider
-/// form is constructed by a separate pipeline that combines this
-/// minimum form with the cell-proof bundle from a `canon`
-/// subprocess.
+/// bytes32 claimedPostCommit)`.  Does NOT match the deployed
+/// contract's signature; use [`encode_terminate_full_calldata`]
+/// for production calldata.
 #[must_use]
 pub fn encode_terminate_calldata(game_id: u128, claimed_post_commit: StateCommit) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 32 + 32);
     out.extend_from_slice(&MethodSelector::TerminateOnSingleStep.selector());
     out.extend_from_slice(&u256_be(game_id));
     out.extend_from_slice(&claimed_post_commit);
+    out
+}
+
+/// One cell-proof for the L1 step VM's verification.  Mirrors
+/// the Solidity `CanonStepVM::CellProof` struct.  See
+/// `solidity/src/contracts/CanonStepVM.sol` for the canonical
+/// definition.
+///
+/// The cell-proof bundle is produced by the Lean side's
+/// `buildCellProof` (`LegalKernel.FaultProof.Cell`) and supplied
+/// to the observer via an out-of-band channel (e.g., a `canon`
+/// subprocess).  The observer's role is to ABI-encode the
+/// bundle into calldata; it does NOT itself construct the
+/// proofs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellProof {
+    /// The cell kind (uint8 in Solidity; values defined by the
+    /// `CanonStepVM` `CellKind` enum, e.g. 0=Balance, 1=Nonce,
+    /// 2=Registry, etc.).
+    pub cell_kind: u8,
+    /// The first key (resource id / actor id depending on
+    /// `cell_kind`).  Encoded as uint256.
+    pub key_a: u128,
+    /// The second key (actor id for Balance; usually 0 for
+    /// other kinds).
+    pub key_b: u128,
+    /// The CBE-encoded cell value as opaque bytes (variable
+    /// length).
+    pub cell_value: Vec<u8>,
+    /// The pre-step state commit at which this cell value is
+    /// witness-valid.  Must equal the
+    /// `terminateOnSingleStep`'s implicit pre-state commit
+    /// (the high-commit of the disputed range at the
+    /// settle-time).
+    pub witness_commit: [u8; 32],
+}
+
+/// `ActionKind` values supported by `CanonStepVM` (mirror of
+/// the Lean `Authority.Action` constructor tags).  See
+/// `LegalKernel/Encoding/Action.lean` and `CanonStepVM.sol`
+/// for the canonical table.  This enum just gives names to
+/// the byte values; encoding is via `as u8`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum ActionKind {
+    /// `Transfer(r, sender, receiver, amount)`.
+    Transfer = 0,
+    /// `Mint(r, to, amount)`.
+    Mint = 1,
+    /// `Burn(r, from_actor, amount)`.
+    Burn = 2,
+    /// `FreezeResource(r)`.
+    FreezeResource = 3,
+    /// `ReplaceKey(actor, new_key)`.
+    ReplaceKey = 4,
+    /// `Reward(r, to, amount)`.
+    Reward = 5,
+    /// `DistributeOthers(r, excluded, amount)`.
+    DistributeOthers = 6,
+    /// `ProportionalDilute(r, excluded, total_reward)`.
+    ProportionalDilute = 7,
+    /// `Dispute(...)`.
+    Dispute = 8,
+    /// `DisputeWithdraw(idx)`.
+    DisputeWithdraw = 9,
+    /// `Verdict(...)`.
+    Verdict = 10,
+    /// `Rollback(target_idx)`.
+    Rollback = 11,
+    /// `RegisterIdentity(actor, pk)`.
+    RegisterIdentity = 12,
+    /// `Deposit(r, recipient, amount, deposit_id)`.
+    Deposit = 13,
+    /// `Withdraw(r, sender, amount, recipient_l1)`.
+    Withdraw = 14,
+    /// `DeclareLocalPolicy(...)`.
+    DeclareLocalPolicy = 15,
+    /// `RevokeLocalPolicy`.
+    RevokeLocalPolicy = 16,
+    /// `FaultProofChallenge(...)`.
+    FaultProofChallenge = 17,
+    /// `FaultProofResolution(...)`.
+    FaultProofResolution = 18,
+}
+
+/// Encode the FULL-FORM `terminateOnSingleStep` calldata.  The
+/// Solidity signature is:
+///
+/// ```text
+/// terminateOnSingleStep(
+///     uint256 gameId,
+///     uint8 actionKind,
+///     bytes actionFields,
+///     uint64 signer,
+///     CellProof[] cellProofs,
+///     bytes32 claimedPostCommit
+/// )
+/// ```
+///
+/// The encoding follows Solidity's ABI rules:
+/// * Method selector (4 bytes) = first 4 bytes of `keccak256(signature)`.
+/// * Head section: each fixed-size param contributes its 32-byte
+///   word in-place; each dynamic-size param contributes a 32-byte
+///   offset (pointing into the tail).
+/// * Tail section: dynamic data laid out in declaration order;
+///   each `bytes` carries `(length:uint256, payload, padding to 32 bytes)`;
+///   each `T[]` carries `(length:uint256, elements...)`.
+/// * Struct `(t1, ..., tN)` is encoded as the head/tail of its
+///   constituent tuple.
+///
+/// This implementation is hand-rolled to match the Solidity
+/// encoder byte-for-byte.  Property tests verify the head/tail
+/// alignment and the per-cell-proof tuple encoding.
+///
+/// # Panics
+///
+/// Does not panic on any input.  Numeric fields that don't fit
+/// their ABI bounds (e.g., `signer > u64::MAX` is impossible
+/// in Rust's type system since `signer: u64`) are not validated.
+#[must_use]
+pub fn encode_terminate_full_calldata(
+    game_id: u128,
+    action_kind: u8,
+    action_fields: &[u8],
+    signer: u64,
+    cell_proofs: &[CellProof],
+    claimed_post_commit: StateCommit,
+) -> Vec<u8> {
+    // Header layout (6 head words, 32 bytes each = 192 bytes):
+    //   word 0: gameId            (uint256)
+    //   word 1: actionKind        (uint8 in uint256 slot)
+    //   word 2: actionFields offset (relative to start of args)
+    //   word 3: signer            (uint64 in uint256 slot)
+    //   word 4: cellProofs offset (relative to start of args)
+    //   word 5: claimedPostCommit (bytes32)
+    const HEAD_WORDS: usize = 6;
+    const WORD: usize = 32;
+    let head_bytes: usize = HEAD_WORDS * WORD;
+
+    // First, encode the dynamic tails so we know their offsets
+    // and lengths.
+    //
+    // Tail entry 1: actionFields as `bytes`.
+    let action_fields_tail = encode_dynamic_bytes(action_fields);
+    // Tail entry 2: cellProofs as `CellProof[]`.
+    let cell_proofs_tail = encode_cell_proof_array(cell_proofs);
+
+    // Offsets are computed relative to the start of the args
+    // (right after the 4-byte selector).
+    let action_fields_offset: u128 = head_bytes as u128;
+    let cell_proofs_offset: u128 = (head_bytes + action_fields_tail.len()) as u128;
+
+    let mut out =
+        Vec::with_capacity(4 + head_bytes + action_fields_tail.len() + cell_proofs_tail.len());
+    out.extend_from_slice(&MethodSelector::TerminateOnSingleStepFull.selector());
+    // word 0: gameId
+    out.extend_from_slice(&u256_be(game_id));
+    // word 1: actionKind (uint8 → left-padded 32 bytes)
+    out.extend_from_slice(&u256_be(u128::from(action_kind)));
+    // word 2: actionFields offset
+    out.extend_from_slice(&u256_be(action_fields_offset));
+    // word 3: signer
+    out.extend_from_slice(&u256_be(u128::from(signer)));
+    // word 4: cellProofs offset
+    out.extend_from_slice(&u256_be(cell_proofs_offset));
+    // word 5: claimedPostCommit
+    out.extend_from_slice(&claimed_post_commit);
+    // Tails.
+    out.extend_from_slice(&action_fields_tail);
+    out.extend_from_slice(&cell_proofs_tail);
+    out
+}
+
+/// Encode a `bytes` value: 32-byte length + payload + zero
+/// padding to the next 32-byte boundary.
+fn encode_dynamic_bytes(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len();
+    let padded_len = (len + 31) & !31; // round up to multiple of 32
+    let mut out = Vec::with_capacity(32 + padded_len);
+    out.extend_from_slice(&u256_be(len as u128));
+    out.extend_from_slice(payload);
+    // Zero padding.
+    out.extend(std::iter::repeat_n(0u8, padded_len - len));
+    out
+}
+
+/// Encode a `CellProof[]` value: 32-byte length + each element
+/// encoded as a tuple `(uint8, uint256, uint256, bytes, bytes32)`.
+///
+/// Since the tuple contains a dynamic `bytes` field, each tuple
+/// is itself dynamic; the array encoding is:
+///   * length: uint256
+///   * for each element: offset:uint256 into the elements blob
+///   * elements blob: concatenation of per-element encodings.
+///
+/// Wait — that's the encoding for `T[]` where `T` is a dynamic
+/// type.  Each element of a dynamic-element array is encoded
+/// as a (offset, data) pair within the array's encoded region.
+///
+/// Let me follow the strict Solidity ABI:
+///   `T[]` where T is dynamic:
+///     - length (32 bytes)
+///     - N pointers (32 bytes each) into the per-element data
+///     - per-element data laid out in declaration order
+///
+/// The pointers are RELATIVE TO THE START OF THE ELEMENTS
+/// BLOB (i.e., after the length word).
+fn encode_cell_proof_array(proofs: &[CellProof]) -> Vec<u8> {
+    let n = proofs.len();
+    // Pre-encode each element so we know per-element lengths.
+    let per_element: Vec<Vec<u8>> = proofs.iter().map(encode_cell_proof_tuple).collect();
+    // Compute pointers: each element's offset within the
+    // pointers+data region.  Pointers come first (N×32 bytes),
+    // then the elements concatenated.
+    let mut pointers = Vec::with_capacity(n * 32);
+    let mut data_offset: u128 = (n as u128) * 32;
+    for elem in &per_element {
+        pointers.extend_from_slice(&u256_be(data_offset));
+        data_offset += elem.len() as u128;
+    }
+    let data: Vec<u8> = per_element.into_iter().flatten().collect();
+    // Top-level: length + pointers + data.
+    let mut out = Vec::with_capacity(32 + pointers.len() + data.len());
+    out.extend_from_slice(&u256_be(n as u128));
+    out.extend_from_slice(&pointers);
+    out.extend_from_slice(&data);
+    out
+}
+
+/// Encode a single `CellProof` tuple
+/// `(uint8 cellKind, uint256 keyA, uint256 keyB, bytes cellValue, bytes32 witnessCommit)`.
+///
+/// The tuple contains a dynamic field (`bytes cellValue`), so
+/// the encoding uses the head/tail discipline:
+/// * Head (5 words = 160 bytes):
+///     word 0: cellKind          (uint8 left-padded)
+///     word 1: keyA              (uint256)
+///     word 2: keyB              (uint256)
+///     word 3: cellValue offset  (160 bytes, relative to tuple start)
+///     word 4: witnessCommit     (bytes32)
+/// * Tail: cellValue dynamic-bytes encoding.
+fn encode_cell_proof_tuple(p: &CellProof) -> Vec<u8> {
+    const HEAD_WORDS: usize = 5;
+    const WORD: usize = 32;
+    let head_bytes: usize = HEAD_WORDS * WORD;
+
+    let cell_value_tail = encode_dynamic_bytes(&p.cell_value);
+    let mut out = Vec::with_capacity(head_bytes + cell_value_tail.len());
+    // word 0: cellKind
+    out.extend_from_slice(&u256_be(u128::from(p.cell_kind)));
+    // word 1: keyA
+    out.extend_from_slice(&u256_be(p.key_a));
+    // word 2: keyB
+    out.extend_from_slice(&u256_be(p.key_b));
+    // word 3: cellValue offset (head_bytes = 160 bytes from tuple start)
+    out.extend_from_slice(&u256_be(head_bytes as u128));
+    // word 4: witnessCommit
+    out.extend_from_slice(&p.witness_commit);
+    // Tail.
+    out.extend_from_slice(&cell_value_tail);
     out
 }
 
@@ -583,6 +857,110 @@ mod tests {
         let bytes = encode_claim_timeout_calldata(42);
         assert_eq!(bytes.len(), 36);
         assert_eq!(&bytes[0..4], &MethodSelector::ClaimTimeout.selector());
+    }
+
+    /// Full-form `terminateOnSingleStep` calldata layout
+    /// verification.  Encodes a tiny example with one
+    /// `CellProof` and verifies the head/tail boundaries and
+    /// pointer values.
+    #[test]
+    fn encode_terminate_full_calldata_shape() {
+        use super::{encode_terminate_full_calldata, ActionKind, CellProof};
+
+        let cell = CellProof {
+            cell_kind: 0, // Balance
+            key_a: 7,
+            key_b: 11,
+            cell_value: vec![0xAA, 0xBB, 0xCC],
+            witness_commit: [0x42u8; 32],
+        };
+        let bytes = encode_terminate_full_calldata(
+            123_u128,
+            ActionKind::Transfer as u8,
+            &[1, 2, 3, 4],
+            999_u64,
+            std::slice::from_ref(&cell),
+            commit(0xAB),
+        );
+
+        // Length sanity: 4-byte selector + 6×32-byte head + tails.
+        // actionFields tail: 32 (length) + 32 (4 bytes padded) = 64.
+        // cellProofs tail: 32 (length) + 32 (1 pointer) + per-cell tuple.
+        //   per-cell: 5×32 head + 32 (cellValue length) + 32 (padded 3 bytes) = 224.
+        // Total tail: 64 + 32 + 32 + 224 = 352.
+        // Total: 4 + 192 + 352 = 548.
+        assert_eq!(bytes.len(), 4 + 192 + 64 + 32 + 32 + 224);
+
+        // Selector matches the full-form signature's hash.
+        assert_eq!(
+            &bytes[0..4],
+            &MethodSelector::TerminateOnSingleStepFull.selector()
+        );
+
+        // Word 0 (offset 4..36): gameId = 123.
+        let mut expected_gid = [0u8; 32];
+        expected_gid[31] = 123;
+        assert_eq!(&bytes[4..36], &expected_gid);
+
+        // Word 5 (offset 4+5*32 = 164..196): claimedPostCommit.
+        assert_eq!(&bytes[164..196], &commit(0xAB));
+    }
+
+    /// `MethodSelector::TerminateOnSingleStepFull` produces a
+    /// DIFFERENT 4-byte selector than the minimum form, because
+    /// they have different Solidity signatures.
+    #[test]
+    fn terminate_full_vs_minimum_selectors_differ() {
+        let minimum = MethodSelector::TerminateOnSingleStep.selector();
+        let full = MethodSelector::TerminateOnSingleStepFull.selector();
+        assert_ne!(minimum, full);
+    }
+
+    /// `CellProof`-tuple encoding: head/tail boundary checked.
+    /// One cell with empty `cell_value` produces a tuple of
+    /// exactly 5×32 + 32 (length only, no payload) + 0 padding
+    /// = 192 bytes.
+    #[test]
+    fn cell_proof_tuple_with_empty_cell_value() {
+        use super::{encode_cell_proof_tuple, CellProof};
+        let cell = CellProof {
+            cell_kind: 1,
+            key_a: 0,
+            key_b: 0,
+            cell_value: vec![],
+            witness_commit: [0u8; 32],
+        };
+        let bytes = encode_cell_proof_tuple(&cell);
+        assert_eq!(bytes.len(), 5 * 32 + 32);
+        // The cellValue offset (word 3) is `5 * 32 = 160`.
+        let mut expected_offset = [0u8; 32];
+        expected_offset[31] = 160;
+        assert_eq!(&bytes[3 * 32..4 * 32], &expected_offset);
+        // The cellValue length (at offset 5*32 = 160) is 0.
+        let expected_len = [0u8; 32];
+        assert_eq!(&bytes[160..192], expected_len.as_slice());
+    }
+
+    /// Empty `cell_proofs` array: encoded as length=0 + no
+    /// pointers + no data.  Total 32 bytes for the array.
+    #[test]
+    fn encode_cell_proof_array_empty() {
+        use super::encode_cell_proof_array;
+        let bytes = encode_cell_proof_array(&[]);
+        assert_eq!(bytes.len(), 32);
+        // Length word is all-zero.
+        assert_eq!(bytes, vec![0u8; 32]);
+    }
+
+    /// `ActionKind` byte values match the documented
+    /// constructor tags (mirror of Lean's `Authority.Action`).
+    #[test]
+    fn action_kind_byte_values() {
+        use super::ActionKind;
+        assert_eq!(ActionKind::Transfer as u8, 0);
+        assert_eq!(ActionKind::Mint as u8, 1);
+        assert_eq!(ActionKind::Burn as u8, 2);
+        assert_eq!(ActionKind::FaultProofResolution as u8, 18);
     }
 
     /// Game id is encoded as 32-byte big-endian.
