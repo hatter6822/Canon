@@ -164,12 +164,12 @@ submissions off-chain until the SMT path is shipped"
 ### SC.2 closeout (post-landing)
 
   * **Module:** `solidity/src/lib/SmtCellVerifier.sol` (new,
-    ~390 lines) + `solidity/src/lib/StepVMMerkle.sol`
+    ~410 lines) + `solidity/src/lib/StepVMMerkle.sol`
     (refactor: new `verifyCellSmtProof` thin wrapper +
     deferral marker retired) + `solidity/script/
     ComputeEmptyHashes.s.sol` (new audit script, ~65 lines).
-  * **Tests:** `solidity/test/SmtCellVerifier.t.sol` (~1090
-    lines) ships 49 unit tests + 3 gas-snapshot tests + 2
+  * **Tests:** `solidity/test/SmtCellVerifier.t.sol` (~1270
+    lines) ships 54 unit tests + 3 gas-snapshot tests + 2
     property/fuzz tests (256 runs each), covering:
       - **Empty-subtree hashes.**  `H_0 = keccak256("EMPTY_LEAF")`;
         recursive `H_{d+1} = keccak256(H_d || H_d)` invariant
@@ -237,6 +237,31 @@ submissions off-chain until the SMT path is shipped"
       - **Deepest-depth coverage.**  Bit 255 reads (LSB of
         byte 31 for bitmask; LSB of byte 31 for key) at the
         bottom of the walk.
+      - **Empty leaf preimage.**  `keccak256("")` is well-
+        defined; verifier accepts and self-verifies.
+      - **Proof equivalence.**  Two semantically equivalent
+        proofs walk to the same root: (a) bitmask bit d unset
+        (implicit canonical empty) vs (b) bitmask bit d set
+        with the supplied sibling explicitly equal to `H_d`.
+        The verifier doesn't enforce canonical proof form.
+      - **Mixed bit pattern.**  Bitmask `0xAA` per byte
+        (alternating bits) with 128 supplied siblings
+        interleaved with canonical empties; tampering any
+        single sibling rejects.
+      - **Exhaustive bit-position coverage.**  For each of
+        the 256 bit positions, a key (and a bitmask) with
+        only that bit set has `readKeyBitMSBFirst(key, d) ==
+        1` (or `readBitmaskBit(bitmask, d) == 1`) and the
+        neighbors read 0.  Validates the per-byte bit-
+        ordering correspondence at every depth.
+      - **`EMPTY_LEAF_SEED` byte-encoding lock-in.**  Asserts
+        `H_0 == keccak256(hex"454D5054595F4C454146")` and
+        also `keccak256("EMPTY_LEAF") == keccak256(bytes)`;
+        defends against a future compiler / language change
+        that altered string-literal encoding.
+      - **Typed error coverage.**  `emptySubtreeHash(256)`
+        and `emptySubtreeHash(type(uint256).max)` revert with
+        the typed `SmtCellDepthOutOfRange` error.
   * **API surface.**
     - `SmtCellVerifier.emptySubtreeHash(uint256 d) → bytes32` —
       O(d) keccak per call.  For tests / fixtures.

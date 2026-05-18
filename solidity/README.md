@@ -48,7 +48,7 @@ solidity/
                                     MockERC20.sol
 ```
 
-Total: **~394 forge tests across 26 suites** (per-suite counts in
+Total: **~401 forge tests across 26 suites** (per-suite counts in
 each `*.t.sol`). A subset is conditionally skipped when the
 production keccak256 binding is not linked (the cross-check
 suites probe `isKeccak256Linked` on the Lean side and skip on

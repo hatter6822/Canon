@@ -125,17 +125,19 @@ library SmtCellVerifier {
     ///         single `bytes32` accumulator that advances in lockstep
     ///         with the walk.
     ///
-    ///         Reverts if `d >= 256`.  Lean's `emptySubtreeHash`
-    ///         returns `ByteArray.empty` (zero length) on out-of-range
-    ///         indices; this Solidity port reverts instead because
-    ///         no in-bounds caller has a legitimate reason to pass
-    ///         `d >= 256` and silently returning a different shape
-    ///         would mask a caller bug.
+    ///         Reverts with `SmtCellDepthOutOfRange` if `d >= 256`.
+    ///         Lean's `emptySubtreeHash` returns `ByteArray.empty`
+    ///         (zero length) on out-of-range indices; this Solidity
+    ///         port reverts instead because no in-bounds caller has
+    ///         a legitimate reason to pass `d >= 256` and silently
+    ///         returning a different shape would mask a caller bug.
     ///
     /// @param  d  the depth (must be in [0, 256)).
     /// @return h  the canonical empty-subtree hash at depth `d`.
     function emptySubtreeHash(uint256 d) internal pure returns (bytes32 h) {
-        require(d < SMT_DEPTH, "SmtCellVerifier: depth out of range");
+        if (d >= SMT_DEPTH) {
+            revert SmtCellDepthOutOfRange(d);
+        }
         h = keccak256(EMPTY_LEAF_SEED);
         unchecked {
             for (uint256 i = 0; i < d; ++i) {
@@ -240,10 +242,19 @@ library SmtCellVerifier {
     ///           * `SmtCellSiblingsMisaligned` — siblings region not a
     ///             multiple of 32 bytes.
     ///
-    /// @param  smtKey         the SMT key (MSB-first bit reads).
+    /// @param  smtKey         the SMT key.  Read MSB-first per byte for
+    ///                        path determination.  Any length is
+    ///                        accepted; bits past `smtKey.length * 8`
+    ///                        return 0 (matches Lean's
+    ///                        `BitsKey.keyBit` for shorter keys).
+    ///                        For 256-bit hash-bucketed keys, pass a
+    ///                        32-byte value.  Bytes 32+ are silently
+    ///                        ignored.
     /// @param  leafPreimage   bytes hashed to produce the leaf node;
     ///                        Lean spec: `Encodable.encode key ++
-    ///                        Encodable.encode value`.
+    ///                        Encodable.encode value`.  An empty
+    ///                        preimage produces `keccak256(0x)`, which
+    ///                        is well-defined but unusual.
     /// @param  proofData      the wire-encoded proof:
     ///                        `bitmask(32) || siblings(N x 32)`.
     /// @return root           the reconstructed root candidate.
@@ -352,6 +363,9 @@ library SmtCellVerifier {
     ///         of `proofData` is not a multiple of 32 bytes.
     error SmtCellSiblingsMisaligned(uint256 siblingsRegionLength);
 
+    /// @notice Reverted by `emptySubtreeHash` when `d >= 256`.
+    error SmtCellDepthOutOfRange(uint256 depth);
+
     /* ---------------------------------------------------------- */
     /* Internal helpers                                           */
     /* ---------------------------------------------------------- */
@@ -380,11 +394,17 @@ library SmtCellVerifier {
     ///
     /// @dev    Uses `calldataload` for a direct 32-byte read from
     ///         calldata; avoids a `bytes` slicing allocation.
+    ///         `idx * HASH_BYTES` is wrapped in `unchecked` because
+    ///         `idx` is bounded by `siblingsCount <= proofData.length
+    ///         / 32`, which is bounded by the EVM block gas limit
+    ///         (well under `type(uint256).max / 32`).
     function _readSiblingAt(bytes calldata siblings, uint256 idx) private pure returns (bytes32 s) {
-        uint256 offset = idx * HASH_BYTES;
-        /// @solidity memory-safe-assembly
-        assembly {
-            s := calldataload(add(siblings.offset, offset))
+        unchecked {
+            uint256 offset = idx * HASH_BYTES;
+            /// @solidity memory-safe-assembly
+            assembly {
+                s := calldataload(add(siblings.offset, offset))
+            }
         }
     }
 }

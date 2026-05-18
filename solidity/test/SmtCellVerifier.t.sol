@@ -112,8 +112,19 @@ contract SmtCellVerifierTest is Test {
     }
 
     function test_emptySubtreeHash_reverts_on_out_of_range() public {
-        vm.expectRevert(bytes("SmtCellVerifier: depth out of range"));
+        vm.expectRevert(
+            abi.encodeWithSelector(SmtCellVerifier.SmtCellDepthOutOfRange.selector, uint256(256))
+        );
         smt.emptySubtreeHash(256);
+    }
+
+    function test_emptySubtreeHash_reverts_on_large_d() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SmtCellVerifier.SmtCellDepthOutOfRange.selector, type(uint256).max
+            )
+        );
+        smt.emptySubtreeHash(type(uint256).max);
     }
 
     function test_precomputeEmptySubtreeHashes_size_and_consistency() public view {
@@ -148,6 +159,21 @@ contract SmtCellVerifierTest is Test {
         for (uint256 d = 0; d < SMT_DEPTH; d += 17) {
             assertTrue(padding != smt.emptySubtreeHash(d), "padding != H_d for some d");
         }
+    }
+
+    /// @notice Lock in the exact byte content of `EMPTY_LEAF_SEED`.
+    ///         The Solidity literal `"EMPTY_LEAF"` should encode to
+    ///         the 10-byte ASCII sequence
+    ///         `0x454D5054595F4C454146`.  Defensive: if a future
+    ///         compiler or language change altered the encoding,
+    ///         `H_0` would diverge from the Lean reference.
+    function test_H0_equals_keccak_of_hex_ascii_EMPTY_LEAF() public view {
+        bytes memory expectedSeed = hex"454D5054595F4C454146";
+        bytes32 h0Expected = keccak256(expectedSeed);
+        assertEq(smt.emptySubtreeHash(0), h0Expected, "H_0 = keccak256(0x45..46)");
+        // Cross-check: confirm the 10-byte hex literal is ASCII "EMPTY_LEAF".
+        assertEq(expectedSeed.length, 10, "EMPTY_LEAF is 10 bytes");
+        assertEq(keccak256("EMPTY_LEAF"), h0Expected, "string vs hex literals agree");
     }
 
     /* ---------------------------------------------------------- */
@@ -992,6 +1018,155 @@ contract SmtCellVerifierTest is Test {
         assertEq(smt.readKeyBitMSBFirst(key, 248), 0, "key[31].bit 7 (MSB) is bit 248, unset");
         assertEq(smt.readKeyBitMSBFirst(keyMSB, 248), 1, "key[31].bit 7 (MSB) set");
         assertEq(smt.readKeyBitMSBFirst(keyMSB, 255), 0, "key[31].bit 0 (LSB) unset");
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Edge cases for leaf preimage                               */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Verifier accepts an empty `leafPreimage`.  The leaf
+    ///         hash becomes `keccak256(0x)` (which is well-defined
+    ///         and equals the EIP-191 empty hash).  Self-verifies.
+    function test_empty_leafPreimage_self_verifies() public view {
+        bytes memory smtKey = hex"DEAD";
+        bytes memory leafPreimage = ""; // empty
+        bytes memory proofData = _emptyProofData();
+
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "empty leafPreimage self-verifies"
+        );
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Proof equivalence                                          */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Two semantically-equivalent proofs walk to the same
+    ///         root: (a) bit d unset; (b) bit d set with the
+    ///         sibling explicitly set to `H_d` (the canonical empty
+    ///         at depth d).  The verifier does NOT enforce canonical
+    ///         proof form — any well-formed proof that walks to the
+    ///         correct root verifies.
+    function test_proof_equivalence_explicit_empty_vs_implicit() public view {
+        bytes memory smtKey = hex"000000000000002A";
+        bytes memory leafPreimage = abi.encodePacked(_cbeEncodeUint64(42), _cbeEncodeUint64(100));
+
+        // Proof A: bit 0 unset (canonical empty H_0 used implicitly).
+        bytes memory proofA = _emptyProofData();
+
+        // Proof B: bit 0 set, sibling explicitly = H_0.
+        bytes32 h0 = smt.emptySubtreeHash(0);
+        bytes memory bitmask = new bytes(32);
+        bitmask[0] = 0x01;
+        bytes memory siblings = abi.encodePacked(h0);
+        bytes memory proofB = abi.encodePacked(bitmask, siblings);
+
+        bytes32 rootA = smt.recomputeRoot(smtKey, leafPreimage, proofA);
+        bytes32 rootB = smt.recomputeRoot(smtKey, leafPreimage, proofB);
+        assertEq(rootA, rootB, "implicit-empty == explicit-empty walk");
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Mixed-bit-pattern proof                                    */
+    /* ---------------------------------------------------------- */
+
+    /// @notice Bitmask interleaves set and unset bits in an
+    ///         alternating pattern (0xAA per byte = 0b10101010 = bits
+    ///         1, 3, 5, 7 set per byte).  4 set bits per byte * 32
+    ///         bytes = 128 set bits total.  Proof carries 128
+    ///         siblings; verifier interleaves them with canonical
+    ///         empties.  Self-verifies; tampering any single sibling
+    ///         rejects.
+    function test_mixed_bitpattern_proof_self_verifies_and_tamper_rejects() public view {
+        bytes memory bitmask = new bytes(32);
+        for (uint256 i = 0; i < 32; ++i) {
+            bitmask[i] = 0xAA; // 0b10101010 — bits 1, 3, 5, 7 within byte
+        }
+
+        // 4 set bits per byte * 32 bytes = 128 siblings.
+        uint256 sibCount = 128;
+        bytes memory siblings = new bytes(sibCount * 32);
+        for (uint256 i = 0; i < sibCount; ++i) {
+            bytes32 sib = keccak256(abi.encodePacked("sibling", i));
+            for (uint256 j = 0; j < 32; ++j) {
+                siblings[i * 32 + j] = sib[j];
+            }
+        }
+
+        bytes memory proofData = abi.encodePacked(bitmask, siblings);
+        bytes memory smtKey = hex"000000000000002A";
+        bytes memory leafPreimage = abi.encodePacked(_cbeEncodeUint64(42), _cbeEncodeUint64(100));
+
+        bytes32 root = smt.recomputeRoot(smtKey, leafPreimage, proofData);
+        assertTrue(
+            smt.verifyCellProof(root, smtKey, leafPreimage, proofData),
+            "mixed-pattern proof self-verifies"
+        );
+
+        // Tamper a sibling in the middle of the array (sibling #64).
+        bytes memory tamperedSiblings = new bytes(siblings.length);
+        for (uint256 i = 0; i < siblings.length; ++i) {
+            tamperedSiblings[i] = siblings[i];
+        }
+        tamperedSiblings[64 * 32] = bytes1(uint8(tamperedSiblings[64 * 32]) ^ uint8(0x01));
+        bytes memory tamperedProof = abi.encodePacked(bitmask, tamperedSiblings);
+        assertFalse(
+            smt.verifyCellProof(root, smtKey, leafPreimage, tamperedProof),
+            "mixed-pattern tampered proof rejects"
+        );
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Exhaustive bit-position coverage                           */
+    /* ---------------------------------------------------------- */
+
+    /// @notice For every bit position d in 0..255, a key whose only
+    ///         set bit is d has `readKeyBitMSBFirst(key, d) == 1`
+    ///         and `readKeyBitMSBFirst(key, d') == 0` for d' != d.
+    ///         Exercises the full MSB-first-within-byte map.
+    function test_readKeyBitMSBFirst_exhaustive_single_bit() public view {
+        for (uint256 d = 0; d < 256; ++d) {
+            bytes memory key = new bytes(32);
+            uint256 byteIdx = d / 8;
+            uint256 bitInByte = 7 - (d % 8); // MSB-first; bitInByte in [0, 7]
+            uint256 shifted = uint256(1) << bitInByte; // shifted in [1, 128]
+            // shifted is in [1, 128], so casting to uint8 is safe.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            key[byteIdx] = bytes1(uint8(shifted));
+            assertEq(smt.readKeyBitMSBFirst(key, d), 1, "single-bit key reads 1");
+            // Spot-check that one neighbour is 0.
+            if (d > 0) {
+                assertEq(smt.readKeyBitMSBFirst(key, d - 1), 0, "neighbour 0");
+            }
+            if (d < 255) {
+                assertEq(smt.readKeyBitMSBFirst(key, d + 1), 0, "neighbour 0");
+            }
+        }
+    }
+
+    /// @notice For every bit position d in 0..255, a bitmask whose
+    ///         only set bit is d has `readBitmaskBit(bitmask, d) == 1`
+    ///         and `readBitmaskBit(bitmask, d') == 0` for d' != d.
+    ///         Exercises the full LSB-first-within-byte map.
+    function test_readBitmaskBit_exhaustive_single_bit() public view {
+        for (uint256 d = 0; d < 256; ++d) {
+            bytes memory bm = new bytes(32);
+            uint256 byteIdx = d / 8;
+            uint256 bitInByte = d % 8; // LSB-first; bitInByte in [0, 7]
+            uint256 shifted = uint256(1) << bitInByte; // shifted in [1, 128]
+            // shifted is in [1, 128], so casting to uint8 is safe.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bm[byteIdx] = bytes1(uint8(shifted));
+            assertEq(smt.readBitmaskBit(bm, d), 1, "single-bit bitmask reads 1");
+            if (d > 0) {
+                assertEq(smt.readBitmaskBit(bm, d - 1), 0, "neighbour 0");
+            }
+            if (d < 255) {
+                assertEq(smt.readBitmaskBit(bm, d + 1), 0, "neighbour 0");
+            }
+        }
     }
 
     /* ---------------------------------------------------------- */
